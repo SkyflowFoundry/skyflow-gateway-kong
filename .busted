@@ -1,0 +1,11 @@
+-- Busted runner config (docs/06). Run via `make test` or `pongo run`.
+return {
+  default = {
+    verbose = true,
+    coverage = false,
+    output = "gtest",
+    ["auto-insulate"] = true,
+    lpath = "plugin/?.lua;plugin/?/init.lua;kong/?.lua;kong/?/init.lua",
+    ROOT = { "spec/skyflow-deidentify" },
+  },
+}
