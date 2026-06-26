@@ -1,0 +1,71 @@
+# Konnect Hybrid demo — self-managed DATA PLANE (runs on YOUR machine).
+#
+# This DP connects to your Konnect control plane and runs the custom
+# skyflow-deidentify plugin (mounted from ../../plugin). It also brings up a
+# mock Skyflow Detect service and an echo upstream so you can demo end-to-end
+# without a real vault.
+#
+# Prereqs (see ./README.md):
+#   1. Create a hybrid control plane in Konnect and generate a data-plane cert.
+#   2. Put the cert/key in ./certs/tls.crt and ./certs/tls.key
+#   3. cp .env.example .env  and fill in the cluster endpoints from Konnect.
+#   4. Upload the custom plugin schema to the CP, then `deck gateway sync`
+#      ./deck/kong.yaml (see README).
+#   5. docker compose up -d
+#
+# The control plane / telemetry endpoints + certs come from Konnect — this file
+# only wires them in. Endpoints are templated from .env.
+
+services:
+  kong-dp:
+    image: ${KONG_GATEWAY_IMAGE:-kong/kong-gateway:3.11}
+    container_name: skyflow-kong-dp
+    environment:
+      KONG_ROLE: data_plane
+      KONG_DATABASE: "off"
+      KONG_KONNECT_MODE: "on"
+      KONG_VITALS: "off"
+      KONG_CLUSTER_MTLS: pki
+      KONG_CLUSTER_CONTROL_PLANE: ${KONNECT_CONTROL_PLANE_ENDPOINT}
+      KONG_CLUSTER_SERVER_NAME: ${KONNECT_CONTROL_PLANE_SERVER_NAME}
+      KONG_CLUSTER_TELEMETRY_ENDPOINT: ${KONNECT_TELEMETRY_ENDPOINT}
+      KONG_CLUSTER_TELEMETRY_SERVER_NAME: ${KONNECT_TELEMETRY_SERVER_NAME}
+      KONG_CLUSTER_CERT: /run/certs/tls.crt
+      KONG_CLUSTER_CERT_KEY: /run/certs/tls.key
+      KONG_LUA_SSL_TRUSTED_CERTIFICATE: system
+      # --- custom plugin wiring ---
+      KONG_PLUGINS: bundled,skyflow-deidentify
+      KONG_LUA_PACKAGE_PATH: /kong-plugins/?.lua;;
+      KONG_PROXY_LISTEN: 0.0.0.0:8000, 0.0.0.0:8443 ssl
+    volumes:
+      # repo `plugin/` dir -> package path root, so
+      # kong.plugins.skyflow-deidentify.{handler,schema} resolves
+      - ../../plugin:/kong-plugins:ro
+      - ./certs:/run/certs:ro
+    ports:
+      - "8000:8000"   # proxy (HTTP)  -> send demo traffic here
+      - "8443:8443"   # proxy (HTTPS)
+    restart: unless-stopped
+    depends_on:
+      - mock-skyflow
+      - echo
+
+  # Mock Skyflow Detect API (de-identify). The plugin points at this via
+  # config.skyflow_base_url_override = http://mock-skyflow:8080
+  mock-skyflow:
+    image: openresty/openresty:alpine
+    container_name: skyflow-mock
+    volumes:
+      - ./mock-skyflow/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    expose:
+      - "8080"
+
+  # Echo upstream — reflects back exactly what it received, so you can SEE that
+  # the upstream got tokens (not the original PII).
+  echo:
+    image: mendhak/http-https-echo:31
+    container_name: skyflow-echo
+    environment:
+      HTTP_PORT: "8080"
+    expose:
+      - "8080"

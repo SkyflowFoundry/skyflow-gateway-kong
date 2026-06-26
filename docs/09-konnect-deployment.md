@@ -111,6 +111,20 @@ testing) to confirm `Jane Doe` / `jane@acme.com` arrived as `[NAME_…]` /
 `[EMAIL_ADDRESS_…]`. Enable `dry_run=true` first to observe detections without
 altering traffic (see the rollout playbook in [`docs/08 §8.5`](08-operations.md#85-rollout-playbook)).
 
+## 9.5a Free path: self-managed (hybrid) data plane on Konnect
+
+Dedicated Cloud Gateways is a paid tier. To demo a custom plugin **on Konnect
+for free**, attach a **self-managed data plane** to a hybrid control plane: you
+run one Kong DP container, manage it from the Konnect UI, and the custom plugin
+runs because the DP is yours. (The free **Serverless** gateway cannot run custom
+plugins at all.)
+
+A ready-to-run kit lives in [`deploy/konnect-hybrid/`](../deploy/konnect-hybrid/):
+`docker-compose.yml` (DP + mock Skyflow + echo upstream), `deck/kong.yaml`
+(Service/Route/plugin), and a step-by-step `README.md`. The plugin's
+`require`-free `schema.lua` uploads cleanly to the control plane for hybrid
+config validation — the same 2-file shape used for Dedicated Cloud Gateways.
+
 ## 9.6 Test loop recommendation
 
 Fastest iteration is **local Docker Kong (self-managed)** with the in-repo
