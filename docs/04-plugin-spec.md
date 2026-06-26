@@ -12,11 +12,17 @@ implements this spec.
 | Plugin name | `skyflow-deidentify` |
 | Lua namespace | `kong.plugins.skyflow-deidentify.*` |
 | Priority (default) | `775` — runs in `access` **before** AI Proxy (770); below AI PII Sanitizer (776) |
-| Phases implemented | `init_worker`, `configure`, `access`, `response`, `log` |
-| Protocols | `http`, `https`, `grpc`, `grpcs`, `ws`, `wss` (default `http`,`https`) |
+| Phases implemented | `access`, `response`, `log` (the design also allows `init_worker`/`configure`; the Konnect single-file build omits them) |
+| Protocols | `http`, `https`, `grpc`, `grpcs`, `ws`, `wss` |
 | Scopes | global, Service, Route, Consumer, Consumer Group |
 | DB / DAOs | none (no custom entities, no migrations) |
-| External deps | `lua-resty-http`; `lua-resty-jwt` **only** if service-account auth is used |
+| External deps | `lua-resty-http`, `cjson` (runtime-provided). **No** `lua-resty-jwt` — API-key/static-token auth; service-account JWT (RS256 via `resty.openssl`) is a follow-up |
+
+> **Packaging:** the shipped build targets **Konnect Dedicated Cloud Gateways**,
+> which require two self-contained files. The module layout in §4.2 is the
+> *logical* design; physically, `auth`/`client`/`body`/`mapping` are inlined
+> into `handler.lua`, and `schema.lua` is `require`-free. See
+> [`docs/09`](09-konnect-deployment.md).
 
 > **Why `response` not `header_filter`+`body_filter`:** Kong forbids a plugin
 > from implementing `response` *and* `header_filter`/`body_filter`. We use

@@ -2,14 +2,15 @@
 # See docs/05 (implementation plan) and docs/06 (testing).
 
 PLUGIN := skyflow-deidentify
-VERSION := 0.1.0-1
+VERSION := 0.2.0-1
 
-.PHONY: help lint test unit integration e2e sandbox-smoke pack clean
+.PHONY: help lint unit-pure test unit integration e2e sandbox-smoke pack clean
 
 help:
 	@echo "Targets:"
 	@echo "  lint           luacheck the plugin + specs"
-	@echo "  test           full suite (unit + integration) against the mock Skyflow"
+	@echo "  unit-pure      offline algorithm tests (luajit only, no Kong/Docker)"
+	@echo "  test           full suite (unit-pure + Pongo integration) against the mock Skyflow"
 	@echo "  unit           busted unit specs only (no Kong, no network)"
 	@echo "  integration    Pongo integration specs (real Kong, mocked Skyflow HTTP)"
 	@echo "  e2e            docker-compose: Kong + mock Skyflow + echo upstream; run demo"
@@ -19,8 +20,12 @@ help:
 lint:
 	luacheck plugin spec *.rockspec
 
+# No Kong, no Docker: validates the pure path/mask/re-identify algorithms.
+unit-pure:
+	luajit spec/offline/pure_algorithms_test.lua
+
 # Hermetic: requires only Docker (Pongo). No Skyflow account needed.
-test: lint
+test: lint unit-pure
 	pongo run
 
 unit:

@@ -24,10 +24,15 @@ when policy allows.
                        └──────────────────────────────────────────────────┘
 ```
 
-> **Status:** Specification + reference skeleton (proof-of-concept). This
-> repository contains the full design and an implementation plan; the Lua under
-> [`plugin/`](plugin/) is an annotated reference skeleton that realizes the
-> spec, and [`spec/`](spec/) contains the test scaffolding.
+> **Status:** Functional de-identify MVP (proof-of-concept), packaged for
+> **Konnect Dedicated Cloud Gateways** as two self-contained files
+> ([`schema.lua`](plugin/kong/plugins/skyflow-deidentify/schema.lua) +
+> [`handler.lua`](plugin/kong/plugins/skyflow-deidentify/handler.lua)). The
+> request **de-identify** path and `mapping_only` **re-identify** are
+> implemented; `reidentify_text`/`detokenize` and service-account JWT auth are
+> documented follow-ups. Core algorithms have an offline test
+> (`make unit-pure`). See [`docs/09`](docs/09-konnect-deployment.md) for the
+> deployment target rationale and upload steps.
 
 ---
 
@@ -59,25 +64,30 @@ gateway pattern but is backed by the **Skyflow Data Privacy Vault**, which adds:
 | [`docs/06-testing.md`](docs/06-testing.md) | Unit / integration / e2e strategy, Pongo + busted, mocks, fixtures, conformance matrix, performance & security tests |
 | [`docs/07-security-and-governance.md`](docs/07-security-and-governance.md) | Threat model, data handling, RBAC/governance, compliance, logging & redaction |
 | [`docs/08-operations.md`](docs/08-operations.md) | Observability, caching, latency budget, rollout, decK/Konnect config examples |
+| [`docs/09-konnect-deployment.md`](docs/09-konnect-deployment.md) | **Konnect Dedicated Cloud Gateways** target: packaging constraints, 2-file build, upload & validate steps |
 
-## Reference skeleton
+## Plugin (Konnect-deployable 2-file build)
 
 ```
 plugin/kong/plugins/skyflow-deidentify/
-├── handler.lua     # Lifecycle phases: init_worker, configure, access, response, log
-├── schema.lua      # Full configuration schema (validated by Kong)
-├── auth.lua        # Skyflow bearer-token manager (API key / service-account JWT), cached
-├── client.lua      # Skyflow Detect REST client (deidentify / reidentify / detokenize)
-├── body.lua        # Body parsing + content targeting (LLM/MCP/JSONPath profiles)
-├── mapping.lua     # Per-request token↔value mapping store (request-scoped)
-└── skyflow-deidentify-0.1.0-1.rockspec
+├── schema.lua      # Config contract — require-free (Konnect upload constraint)
+├── handler.lua     # Self-contained: auth + Skyflow Detect client + JSONPath-lite
+│                   #   body targeting + de-identify + mapping_only re-identify
+└── skyflow-deidentify-0.2.0-1.rockspec   # self-managed / local installs only
 
-spec/skyflow-deidentify/
-├── 01-schema_spec.lua      # Schema validation unit tests
-├── 02-access_spec.lua      # Request de-identify integration tests
-├── 03-response_spec.lua    # Response re-identify integration tests
-└── helpers/mock_skyflow.lua# In-process mock of the Skyflow Detect API
+spec/
+├── offline/pure_algorithms_test.lua      # runs under luajit — no Kong/Docker
+└── skyflow-deidentify/
+    ├── 01-schema_spec.lua                 # schema validation (busted)
+    ├── 02-access_spec.lua                 # request de-identify (Pongo, skeleton)
+    ├── 03-response_spec.lua               # response re-identify (Pongo, skeleton)
+    └── helpers/mock_skyflow.lua           # in-process Skyflow Detect mock + faults
 ```
+
+The logical module decomposition (auth/client/body/mapping) is described in
+[`docs/02`](docs/02-architecture.md#22-module-decomposition); it is physically
+inlined into `handler.lua` to satisfy the Dedicated Cloud Gateways "two
+self-contained files" rule ([`docs/09`](docs/09-konnect-deployment.md)).
 
 ## Quickstart (target developer experience)
 
