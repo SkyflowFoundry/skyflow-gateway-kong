@@ -43,13 +43,21 @@ with the **control-plane** and **telemetry** endpoints.
 - `cp .env.example .env` and copy the four endpoint values from that command
   into `.env` (the `cp0`/`tp0` hostnames and `:443`).
 
-### 3. Upload the custom plugin to the control plane
-Control plane → **Plugins** → **Custom Plugins** → **New**. Upload both files:
+### 3. Register the custom plugin schema on the control plane
+Control plane → **Plugins** → **Custom Plugins** → **New**. Upload **only the
+schema**:
 - `../../plugin/kong/plugins/skyflow-deidentify/schema.lua`  (it's `require`-free, as Konnect requires)
-- `../../plugin/kong/plugins/skyflow-deidentify/handler.lua`
 
-This registers the plugin so the control plane will accept its config. (The
-handler also executes on your DP because compose mounts the `plugin/` dir.)
+That is all Konnect needs in **hybrid** mode — the schema lets the control plane
+validate the plugin's config. **There is no `handler.lua` upload here**: in
+hybrid, the handler runs on *your* data plane, delivered by the `../../plugin`
+volume mount in `docker-compose.yml` (plus `KONG_PLUGINS=bundled,skyflow-deidentify`).
+Uploading the handler to Konnect only applies to **Dedicated Cloud Gateways**,
+where Kong runs the data plane for you.
+
+> Registering the schema just makes `skyflow-deidentify` a *known* plugin.
+> Attaching it to a route with settings (the "configuration") happens in step 5
+> via `deck sync` — that is separate, and not a prerequisite for this step.
 
 ### 4. Start the data plane + demo services
 ```bash
