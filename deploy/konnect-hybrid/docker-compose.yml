@@ -18,7 +18,7 @@
 
 services:
   kong-dp:
-    image: ${KONG_GATEWAY_IMAGE:-kong/kong-gateway:3.11}
+    image: ${KONG_GATEWAY_IMAGE:-kong/kong-gateway:3.14}
     container_name: skyflow-kong-dp
     environment:
       KONG_ROLE: data_plane
@@ -33,6 +33,9 @@ services:
       KONG_CLUSTER_CERT: /run/certs/tls.crt
       KONG_CLUSTER_CERT_KEY: /run/certs/tls.key
       KONG_LUA_SSL_TRUSTED_CERTIFICATE: system
+      KONG_TLS_CERTIFICATE_VERIFY: "off"
+      # Must match the control plane's router flavor (Konnect 3.14 -> expressions)
+      KONG_ROUTER_FLAVOR: ${KONG_ROUTER_FLAVOR:-expressions}
       # --- custom plugin wiring ---
       KONG_PLUGINS: bundled,skyflow-deidentify
       KONG_LUA_PACKAGE_PATH: /kong-plugins/?.lua;;
