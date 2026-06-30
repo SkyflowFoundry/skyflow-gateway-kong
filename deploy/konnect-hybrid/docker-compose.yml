@@ -30,8 +30,8 @@ services:
       KONG_CLUSTER_SERVER_NAME: ${KONNECT_CONTROL_PLANE_SERVER_NAME}
       KONG_CLUSTER_TELEMETRY_ENDPOINT: ${KONNECT_TELEMETRY_ENDPOINT}
       KONG_CLUSTER_TELEMETRY_SERVER_NAME: ${KONNECT_TELEMETRY_SERVER_NAME}
-      KONG_CLUSTER_CERT: /run/certs/tls.crt
-      KONG_CLUSTER_CERT_KEY: /run/certs/tls.key
+      KONG_CLUSTER_CERT: /kong-certs/tls.crt
+      KONG_CLUSTER_CERT_KEY: /kong-certs/tls.key
       KONG_LUA_SSL_TRUSTED_CERTIFICATE: system
       KONG_TLS_CERTIFICATE_VERIFY: "off"
       # Must match the control plane's router flavor (Konnect 3.14 -> expressions)
@@ -44,7 +44,7 @@ services:
       # repo `plugin/` dir -> package path root, so
       # kong.plugins.skyflow-deidentify.{handler,schema} resolves
       - ../../plugin:/kong-plugins:ro
-      - ./certs:/run/certs:ro
+      - ./certs:/kong-certs:ro
     ports:
       # If 8000/8443 are taken on your host, set PROXY_HTTP_PORT / PROXY_HTTPS_PORT
       # in .env (then use that port in the demo curl).

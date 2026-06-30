@@ -101,6 +101,7 @@ key in anything beyond a throwaway demo.)
 | --- | --- |
 | `Bind for 0.0.0.0:8000 failed: port is already allocated` | Something else holds the port. Free it (`lsof -i :8000`, or stop the other container), or set `PROXY_HTTP_PORT`/`PROXY_HTTPS_PORT` in `.env` and re-run. |
 | `WARN ... KONNECT_* variable is not set` | You have no `.env` (or it's missing those keys). `cp .env.example .env` and fill the four endpoints from Konnect's "new data plane node" command. Without them the DP can't join the control plane. |
+| `cluster_cert: failed loading certificate ...` | The file at the mount (`certs/tls.crt`) is missing/empty or malformed PEM — usually literal `\n` instead of real line breaks (from copying the `-e KONG_CLUSTER_CERT=` value). Re-save clean PEM from Konnect's separate **Certificate**/**Private key** boxes via a quoted heredoc (`cat > certs/tls.crt <<'EOF'`), or `printf '%b' "$VAL" > certs/tls.crt`. Verify: `openssl x509 -in certs/tls.crt -noout -subject`. Then `docker compose up -d`. |
 | DP won't connect / TLS errors | Re-check the four `.env` endpoints and that `certs/tls.crt`+`tls.key` are the ones Konnect generated. |
 | `deck sync`: "plugin 'skyflow-deidentify' not found" | Do step 3 (upload the custom plugin) before syncing. |
 | Plugin not loading on DP | Confirm `KONG_PLUGINS=bundled,skyflow-deidentify` and the `../../plugin` mount; check `docker compose logs kong-dp`. |
