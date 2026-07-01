@@ -389,6 +389,7 @@ local function run_access(conf, ctx)
     -- entities[] shape); reidentify_text resolves via the vault and must not be
     -- gated on that map.
     ctx.deidentified = true
+    kong.log.notice("skyflow: access de-identified request; tokens sent upstream, buffering response")
   end
 
   -- Buffer the response if we will re-identify it.
@@ -422,6 +423,10 @@ function SkyflowDeidentify:access(conf)
 end
 
 function SkyflowDeidentify:response(conf)
+  kong.log.notice("skyflow: response phase invoked (enabled=", tostring(conf.reidentify.enabled),
+                  " strat=", tostring(conf.reidentify.strategy),
+                  " deidentified=", tostring((kong.ctx.plugin or {}).deidentified),
+                  " status=", tostring(kong.service.response.get_status()), ")")
   if not conf.reidentify.enabled then return end
 
   local strat = conf.reidentify.strategy
