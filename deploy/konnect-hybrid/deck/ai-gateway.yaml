@@ -1,0 +1,78 @@
+# Konnect AI Gateway via decK — chains skyflow-deidentify with ai-proxy so the
+# LLM only ever sees tokens, and the client gets real values back.
+#
+# ⚠️  `deck gateway sync <file>` makes the control plane match THIS FILE exactly
+#     and DELETES anything not in it. So this file is the FULL desired state
+#     (it also keeps the echo /demo/chat route). Sync ONE file at a time.
+#
+# Sync:
+#   export KONNECT_PAT=kpat_...
+#   export DECK_OPENAI_API_KEY=sk-...        # decK only reads DECK_-prefixed env vars
+#   deck gateway sync --konnect-token "$KONNECT_PAT" \
+#     --konnect-control-plane-name skyflow-hybrid \
+#     deploy/konnect-hybrid/deck/ai-gateway.yaml
+#
+# Demo (do NOT set "stream": true — re-identify needs a buffered response):
+#   curl -s localhost:8000/ai/chat -H 'Content-Type: application/json' \
+#     -d '{"messages":[{"role":"user","content":"Reply to Jane Doe at jane@acme.com"}]}' | jq .
+#
+# Flow: client -> skyflow-deidentify (de-id, prio 775) -> ai-proxy (prio 770,
+# sends tokenized prompt to the LLM) -> LLM -> skyflow-deidentify response phase
+# (re-identify) -> client. Uses the mock Skyflow for de-id; re-identify is
+# mapping_only (no vault call).
+
+_format_version: "3.0"
+
+services:
+  # 1) Original echo demo (de-identify only) — kept so sync doesn't delete it.
+  - name: demo-llm
+    url: http://echo:8080
+    routes:
+      - name: chat
+        paths: ["/demo/chat"]
+        strip_path: true
+    plugins:
+      - name: skyflow-deidentify
+        config:
+          vault_id: demo-vault
+          cluster_id: demo
+          skyflow_base_url_override: "http://mock-skyflow:8080"
+          credentials: { api_key: "demo-key" }
+          profile: openai
+          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD], token_format: VAULT_TOKEN }
+          reidentify:
+            enabled: true
+            strategy: mapping_only
+            default_treatment: plain_text
+            entity_treatment: { CREDIT_CARD: masked, SSN: redacted }
+          on_skyflow_error: deny
+
+  # 2) AI Gateway: de-identify -> ai-proxy -> real LLM -> re-identify back.
+  - name: ai
+    url: http://localhost:32000   # placeholder; ai-proxy overrides the upstream
+    routes:
+      - name: ai-chat
+        paths: ["/ai/chat"]
+        strip_path: true
+    plugins:
+      - name: skyflow-deidentify         # priority 775 -> runs BEFORE ai-proxy (770)
+        config:
+          vault_id: demo-vault
+          cluster_id: demo
+          skyflow_base_url_override: "http://mock-skyflow:8080"
+          credentials: { api_key: "demo-key" }
+          profile: openai
+          # ENTITY_UNQ_COUNTER (NAME_1) survives LLM round-trips better than random tokens,
+          # so mapping_only restore lands reliably.
+          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: ENTITY_UNQ_COUNTER }
+          reidentify: { enabled: true, strategy: mapping_only, default_treatment: plain_text }
+          on_skyflow_error: deny
+      - name: ai-proxy
+        config:
+          route_type: "llm/v1/chat"
+          model:
+            provider: openai
+            name: gpt-4o-mini
+          auth:
+            header_name: Authorization
+            header_value: 'Bearer ${{ env "DECK_OPENAI_API_KEY" }}'

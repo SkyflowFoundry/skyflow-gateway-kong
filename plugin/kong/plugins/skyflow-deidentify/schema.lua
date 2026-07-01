@@ -1,25 +1,29 @@
 -- kong.plugins.skyflow-deidentify.schema
 --
--- Configuration contract for the Skyflow De-identify plugin.
--- See docs/04-plugin-spec.md §4.3 for the field-by-field reference.
+-- Konnect Dedicated Cloud Gateways build.
 --
--- This is the reference schema that realizes the spec. It is written to be
--- loadable by Kong; entity checks that rely on nested (dotted) field
--- references require Kong 3.x. Items that must be validated against a live
--- tenant are noted in docs/03-skyflow-integration.md.
-
-local typedefs = require "kong.db.schema.typedefs"
+-- Konnect custom-plugin upload constraints honored here:
+--   * NO `require()` statements (typedefs are inlined below).
+--   * Self-contained: custom_entity_check fns use only the entity table + basic
+--     Lua (no os.*, no globals, no requires).
+--   * Pairs with a self-contained handler.lua; no extra modules/DAOs/migrations.
+--
+-- See docs/04-plugin-spec.md §4.3 for the field reference and docs/08 for the
+-- Konnect upload steps.
 
 local TOKEN_FORMATS = { "VAULT_TOKEN", "ENTITY_ONLY", "ENTITY_UNQ_COUNTER" }
 local PROFILES      = { "openai", "anthropic", "mcp", "generic" }
 local ENVS          = { "PROD", "SANDBOX", "DEV", "STAGE" }
 local TREATMENTS    = { "plain_text", "masked", "redacted" }
-local STRATEGIES    = { "reidentify_text", "detokenize", "mapping_only" }
-local STREAMING     = { "buffer", "passthrough", "reassemble" }
+-- mapping_only is the strategy implemented in this build; reidentify_text /
+-- detokenize are accepted but degrade to return_tokenized until implemented
+-- (see handler.lua / docs/03 §3.5).
+local STRATEGIES    = { "mapping_only", "reidentify_text", "detokenize" }
+-- 'reassemble' streaming is a self-managed-only future option; omitted here so
+-- it cannot be selected on the cloud build (avoids os.* in schema validation).
+local STREAMING     = { "buffer", "passthrough" }
+local PROTOCOLS     = { "http", "https", "grpc", "grpcs", "ws", "wss" }
 
--- credentials: exactly one of api_key | token | service_account_json.
--- All secret-bearing fields are referenceable (so `{vault://...}` works) and
--- marked encrypted so they are never returned in plaintext by the Admin API.
 local credentials = {
   type = "record",
   required = true,
@@ -61,7 +65,7 @@ local reidentify = {
   type = "record",
   fields = {
     { enabled  = { type = "boolean", default = false } },
-    { strategy = { type = "string", one_of = STRATEGIES, default = "reidentify_text" } },
+    { strategy = { type = "string", one_of = STRATEGIES, default = "mapping_only" } },
     { entity_treatment = { type = "map", keys = { type = "string" },
                            values = { type = "string", one_of = TREATMENTS }, default = {} } },
     { default_treatment = { type = "string", one_of = TREATMENTS, default = "plain_text" } },
@@ -73,9 +77,12 @@ local reidentify = {
 return {
   name = "skyflow-deidentify",
   fields = {
-    -- This plugin acts on HTTP-family protocols (and gRPC/WS where a JSON/text
-    -- body applies). Stream (tcp/udp) is not applicable.
-    { protocols = typedefs.protocols_http },
+    -- protocols (inlined; equivalent to typedefs.protocols_http)
+    { protocols = {
+        type = "set", required = true,
+        default = { "grpc", "grpcs", "http", "https" },
+        elements = { type = "string", one_of = PROTOCOLS },
+    } },
     { config = {
         type = "record",
         fields = {
@@ -84,7 +91,7 @@ return {
           { cluster_id = { type = "string", required = true } },
           { account_id = { type = "string" } },
           { env = { type = "string", one_of = ENVS, default = "PROD" } },
-          { skyflow_base_url_override = typedefs.url { required = false } },
+          { skyflow_base_url_override = { type = "string" } },
           { credentials = credentials },
           { token_skew_seconds = { type = "integer", default = 300, between = { 0, 3600 } } },
 
@@ -122,7 +129,6 @@ return {
         },
 
         entity_checks = {
-          -- deadline must cover at least one attempt
           { custom_entity_check = {
               field_sources = { "timeout_ms", "deadline_ms" },
               fn = function(entity)
@@ -134,13 +140,11 @@ return {
               end,
           } },
 
-          -- one-way tokens cannot be re-identified from the request mapping
           { conditional = {
               if_field = "reidentify.strategy", if_match = { eq = "mapping_only" },
               then_field = "deidentify.token_format", then_match = { ne = "ENTITY_ONLY" },
           } },
 
-          -- generic profile needs explicit targeting (paths) unless treated as text
           { custom_entity_check = {
               field_sources = { "profile", "request_json_paths", "content_type" },
               fn = function(entity)
@@ -148,19 +152,6 @@ return {
                    and entity.content_type ~= "text"
                    and (not entity.request_json_paths or #entity.request_json_paths == 0) then
                   return nil, "profile 'generic' requires request_json_paths or content_type=text"
-                end
-                return true
-              end,
-          } },
-
-          -- 'reassemble' streaming is experimental; gate behind an env opt-in
-          { custom_entity_check = {
-              field_sources = { "reidentify.streaming" },
-              fn = function(entity)
-                if entity.reidentify and entity.reidentify.streaming == "reassemble"
-                   and os.getenv("SKYFLOW_ENABLE_REASSEMBLE") ~= "1" then
-                  return nil, "reidentify.streaming='reassemble' is experimental; "
-                              .. "set SKYFLOW_ENABLE_REASSEMBLE=1 to enable"
                 end
                 return true
               end,

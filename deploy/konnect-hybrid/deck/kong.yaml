@@ -1,0 +1,45 @@
+# decK config for the demo Service/Route + skyflow-deidentify plugin.
+# Synced to your Konnect CONTROL PLANE (not mounted on the DP):
+#
+#   deck gateway sync \
+#     --konnect-token "$KONNECT_PAT" \
+#     --konnect-control-plane-name "skyflow-hybrid" \
+#     deploy/konnect-hybrid/deck/kong.yaml
+#
+# Prereq: upload the custom plugin SCHEMA to the control plane first (see
+# README), otherwise sync fails with "plugin 'skyflow-deidentify' not found".
+#
+# The service/upstream hostnames (echo, mock-skyflow) resolve on the DP's
+# docker network from docker-compose.yml.
+
+_format_version: "3.0"
+
+services:
+  - name: demo-llm
+    url: http://echo:8080
+    routes:
+      - name: chat
+        paths:
+          - /demo/chat
+        strip_path: true
+    plugins:
+      - name: skyflow-deidentify
+        config:
+          vault_id: demo-vault
+          cluster_id: demo
+          # point the plugin at the mock Skyflow in the compose network
+          skyflow_base_url_override: "http://mock-skyflow:8080"
+          credentials:
+            api_key: "demo-key"
+          profile: openai
+          deidentify:
+            entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]
+            token_format: VAULT_TOKEN
+          reidentify:
+            enabled: true
+            strategy: mapping_only
+            default_treatment: plain_text
+            entity_treatment:
+              CREDIT_CARD: masked
+              SSN: redacted
+          on_skyflow_error: deny
