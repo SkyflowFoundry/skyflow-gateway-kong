@@ -55,10 +55,16 @@ response text span to:
 ```json
 { "text": "... <vault_token> ...", "vault_id": "<vault_id>" }
 ```
-Expected back (handler reads `data.processed_text`, falls back to `data.text`):
+Returns the result under **`text`** (note: de-id uses `processed_text`, re-id uses
+`text` — the handler reads `data.processed_text or data.text`, so both work):
 ```json
-{ "processed_text": "... Jane Doe ..." }
+{ "text": "... Jane Doe ..." }
 ```
+
+> ⚠️ **Permissions:** re-identify *detokenizes*, which needs the reidentify/
+> detokenize permission — **separate from de-identify**. A key that can de-identify
+> can still get `403 "Detokenization failed. Insufficient permissions."` on
+> re-identify. Grant the reidentify/detokenize permission to the same role.
 
 **Probe it** — paste a real token from the de-id probe above:
 ```bash

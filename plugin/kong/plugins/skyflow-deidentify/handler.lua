@@ -384,6 +384,11 @@ local function run_access(conf, ctx)
     end
     kong.service.request.set_raw_body(newbody)
     kong.service.request.set_header("Content-Length", #newbody)
+    -- Tokens went upstream -> the response is re-identifiable. This flag is
+    -- independent of `by_token` (whose population depends on parsing the Detect
+    -- entities[] shape); reidentify_text resolves via the vault and must not be
+    -- gated on that map.
+    ctx.deidentified = true
   end
 
   -- Buffer the response if we will re-identify it.
@@ -431,10 +436,16 @@ function SkyflowDeidentify:response(conf)
   end
 
   local ctx = kong.ctx.plugin
-  local by_token = ctx.mapping
-  -- If de-identify created no tokens, there is nothing to restore. (Also skips
-  -- an unnecessary Skyflow round-trip for reidentify_text.)
-  if not by_token or not next(by_token) then return end
+  local by_token = ctx.mapping or {}
+  -- Gate per strategy. mapping_only substitutes from the request-scoped map, so
+  -- it needs a non-empty map. reidentify_text resolves tokens via the vault and
+  -- must NOT depend on that map (it can be empty even when de-identification
+  -- happened) -- gate only on whether tokens actually went upstream.
+  if strat == "mapping_only" then
+    if not next(by_token) then return end
+  elseif not ctx.deidentified then
+    return
+  end
 
   local status = kong.service.response.get_status()
   if not status or status < 200 or status >= 300 then return end
@@ -474,7 +485,10 @@ function SkyflowDeidentify:response(conf)
   local call_err
   local ok = pcall(function()
     local raw = kong.service.response.get_raw_body()
-    if not raw or raw == "" then return end
+    if not raw or raw == "" then
+      kong.log.notice("skyflow reidentify: no buffered response body (enable_buffering not applied?); skipping")
+      return
+    end
 
     local ct = kong.service.response.get_header("Content-Type")
     local newbody
@@ -482,7 +496,11 @@ function SkyflowDeidentify:response(conf)
       local doc = cjson.decode(raw)
       if doc == nil then return end
       local spans = collect_spans(doc, effective_paths(conf, "response"))
-      if #spans == 0 then return end
+      if #spans == 0 then
+        kong.log.notice("skyflow reidentify: 0 response spans matched the '", conf.profile,
+                        "' profile paths; skipping")
+        return
+      end
       for _, span in ipairs(spans) do
         local restored, rerr = restore(span.text)
         if not restored then call_err = rerr; return end
@@ -498,6 +516,7 @@ function SkyflowDeidentify:response(conf)
     if newbody then
       kong.response.set_raw_body(newbody)
       kong.response.set_header("Content-Length", #newbody)
+      kong.log.notice("skyflow reidentify: restored response via ", strat)
     end
   end)
 
