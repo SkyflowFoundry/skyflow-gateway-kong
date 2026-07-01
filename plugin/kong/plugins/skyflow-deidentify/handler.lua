@@ -218,21 +218,30 @@ local function skyflow_post(conf, authz, path, payload, deadline)
   return nil, last_err or "skyflow request failed"
 end
 
+-- Skyflow Detect enums are lowercase on the wire (e.g. name, email_address,
+-- entity_unq_counter); config uses uppercase for readability, so downcase here.
+local function lower_list(t)
+  if not t or #t == 0 then return nil end
+  local out = {}
+  for i = 1, #t do out[i] = string.lower(t[i]) end
+  return out
+end
+
 -- De-identify one text -> processed_text, entities[] (or nil, err).
 local function deidentify_text(conf, authz, text, deadline)
   local d = conf.deidentify
   local payload = {
     text = text,
     vault_id = conf.vault_id,
-    entities = (#d.entities > 0) and d.entities or nil,
-    token_type = { default = d.token_format },
+    entity_types = lower_list(d.entities),
+    token_type = { default = string.lower(d.token_format) },
     allow_regex_list = (#d.allow_regex > 0) and d.allow_regex or nil,
     restrict_regex_list = (#d.restrict_regex > 0) and d.restrict_regex or nil,
   }
   if d.shift_dates and d.shift_dates.enabled then
     payload.transformations = { shift_dates = {
       min_days = d.shift_dates.min_days, max_days = d.shift_dates.max_days,
-      entities = d.shift_dates.entities } }
+      entities = lower_list(d.shift_dates.entities) } }
   end
   local data, err = skyflow_post(conf, authz, "/v1/detect/deidentify/string", payload, deadline)
   if not data then return nil, err end
@@ -337,8 +346,11 @@ local function run_access(conf, ctx)
     span.processed = processed
     for _, e in ipairs(ents) do
       if e.token then
-        by_token[e.token] = { value = e.value, entity = e.entity }
-        counts[e.entity or "?"] = (counts[e.entity or "?"] or 0) + 1
+        -- Detect returns the class as `entity_type` (e.g. "NAME"); keep the
+        -- internal field `entity` that reidentify/treatment lookups expect.
+        local etype = e.entity_type or e.entity
+        by_token[e.token] = { value = e.value, entity = etype }
+        counts[etype or "?"] = (counts[etype or "?"] or 0) + 1
       end
     end
   end

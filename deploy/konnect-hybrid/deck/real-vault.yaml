@@ -1,8 +1,7 @@
 # Production-shaped: real Skyflow vault (no mock) + ai-proxy to a real LLM.
 #
-# ⚠️  BEFORE syncing, verify the live Detect API matches the plugin's client
-#     (see VERIFY-DETECT.md) — those field names are unverified against a real
-#     vault. Fix handler.lua if they differ, then sync.
+# The plugin's Detect client is verified against a live vault (see VERIFY-DETECT.md
+# for the exact request/response contract).
 #
 # ⚠️  `deck gateway sync` deletes anything not in this file. This file defines
 #     ONLY the real AI route, so syncing it REPLACES the demo/echo routes.
