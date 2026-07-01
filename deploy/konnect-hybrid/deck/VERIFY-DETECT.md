@@ -1,8 +1,8 @@
-# Verify the real Skyflow Detect API before going off the mock
+# Skyflow Detect API contract (verified against a live vault 2026-07-01)
 
-The mock accepted whatever we sent, so `handler.lua`'s Detect request/response
-field names are **unverified against a live vault**. Do this ~10-min check first;
-if anything differs, make the small edits noted below.
+`handler.lua` was originally built against the mock, which accepted anything —
+its field names were wrong. The real contract below is now verified and the
+handler matches it. Keep this as the reference if you touch `deidentify_text()`.
 
 ## 1. What the plugin sends
 `POST https://<cluster_id>.vault.skyflowapis.com/v1/detect/deidentify/string`
@@ -15,18 +15,20 @@ Content-Type: application/json
 {
   "text": "...",
   "vault_id": "<vault_id>",
-  "entities": ["NAME","EMAIL_ADDRESS"],
-  "token_type": { "default": "ENTITY_UNQ_COUNTER" }
+  "entity_types": ["name","email_address"],
+  "token_type": { "default": "entity_unq_counter" }
 }
 ```
 
 ## 2. What the plugin expects back
 ```json
 { "processed_text": "... [NAME_1] ...",
-  "entities": [ { "token": "NAME_1", "value": "Jane Doe", "entity": "NAME" } ] }
+  "entities": [ { "token": "NAME_1", "value": "Jane Doe", "entity_type": "NAME" } ] }
 ```
-It reads `data.processed_text` and `data.entities[].{token,value,entity}`
-(see `handler.lua` → `deidentify_text()`).
+It reads `data.processed_text` and `data.entities[].{token,value,entity_type}`
+(see `handler.lua` → `deidentify_text()` / the access loop). Enum values
+(`entity_types`, `token_type.default`) are **lowercase on the wire**; config
+uses uppercase for readability and the handler downcases at send time.
 
 ## 3. Probe the live API
 ```bash
