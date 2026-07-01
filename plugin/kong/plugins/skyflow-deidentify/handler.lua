@@ -398,14 +398,21 @@ local function run_access(conf, ctx)
     kong.log.notice("skyflow: access de-identified request; tokens sent upstream, buffering response")
   end
 
-  -- Buffer the response if we will re-identify it.
-  if conf.reidentify.enabled and conf.reidentify.streaming ~= "passthrough" then
+  -- Buffer the response so it can be re-identified -- either by THIS plugin's
+  -- own response phase, or by a downstream skyflow-reidentify plugin (used when
+  -- chaining AFTER ai-proxy, where this plugin is configured de-id only). We
+  -- enable it whenever we actually de-identified, independent of our own
+  -- reidentify setting, so the downstream plugin has a buffered body to read.
+  if ctx.deidentified and conf.reidentify.streaming ~= "passthrough" then
     -- Prefer an uncompressed response so the response phase can parse it. Only a
     -- hint -- some upstreams (e.g. ai-proxy's own call) compress anyway, so the
     -- response phase also inflates gzip defensively.
     kong.service.request.clear_header("Accept-Encoding")
     kong.service.request.enable_buffering()
   end
+  -- Signal a downstream skyflow-reidentify plugin (kong.ctx.shared is shared
+  -- across plugins for the request); it only re-identifies when we de-identified.
+  kong.ctx.shared.skyflow_deidentified = ctx.deidentified or false
 
   return { ok = true }
 end

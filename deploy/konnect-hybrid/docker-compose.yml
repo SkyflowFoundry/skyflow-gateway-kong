@@ -38,7 +38,7 @@ services:
       # Must match the control plane's router flavor (Konnect 3.14 -> expressions)
       KONG_ROUTER_FLAVOR: ${KONG_ROUTER_FLAVOR:-expressions}
       # --- custom plugin wiring ---
-      KONG_PLUGINS: bundled,skyflow-deidentify
+      KONG_PLUGINS: bundled,skyflow-deidentify,skyflow-reidentify
       KONG_LUA_PACKAGE_PATH: /kong-plugins/?.lua;;
       KONG_PROXY_LISTEN: 0.0.0.0:8000, 0.0.0.0:8443 ssl
     volumes:

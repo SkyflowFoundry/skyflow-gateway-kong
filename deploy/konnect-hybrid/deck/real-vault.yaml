@@ -9,10 +9,12 @@
 # Two routes:
 #   /vault/chat  -> skyflow-deidentify ONLY, upstream = mock-llm (no ai-proxy).
 #                   Proves the real-vault de-id -> LLM -> re-id round-trip.
-#   /ai/chat     -> skyflow-deidentify + ai-proxy to a real LLM. NOTE: re-id on
-#                   this route currently collides with ai-proxy's response
-#                   transform (plugin priority runs us before ai-proxy in the
-#                   response phase). Use /vault/chat to see re-id working today.
+#   /ai/chat     -> skyflow-deidentify (de-id only) + ai-proxy to a real LLM +
+#                   skyflow-reidentify (re-id, priority 760 < ai-proxy 770 so it
+#                   runs AFTER ai-proxy). Full de-id + re-id round-trip via a
+#                   real LLM. (skyflow-reidentify is a SECOND custom plugin --
+#                   upload its schema.lua to the control plane once, like the
+#                   first; see README.)
 #
 # Sync:
 #   export KONNECT_PAT=kpat_...
@@ -50,6 +52,9 @@ services:
         paths: ["/ai/chat"]
         strip_path: true
     plugins:
+      # 1) De-identify the request (runs before ai-proxy). In-plugin re-id is OFF
+      #    here -- the separate skyflow-reidentify plugin handles the response so
+      #    it runs AFTER ai-proxy.
       - name: skyflow-deidentify
         config:
           vault_id: '${{ env "DECK_SKYFLOW_VAULT_ID" }}'
@@ -60,10 +65,9 @@ services:
           # VAULT_TOKEN stores each value<->token pair in the vault, so it can be
           # re-identified server-side later (ENTITY_* tokens can't be).
           deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
-          # reidentify_text resolves the vault tokens the LLM echoes back via
-          # Skyflow /v1/detect/reidentify/string -- true vault-backed round-trip.
-          reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
+          reidentify: { enabled: false }
           on_skyflow_error: deny
+      # 2) ai-proxy calls the real LLM (sees only tokens).
       - name: ai-proxy
         config:
           route_type: "llm/v1/chat"
@@ -73,3 +77,12 @@ services:
           auth:
             header_name: Authorization
             header_value: 'Bearer ${{ env "DECK_OPENAI_API_KEY" }}'
+      # 3) Re-identify the LLM response (priority 760 < ai-proxy 770 -> runs after
+      #    ai-proxy has produced the final body). Vault-backed via reidentify/string.
+      - name: skyflow-reidentify
+        config:
+          vault_id: '${{ env "DECK_SKYFLOW_VAULT_ID" }}'
+          cluster_id: '${{ env "DECK_SKYFLOW_CLUSTER_ID" }}'
+          credentials: { api_key: '${{ env "DECK_SKYFLOW_API_KEY" }}' }
+          profile: openai
+          on_error: return_tokenized
