@@ -1,20 +1,20 @@
-# Production-shaped: real Skyflow vault (no mock) + ai-proxy to a real LLM.
+# Real Skyflow vault + real LLM. NO ai-proxy.
 #
-# The plugin's Detect client is verified against a live vault (see VERIFY-DETECT.md
-# for the exact request/response contract).
+# Why no ai-proxy: ai-proxy's response handling is incompatible with the buffered
+# response our re-identify needs -- the client gets "no response body found when
+# transforming response" even with re-id split into its own lower-priority
+# plugin (ai-proxy fails regardless of ordering). So both routes use the SAME
+# proven path: skyflow-deidentify does de-id (request) AND re-id (response). For
+# a real LLM we route straight to OpenAI and inject the API key with the bundled
+# request-transformer plugin.
 #
-# ⚠️  `deck gateway sync` deletes anything not in this file. This file defines
-#     BOTH routes below, so syncing it REPLACES the demo/echo routes.
+# ⚠️  `deck gateway sync` deletes anything not in this file. This file is the full
+#     desired state (both routes below).
 #
 # Two routes:
-#   /vault/chat  -> skyflow-deidentify ONLY, upstream = mock-llm (no ai-proxy).
-#                   Proves the real-vault de-id -> LLM -> re-id round-trip.
-#   /ai/chat     -> skyflow-deidentify (de-id only) + ai-proxy to a real LLM +
-#                   skyflow-reidentify (re-id, priority 760 < ai-proxy 770 so it
-#                   runs AFTER ai-proxy). Full de-id + re-id round-trip via a
-#                   real LLM. (skyflow-reidentify is a SECOND custom plugin --
-#                   upload its schema.lua to the control plane once, like the
-#                   first; see README.)
+#   /vault/chat  -> upstream = mock-llm (no external LLM needed). Cleanest proof.
+#   /ai/chat     -> upstream = api.openai.com (real GPT reply). Include "model"
+#                   in the request body (the demo curl below does).
 #
 # Sync:
 #   export KONNECT_PAT=kpat_...
@@ -23,11 +23,19 @@
 #   deck gateway sync --konnect-token "$KONNECT_PAT" \
 #     --konnect-control-plane-name skyflow-hybrid \
 #     deploy/konnect-hybrid/deck/real-vault.yaml
+#
+# Demo:
+#   /vault/chat (mock LLM):
+#     curl -s localhost:8000/vault/chat -H 'content-type: application/json' \
+#       -d '{"messages":[{"role":"user","content":"Hi my name is Joe McCarron"}]}' | jq .
+#   /ai/chat (real OpenAI -- note the "model" field):
+#     curl -s localhost:8000/ai/chat -H 'content-type: application/json' \
+#       -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi my name is Joe McCarron"}]}' | jq .
 
 _format_version: "3.0"
 
 services:
-  # Real vault, no ai-proxy: the clean end-to-end de-id + re-id proof.
+  # Mock LLM upstream -- proves the round-trip with no external dependency.
   - name: vault-chat
     url: http://mock-llm:8080
     routes:
@@ -45,16 +53,16 @@ services:
           reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
           on_skyflow_error: deny
 
+  # Real LLM upstream (OpenAI, direct). Same plugin does de-id + re-id; the
+  # bundled request-transformer injects the OpenAI Authorization header so the
+  # client never holds the key.
   - name: ai
-    url: http://localhost:32000   # placeholder; ai-proxy overrides the upstream
+    url: https://api.openai.com/v1/chat/completions
     routes:
       - name: ai-chat
         paths: ["/ai/chat"]
         strip_path: true
     plugins:
-      # 1) De-identify the request (runs before ai-proxy). In-plugin re-id is OFF
-      #    here -- the separate skyflow-reidentify plugin handles the response so
-      #    it runs AFTER ai-proxy.
       - name: skyflow-deidentify
         config:
           vault_id: '${{ env "DECK_SKYFLOW_VAULT_ID" }}'
@@ -62,27 +70,11 @@ services:
           # no skyflow_base_url_override -> derives https://<cluster_id>.vault.skyflowapis.com
           credentials: { api_key: '${{ env "DECK_SKYFLOW_API_KEY" }}' }
           profile: openai
-          # VAULT_TOKEN stores each value<->token pair in the vault, so it can be
-          # re-identified server-side later (ENTITY_* tokens can't be).
           deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
-          reidentify: { enabled: false }
+          reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
           on_skyflow_error: deny
-      # 2) ai-proxy calls the real LLM (sees only tokens).
-      - name: ai-proxy
+      - name: request-transformer
         config:
-          route_type: "llm/v1/chat"
-          model:
-            provider: openai
-            name: gpt-4o-mini
-          auth:
-            header_name: Authorization
-            header_value: 'Bearer ${{ env "DECK_OPENAI_API_KEY" }}'
-      # 3) Re-identify the LLM response (priority 760 < ai-proxy 770 -> runs after
-      #    ai-proxy has produced the final body). Vault-backed via reidentify/string.
-      - name: skyflow-reidentify
-        config:
-          vault_id: '${{ env "DECK_SKYFLOW_VAULT_ID" }}'
-          cluster_id: '${{ env "DECK_SKYFLOW_CLUSTER_ID" }}'
-          credentials: { api_key: '${{ env "DECK_SKYFLOW_API_KEY" }}' }
-          profile: openai
-          on_error: return_tokenized
+          add:
+            headers:
+              - 'Authorization:Bearer ${{ env "DECK_OPENAI_API_KEY" }}'
