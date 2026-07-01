@@ -7,10 +7,12 @@
 --
 -- Implemented in this build:
 --   * access  -> full de-identify of request bodies (Skyflow Detect)
---   * response-> re-identify via `mapping_only` (pure, no extra Skyflow call)
+--   * response-> re-identify via `mapping_only` (pure, request-scoped map) OR
+--                `reidentify_text` (resolves real VAULT_TOKENs through Skyflow
+--                /v1/detect/reidentify/string -- works regardless of our map)
 --   * auth    -> API key / static bearer token
 -- Documented follow-ups (degrade safely until added):
---   * reidentify strategies `reidentify_text` / `detokenize`
+--   * reidentify strategy `detokenize` (vault /detokenize API)
 --   * service-account JWT auth (RS256 via resty.openssl)
 --   * per-span concurrency, streaming `reassemble`
 -- See docs/03 and docs/05.
@@ -248,6 +250,17 @@ local function deidentify_text(conf, authz, text, deadline)
   return data.processed_text or text, data.entities or {}
 end
 
+-- Re-identify one text via Skyflow: resolves real vault tokens embedded in the
+-- text back to their original values. Only VAULT_TOKEN-format tokens exist in
+-- the vault, so this is the vault-authoritative re-id path (independent of the
+-- request-scoped map). Returns re-identified text (or nil, err).
+local function skyflow_reidentify(conf, authz, text, deadline)
+  local payload = { text = text, vault_id = conf.vault_id }
+  local data, err = skyflow_post(conf, authz, "/v1/detect/reidentify/string", payload, deadline)
+  if not data then return nil, err end
+  return data.processed_text or data.text or text
+end
+
 local function has_body()
   local m = kong.request.get_method()
   return m == "POST" or m == "PUT" or m == "PATCH"
@@ -405,13 +418,11 @@ end
 
 function SkyflowDeidentify:response(conf)
   if not conf.reidentify.enabled then return end
-  local ctx = kong.ctx.plugin
-  local by_token = ctx.mapping
-  if not by_token or not next(by_token) then return end
 
-  -- Only mapping_only is implemented in this build; others degrade safely.
-  if conf.reidentify.strategy ~= "mapping_only" then
-    kong.log.warn("skyflow reidentify strategy '", conf.reidentify.strategy,
+  local strat = conf.reidentify.strategy
+  -- `detokenize` is a documented follow-up in this build; degrade safely.
+  if strat ~= "mapping_only" and strat ~= "reidentify_text" then
+    kong.log.warn("skyflow reidentify strategy '", strat,
                   "' not implemented in this build; returning tokenized response")
     if conf.reidentify.on_error == "deny" then
       return kong.response.exit(502, { message = "response blocked: re-identify unavailable" })
@@ -419,16 +430,51 @@ function SkyflowDeidentify:response(conf)
     return
   end
 
+  local ctx = kong.ctx.plugin
+  local by_token = ctx.mapping
+  -- If de-identify created no tokens, there is nothing to restore. (Also skips
+  -- an unnecessary Skyflow round-trip for reidentify_text.)
+  if not by_token or not next(by_token) then return end
+
   local status = kong.service.response.get_status()
   if not status or status < 200 or status >= 300 then return end
 
+  -- reidentify_text calls the vault; resolve auth + a fresh deadline up front.
+  local authz, deadline
+  if strat == "reidentify_text" then
+    local aerr
+    authz, aerr = auth_value(conf)
+    if not authz then
+      kong.log.err("skyflow re-identify auth error: ", aerr)
+      if conf.reidentify.on_error == "deny" then
+        return kong.response.exit(502, { message = "response blocked: re-identify unavailable" })
+      end
+      return
+    end
+    deadline = ngx.now() + (conf.deadline_ms / 1000)
+    if next(conf.reidentify.entity_treatment) or conf.reidentify.default_treatment ~= "plain_text" then
+      kong.log.warn("skyflow: reidentify_text restores plaintext from the vault; ",
+                    "entity_treatment/masking is not applied (use mapping_only for treatments)")
+    end
+  end
+
+  local treatment_fn = function(entity)
+    return conf.reidentify.entity_treatment[entity] or conf.reidentify.default_treatment
+  end
+
+  -- Restore one text span. mapping_only substitutes from the request-scoped map
+  -- (honors treatments); reidentify_text resolves vault tokens via Skyflow.
+  local function restore(text)
+    if strat == "reidentify_text" then
+      return skyflow_reidentify(conf, authz, text, deadline)
+    end
+    return reidentify_string(text, by_token, treatment_fn)
+  end
+
+  local call_err
   local ok = pcall(function()
     local raw = kong.service.response.get_raw_body()
     if not raw or raw == "" then return end
-
-    local treatment_fn = function(entity)
-      return conf.reidentify.entity_treatment[entity] or conf.reidentify.default_treatment
-    end
 
     local ct = kong.service.response.get_header("Content-Type")
     local newbody
@@ -438,11 +484,15 @@ function SkyflowDeidentify:response(conf)
       local spans = collect_spans(doc, effective_paths(conf, "response"))
       if #spans == 0 then return end
       for _, span in ipairs(spans) do
-        span.parent[span.key] = reidentify_string(span.text, by_token, treatment_fn)
+        local restored, rerr = restore(span.text)
+        if not restored then call_err = rerr; return end
+        span.parent[span.key] = restored
       end
       newbody = cjson.encode(doc)
     else
-      newbody = reidentify_string(raw, by_token, treatment_fn)
+      local restored, rerr = restore(raw)
+      if not restored then call_err = rerr; return end
+      newbody = restored
     end
 
     if newbody then
@@ -451,8 +501,9 @@ function SkyflowDeidentify:response(conf)
     end
   end)
 
-  if not ok then
-    kong.log.warn("skyflow re-identify error; returning tokenized response")
+  if (not ok) or call_err then
+    kong.log.warn("skyflow re-identify error; returning tokenized response",
+                  call_err and (": " .. call_err) or "")
     if conf.reidentify.on_error == "deny" then
       return kong.response.exit(502, { message = "response blocked: re-identify failed" })
     end

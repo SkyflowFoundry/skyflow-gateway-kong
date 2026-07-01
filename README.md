@@ -28,9 +28,9 @@ when policy allows.
 > **Konnect Dedicated Cloud Gateways** as two self-contained files
 > ([`schema.lua`](plugin/kong/plugins/skyflow-deidentify/schema.lua) +
 > [`handler.lua`](plugin/kong/plugins/skyflow-deidentify/handler.lua)). The
-> request **de-identify** path and `mapping_only` **re-identify** are
-> implemented; `reidentify_text`/`detokenize` and service-account JWT auth are
-> documented follow-ups. Core algorithms have an offline test
+> request **de-identify** path and both `mapping_only` and vault-backed
+> `reidentify_text` **re-identify** are implemented; `detokenize` and
+> service-account JWT auth are documented follow-ups. Core algorithms have an offline test
 > (`make unit-pure`). See [`docs/09`](docs/09-konnect-deployment.md) for the
 > deployment target rationale and upload steps.
 

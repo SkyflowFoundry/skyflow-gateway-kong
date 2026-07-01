@@ -31,8 +31,12 @@ services:
           # no skyflow_base_url_override -> derives https://<cluster_id>.vault.skyflowapis.com
           credentials: { api_key: '${{ env "DECK_SKYFLOW_API_KEY" }}' }
           profile: openai
-          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: ENTITY_UNQ_COUNTER }
-          reidentify: { enabled: true, strategy: mapping_only, default_treatment: plain_text }
+          # VAULT_TOKEN stores each value<->token pair in the vault, so it can be
+          # re-identified server-side later (ENTITY_* tokens can't be).
+          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
+          # reidentify_text resolves the vault tokens the LLM echoes back via
+          # Skyflow /v1/detect/reidentify/string -- true vault-backed round-trip.
+          reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
           on_skyflow_error: deny
       - name: ai-proxy
         config:

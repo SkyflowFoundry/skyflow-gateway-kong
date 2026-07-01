@@ -18,8 +18,9 @@
 #
 # Flow: client -> skyflow-deidentify (de-id, prio 775) -> ai-proxy (prio 770,
 # sends tokenized prompt to the LLM) -> LLM -> skyflow-deidentify response phase
-# (re-identify) -> client. Uses the mock Skyflow for de-id; re-identify is
-# mapping_only (no vault call).
+# (re-identify) -> client. Uses the mock Skyflow for both de-id and re-id: the
+# /ai route does a real vault-backed round-trip (VAULT_TOKEN + reidentify_text),
+# while /demo/chat keeps mapping_only to show masked/redacted treatments.
 
 _format_version: "3.0"
 
@@ -62,10 +63,11 @@ services:
           skyflow_base_url_override: "http://mock-skyflow:8080"
           credentials: { api_key: "demo-key" }
           profile: openai
-          # ENTITY_UNQ_COUNTER (NAME_1) survives LLM round-trips better than random tokens,
-          # so mapping_only restore lands reliably.
-          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: ENTITY_UNQ_COUNTER }
-          reidentify: { enabled: true, strategy: mapping_only, default_treatment: plain_text }
+          # VAULT_TOKEN + reidentify_text = the real vault-backed round-trip:
+          # tokens are stored in the vault on de-id and resolved server-side on
+          # the way back (the mock reverses them for this demo).
+          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
+          reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
           on_skyflow_error: deny
       - name: ai-proxy
         config:

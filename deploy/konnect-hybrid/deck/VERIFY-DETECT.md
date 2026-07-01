@@ -46,12 +46,38 @@ curl -s https://<cluster_id>.vault.skyflowapis.com/v1/detect/deidentify/string \
 | Response is camelCase (`processedText`, `records`, …) | Update the two reads in `deidentify_text()`: `data.processed_text` and the `e.token/e.value/e.entity` loop. |
 | 403 | Grant the service the **"De-identify and reidentify sensitive data in text and files"** permission. |
 
-## 5. Re-identify note
-`mapping_only` restores only tokens the model echoes verbatim. Real random
-`VAULT_TOKEN`s may get rewritten by the model → prefer `ENTITY_UNQ_COUNTER` for
-demos, or implement the `reidentify_text`/`detokenize` strategy (follow-up) to
-restore regardless.
+## 5. Re-identify (vault-backed round-trip)
+With `deidentify.token_format: VAULT_TOKEN` + `reidentify.strategy: reidentify_text`,
+the response phase resolves the vault tokens the LLM echoes back by POSTing each
+response text span to:
+
+`POST /v1/detect/reidentify/string`
+```json
+{ "text": "... <vault_token> ...", "vault_id": "<vault_id>" }
+```
+Expected back (handler reads `data.processed_text`, falls back to `data.text`):
+```json
+{ "processed_text": "... Jane Doe ..." }
+```
+
+**Probe it** — paste a real token from the de-id probe above:
+```bash
+curl -s https://<cluster_id>.vault.skyflowapis.com/v1/detect/reidentify/string \
+  -H "Authorization: Bearer <API_KEY>" -H 'Content-Type: application/json' \
+  -d '{"text":"hello <VAULT_TOKEN>","vault_id":"<VAULT_ID>"}' | jq .
+```
+If the response field isn't `processed_text` (or `text`), update `skyflow_reidentify()`
+in `handler.lua`. If re-id needs its own request fields, add them to that payload.
+
+Notes:
+- Only **VAULT_TOKEN** de-id is re-identifiable — `ENTITY_*` tokens aren't stored
+  in the vault. The schema enforces `reidentify_text` ⇒ `VAULT_TOKEN`.
+- Re-id only restores tokens the model actually **echoes back**; if the LLM
+  paraphrases a token away, there is nothing to resolve.
+- `reidentify_text` restores plaintext; per-entity `masked`/`redacted` treatments
+  are a `mapping_only`-only feature.
 
 ## 6. Then
-Set the envs and sync `real-vault.yaml` (see its header). Re-run the `/ai/chat`
-curl and confirm real vault tokens go to the LLM and real values come back.
+Sync `real-vault.yaml` (already set to VAULT_TOKEN + reidentify_text; see its
+header). Re-run the `/ai/chat` curl and confirm vault tokens go to the LLM and
+real values come back to the client.
