@@ -43,8 +43,7 @@ end
 
 -- Walk `node` collecting string leaves at `tokens`, appending
 -- { parent=<table>, key=<k>, text=<string> } slots to `out` (replace-ready).
-local function walk(node, tokens, i, out, max)
-  if max and #out >= max then return end
+local function walk(node, tokens, i, out)
   local tok = tokens[i]
   if tok == nil then return end
   local last = (i == #tokens)
@@ -52,11 +51,11 @@ local function walk(node, tokens, i, out, max)
   local function consider(parent, key)
     local v = (type(parent) == "table") and parent[key] or nil
     if last then
-      if type(v) == "string" and (not max or #out < max) then
+      if type(v) == "string" then
         out[#out + 1] = { parent = parent, key = key, text = v }
       end
     else
-      walk(v, tokens, i + 1, out, max)
+      walk(v, tokens, i + 1, out)
     end
   end
 
@@ -76,11 +75,13 @@ local function walk(node, tokens, i, out, max)
   end
 end
 
--- Collect replace-ready string spans for a list of path strings.
-local function collect_spans(doc, paths, max)
+-- Collect ALL replace-ready string spans for a list of path strings. No silent
+-- cap: the caller enforces `max_spans` as a fail-closed limit, so we never
+-- forward a partially de-identified body (that would leak the untouched extras).
+local function collect_spans(doc, paths)
   local out = {}
   for _, path in ipairs(paths) do
-    walk(doc, parse_path(path), 1, out, max)
+    walk(doc, parse_path(path), 1, out)
   end
   return out
 end
@@ -202,11 +203,16 @@ local function skyflow_post(conf, authz, path, payload, deadline)
       if not data then return nil, "non-JSON response from Skyflow" end
       if data.errors and #data.errors > 0 then return nil, "skyflow returned errors[]" end
       return data
-    elseif res and (res.status == 403) then
+    elseif res and res.status == 403 then
       return nil, "skyflow 403 (grant the Detect de-identify/re-identify permission)"
+    elseif res and res.status >= 400 and res.status < 500 and res.status ~= 429 then
+      -- client error (bad payload / vault_id / credential): retrying can't help,
+      -- so fail fast instead of burning the whole deadline budget.
+      return nil, "skyflow status " .. res.status .. " (client error, not retried)"
     else
+      -- 429 / 5xx / transport: retryable within the deadline, with small backoff.
       last_err = res and ("skyflow status " .. res.status) or ("transport: " .. tostring(err))
-      -- retry on 401/429/5xx/transport within the deadline
+      if i < attempts and ngx.now() < deadline then ngx.sleep(0.1) end
     end
   end
   return nil, last_err or "skyflow request failed"
@@ -245,107 +251,143 @@ local function wants_json(conf, ct)
   return ct:find("application/json", 1, true) ~= nil or ct:find("+json", 1, true) ~= nil
 end
 
--- Apply fail-closed/open posture for a de-identify failure.
-local function deidentify_failure(conf, ctx, err)
+-- Build a fail-closed/open ACTION for a de-identify failure. Does NOT call
+-- kong.response.exit here -- the caller issues it outside the pcall (ngx.exit
+-- unwinds via a sentinel error that a nested pcall would swallow).
+local function fail_action(conf, ctx, err)
   kong.log.err("skyflow de-identify failed: ", err)
   ctx.posture = conf.on_skyflow_error
   if conf.on_skyflow_error == "deny" then
-    return kong.response.exit(502, { message = "request blocked: de-identification unavailable" })
+    return { deny = true, status = 502, body = { message = "request blocked: de-identification unavailable" } }
   end
-  -- allow: fall through (original body forwarded)
+  return { ok = true }   -- allow: forward the original body unchanged
 end
 
 --==========================================================================--
 -- Lifecycle
 --==========================================================================--
 
+-- Exit-free access logic. Returns an ACTION table for the caller to enact:
+--   { deny = true, status =, body = }  -> caller runs kong.response.exit(...)
+--   { ok = true }                      -> proceed (body already rewritten here)
+-- MUST NOT call kong.response.exit: it unwinds via a sentinel error that the
+-- caller's pcall would swallow, silently defeating fail-closed. Body rewrites
+-- (set_raw_body / enable_buffering) are plain PDK calls and are safe here.
+local function run_access(conf, ctx)
+  local raw = kong.request.get_raw_body()
+  if raw == nil then
+    if conf.on_parse_error == "deny" then
+      return { deny = true, status = 422, body = { message = "request blocked: body unavailable" } }
+    end
+    return { ok = true }
+  end
+  if #raw > conf.max_body_size then
+    if conf.on_parse_error == "deny" then
+      return { deny = true, status = 413, body = { message = "request blocked: body too large" } }
+    end
+    return { ok = true }
+  end
+
+  local authz, aerr = auth_value(conf)
+  if not authz then
+    kong.log.err("skyflow auth error: ", aerr)
+    -- auth failures ALWAYS fail closed (never forward raw PII), regardless of posture
+    return { deny = true, status = 502, body = { message = "request blocked: auth unavailable" } }
+  end
+
+  local deadline = ngx.now() + (conf.deadline_ms / 1000)
+  local json_mode = wants_json(conf, kong.request.get_header("Content-Type"))
+
+  -- Build the list of text spans to process.
+  local doc, spans
+  if json_mode then
+    doc = cjson.decode(raw)
+    if doc == nil then
+      if conf.on_parse_error == "deny" then
+        return { deny = true, status = 422, body = { message = "request blocked: invalid JSON" } }
+      end
+      return { ok = true }
+    end
+    spans = collect_spans(doc, effective_paths(conf, "request"))
+  else
+    spans = { { whole = true, text = raw } }
+  end
+  if #spans == 0 then return { ok = true } end
+
+  -- Fail closed if the payload carries more sensitive-text fields than we will
+  -- process. Never forward a partially de-identified body -- the untouched
+  -- extras would leak upstream in the clear.
+  if #spans > conf.max_spans then
+    kong.log.err("skyflow: ", #spans, " spans exceed max_spans=", conf.max_spans, "; blocking request")
+    return { deny = true, status = 413,
+             body = { message = "request blocked: too many fields to de-identify (max_spans)" } }
+  end
+
+  if conf.deidentify.batch_mode == "joined" then
+    kong.log.warn("skyflow: deidentify.batch_mode='joined' is not implemented; using per_span")
+  end
+
+  -- De-identify each span (sequential; deadline-bounded). Aggregate the map.
+  local by_token, counts = {}, {}
+  for _, span in ipairs(spans) do
+    local processed, ents = deidentify_text(conf, authz, span.text, deadline)
+    if not processed then
+      return fail_action(conf, ctx, ents)   -- on failure `ents` is the error string
+    end
+    span.processed = processed
+    for _, e in ipairs(ents) do
+      if e.token then
+        by_token[e.token] = { value = e.value, entity = e.entity }
+        counts[e.entity or "?"] = (counts[e.entity or "?"] or 0) + 1
+      end
+    end
+  end
+
+  ctx.mapping = by_token
+  ctx.entities_by_type = counts
+
+  -- Rewrite the outbound body (unless dry-run).
+  if not conf.dry_run then
+    local newbody
+    if json_mode then
+      for _, span in ipairs(spans) do span.parent[span.key] = span.processed end
+      local enc, eerr = cjson.encode(doc)
+      if not enc then return fail_action(conf, ctx, "re-encode failed: " .. tostring(eerr)) end
+      newbody = enc
+    else
+      newbody = spans[1].processed
+    end
+    kong.service.request.set_raw_body(newbody)
+    kong.service.request.set_header("Content-Length", #newbody)
+  end
+
+  -- Buffer the response if we will re-identify it.
+  if conf.reidentify.enabled and conf.reidentify.streaming ~= "passthrough" then
+    kong.service.request.enable_buffering()
+  end
+
+  return { ok = true }
+end
+
 function SkyflowDeidentify:access(conf)
   if not has_body() then return end
   local ctx = kong.ctx.plugin
   ctx.t0 = ngx.now()
 
-  local ok, errobj = pcall(function()
-    local raw = kong.request.get_raw_body()
-    if raw == nil then
-      if conf.on_parse_error == "deny" then
-        return kong.response.exit(422, { message = "request blocked: body unavailable" })
-      end
-      return
-    end
-    if #raw > conf.max_body_size then
-      if conf.on_parse_error == "deny" then
-        return kong.response.exit(413, { message = "request blocked: body too large" })
-      end
-      return
-    end
-
-    local authz, aerr = auth_value(conf)
-    if not authz then
-      kong.log.err("skyflow auth error: ", aerr)
-      return kong.response.exit(502, { message = "request blocked: auth unavailable" })
-    end
-
-    local deadline = ngx.now() + (conf.deadline_ms / 1000)
-    local json_mode = wants_json(conf, kong.request.get_header("Content-Type"))
-
-    -- Build the list of text spans to process.
-    local doc, spans
-    if json_mode then
-      doc = cjson.decode(raw)
-      if doc == nil then
-        if conf.on_parse_error == "deny" then
-          return kong.response.exit(422, { message = "request blocked: invalid JSON" })
-        end
-        return
-      end
-      spans = collect_spans(doc, effective_paths(conf, "request"), conf.max_spans)
-    else
-      spans = { { whole = true, text = raw } }
-    end
-    if #spans == 0 then return end
-
-    -- De-identify each span (sequential; deadline-bounded). Aggregate mapping.
-    local by_token, counts = {}, {}
-    for _, span in ipairs(spans) do
-      local processed, entities = deidentify_text(conf, authz, span.text, deadline)
-      if not processed then
-        return deidentify_failure(conf, ctx, entities) -- entities holds err here
-      end
-      span.processed = processed
-      for _, e in ipairs(entities) do
-        if e.token then
-          by_token[e.token] = { value = e.value, entity = e.entity }
-          counts[e.entity or "?"] = (counts[e.entity or "?"] or 0) + 1
-        end
-      end
-    end
-
-    ctx.mapping = by_token
-    ctx.entities_by_type = counts
-
-    -- Rewrite the outbound body (unless dry-run).
-    if not conf.dry_run then
-      local newbody
-      if json_mode then
-        for _, span in ipairs(spans) do span.parent[span.key] = span.processed end
-        local enc, eerr = cjson.encode(doc)
-        if not enc then return deidentify_failure(conf, ctx, "re-encode failed: " .. tostring(eerr)) end
-        newbody = enc
-      else
-        newbody = spans[1].processed
-      end
-      kong.service.request.set_raw_body(newbody)
-      kong.service.request.set_header("Content-Length", #newbody)
-    end
-
-    -- Buffer the response if we will re-identify it.
-    if conf.reidentify.enabled and conf.reidentify.streaming ~= "passthrough" then
-      kong.service.request.enable_buffering()
-    end
-  end)
+  -- pcall wraps only the exit-free logic; all exits happen out here.
+  local ok, action = pcall(run_access, conf, ctx)
 
   if not ok then
-    return deidentify_failure(conf, ctx, "internal: " .. tostring(errobj))
+    kong.log.err("skyflow access internal error: ", tostring(action))
+    ctx.posture = conf.on_skyflow_error
+    if conf.on_skyflow_error == "deny" then
+      return kong.response.exit(502, { message = "request blocked: de-identification unavailable" })
+    end
+    return  -- allow posture: fall through with the original body
+  end
+
+  if action and action.deny then
+    return kong.response.exit(action.status, action.body)
   end
 end
 

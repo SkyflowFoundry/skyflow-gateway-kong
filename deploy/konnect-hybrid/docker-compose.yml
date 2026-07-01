@@ -33,6 +33,7 @@ services:
       KONG_CLUSTER_CERT: /kong-certs/tls.crt
       KONG_CLUSTER_CERT_KEY: /kong-certs/tls.key
       KONG_LUA_SSL_TRUSTED_CERTIFICATE: system
+      # demo only: skips DP<->CP/telemetry TLS verification. Do NOT carry into production.
       KONG_TLS_CERTIFICATE_VERIFY: "off"
       # Must match the control plane's router flavor (Konnect 3.14 -> expressions)
       KONG_ROUTER_FLAVOR: ${KONG_ROUTER_FLAVOR:-expressions}
