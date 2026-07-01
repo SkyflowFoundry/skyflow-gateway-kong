@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# TLS certs / keys — never commit secrets
+deploy/konnect-hybrid/certs/*.crt
+deploy/konnect-hybrid/certs/*.cert
+deploy/konnect-hybrid/certs/*.key
+deploy/konnect-hybrid/certs/*.pem
+!deploy/konnect-hybrid/certs/.gitkeep
+!deploy/konnect-hybrid/certs/README.txt
+
+# Local env
+.env
+.env.local
