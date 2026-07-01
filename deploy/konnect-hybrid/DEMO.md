@@ -34,6 +34,17 @@ upstream: "Email [NAME_aB3xQ] at [EMAIL_ADDRESS_kp2]"   # echo shows what the LL
 - **Kit polish**: let the DP take the cluster cert **inline** (env) as Konnect's
   own `docker run` does, to avoid the PEM-file friction from setup.
 
+## Ready-to-run configs (in `deck/`)
+- `ai-gateway.yaml` — chains `skyflow-deidentify` + `ai-proxy` to a real LLM
+  (mock Skyflow), keeps the echo route. Full de-id + re-id round-trip. Set
+  `DECK_OPENAI_API_KEY`, then sync.
+- `real-vault.yaml` — same AI route but against a **real Skyflow vault** via
+  `DECK_SKYFLOW_*` envs.
+- `VERIFY-DETECT.md` — 10-min checklist to confirm the live Detect API matches
+  the plugin (do this before `real-vault.yaml`).
+- ⚠️ `deck gateway sync` deletes anything not in the synced file — each file is a
+  full desired state; sync one at a time.
+
 ## Housekeeping
 - **Merge PR #3** (the functional plugin + this hybrid kit).
 - **Rotate the Konnect PAT** used during setup.
