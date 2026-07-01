@@ -488,26 +488,32 @@ function SkyflowDeidentify:response(conf)
   end
 
   local call_err
-  local ok = pcall(function()
+  local ok, perr = pcall(function()
     local raw = kong.service.response.get_raw_body()
+    local ct  = kong.service.response.get_header("Content-Type")
+    local enc = kong.service.response.get_header("Content-Encoding")
+    kong.log.notice("skyflow reidentify: body len=", raw and #raw or "nil",
+                    " ct=", tostring(ct), " enc=", tostring(enc))
     if not raw or raw == "" then
-      kong.log.notice("skyflow reidentify: no buffered response body (enable_buffering not applied?); skipping")
+      kong.log.notice("skyflow reidentify: no buffered response body; skipping")
       return
     end
 
-    local ct = kong.service.response.get_header("Content-Type")
     local newbody
     if wants_json(conf, ct) then
       local doc = cjson.decode(raw)
-      if doc == nil then return end
-      local spans = collect_spans(doc, effective_paths(conf, "response"))
-      if #spans == 0 then
-        kong.log.notice("skyflow reidentify: 0 response spans matched the '", conf.profile,
-                        "' profile paths; skipping")
+      if doc == nil then
+        kong.log.notice("skyflow reidentify: body is not decodable JSON (len=", #raw,
+                        " enc=", tostring(enc), ") -- likely compressed; skipping")
         return
       end
+      local spans = collect_spans(doc, effective_paths(conf, "response"))
+      kong.log.notice("skyflow reidentify: matched ", #spans, " response span(s)")
+      if #spans == 0 then return end
       for _, span in ipairs(spans) do
+        kong.log.notice("skyflow reidentify: -> vault call (span len=", #span.text, ")")
         local restored, rerr = restore(span.text)
+        kong.log.notice("skyflow reidentify: <- vault call ok=", tostring(restored ~= nil))
         if not restored then call_err = rerr; return end
         span.parent[span.key] = restored
       end
@@ -527,7 +533,8 @@ function SkyflowDeidentify:response(conf)
 
   if (not ok) or call_err then
     kong.log.warn("skyflow re-identify error; returning tokenized response",
-                  call_err and (": " .. call_err) or "")
+                  (not ok) and (": pcall: " .. tostring(perr))
+                            or (call_err and (": " .. call_err) or ""))
     if conf.reidentify.on_error == "deny" then
       return kong.response.exit(502, { message = "response blocked: re-identify failed" })
     end
