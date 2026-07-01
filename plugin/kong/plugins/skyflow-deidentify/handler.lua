@@ -395,14 +395,11 @@ local function run_access(conf, ctx)
     -- entities[] shape); reidentify_text resolves via the vault and must not be
     -- gated on that map.
     ctx.deidentified = true
-    kong.log.notice("skyflow: access de-identified request; tokens sent upstream, buffering response")
   end
 
-  -- Buffer the response so it can be re-identified -- either by THIS plugin's
-  -- own response phase, or by a downstream skyflow-reidentify plugin (used when
-  -- chaining AFTER ai-proxy, where this plugin is configured de-id only). We
-  -- enable it whenever we actually de-identified, independent of our own
-  -- reidentify setting, so the downstream plugin has a buffered body to read.
+  -- Buffer the response so this plugin's own response phase can re-identify it.
+  -- Enable whenever we actually de-identified, independent of the reidentify
+  -- setting, so a buffered body is available to read back.
   if ctx.deidentified and conf.reidentify.streaming ~= "passthrough" then
     -- Prefer an uncompressed response so the response phase can parse it. Only a
     -- hint -- some upstreams (e.g. ai-proxy's own call) compress anyway, so the
@@ -410,9 +407,6 @@ local function run_access(conf, ctx)
     kong.service.request.clear_header("Accept-Encoding")
     kong.service.request.enable_buffering()
   end
-  -- Signal a downstream skyflow-reidentify plugin (kong.ctx.shared is shared
-  -- across plugins for the request); it only re-identifies when we de-identified.
-  kong.ctx.shared.skyflow_deidentified = ctx.deidentified or false
 
   return { ok = true }
 end
@@ -440,10 +434,6 @@ function SkyflowDeidentify:access(conf)
 end
 
 function SkyflowDeidentify:response(conf)
-  kong.log.notice("skyflow: response phase invoked (enabled=", tostring(conf.reidentify.enabled),
-                  " strat=", tostring(conf.reidentify.strategy),
-                  " deidentified=", tostring((kong.ctx.plugin or {}).deidentified),
-                  " status=", tostring(kong.service.response.get_status()), ")")
   if not conf.reidentify.enabled then return end
 
   local strat = conf.reidentify.strategy
@@ -513,7 +503,6 @@ function SkyflowDeidentify:response(conf)
       kong.log.notice("skyflow reidentify: no buffered response body; skipping")
       return
     end
-    kong.log.notice("skyflow reidentify: body len=", #raw, " ct=", tostring(ct), " enc=", tostring(enc))
 
     -- Inflate gzip so the body is parseable. We emit the re-identified body
     -- UNcompressed and drop Content-Encoding (identity is always acceptable to
@@ -538,7 +527,6 @@ function SkyflowDeidentify:response(conf)
         kong.log.notice("skyflow reidentify: body not decodable JSON (len=", #body, "); skipping"); return
       end
       local spans = collect_spans(doc, effective_paths(conf, "response"))
-      kong.log.notice("skyflow reidentify: matched ", #spans, " response span(s)")
       if #spans == 0 then return end
       for _, span in ipairs(spans) do
         local restored, rerr = restore(span.text)
@@ -556,8 +544,6 @@ function SkyflowDeidentify:response(conf)
       kong.response.set_raw_body(newbody)
       if was_encoded then kong.response.clear_header("Content-Encoding") end
       kong.response.set_header("Content-Length", #newbody)
-      kong.log.notice("skyflow reidentify: restored response via ", strat,
-                      was_encoded and " (inflated gzip)" or "")
     end
   end)
 
