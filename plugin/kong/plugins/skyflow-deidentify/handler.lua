@@ -20,6 +20,12 @@
 local http  = require "resty.http"
 local cjson = require "cjson.safe"
 
+-- Upstream LLM responses are commonly gzip-encoded; we must inflate before we
+-- can parse/re-identify them. Kong bundles a gzip helper -- load it guarded so
+-- the plugin still loads if the module path differs on a given build.
+local ok_gzip, kgzip = pcall(require, "kong.tools.gzip")
+local inflate_gzip = ok_gzip and kgzip and kgzip.inflate_gzip or nil
+
 local kong = kong
 local ngx  = ngx
 
@@ -394,6 +400,10 @@ local function run_access(conf, ctx)
 
   -- Buffer the response if we will re-identify it.
   if conf.reidentify.enabled and conf.reidentify.streaming ~= "passthrough" then
+    -- Prefer an uncompressed response so the response phase can parse it. Only a
+    -- hint -- some upstreams (e.g. ai-proxy's own call) compress anyway, so the
+    -- response phase also inflates gzip defensively.
+    kong.service.request.clear_header("Accept-Encoding")
     kong.service.request.enable_buffering()
   end
 
@@ -492,42 +502,55 @@ function SkyflowDeidentify:response(conf)
     local raw = kong.service.response.get_raw_body()
     local ct  = kong.service.response.get_header("Content-Type")
     local enc = kong.service.response.get_header("Content-Encoding")
-    kong.log.notice("skyflow reidentify: body len=", raw and #raw or "nil",
-                    " ct=", tostring(ct), " enc=", tostring(enc))
     if not raw or raw == "" then
       kong.log.notice("skyflow reidentify: no buffered response body; skipping")
       return
     end
+    kong.log.notice("skyflow reidentify: body len=", #raw, " ct=", tostring(ct), " enc=", tostring(enc))
+
+    -- Inflate gzip so the body is parseable. We emit the re-identified body
+    -- UNcompressed and drop Content-Encoding (identity is always acceptable to
+    -- a client that offered gzip), which avoids having to re-compress.
+    local body, was_encoded = raw, false
+    if enc and enc ~= "" then
+      if enc:lower():find("gzip", 1, true) and inflate_gzip then
+        local iok, dec = pcall(inflate_gzip, raw)
+        if not iok or not dec then
+          kong.log.notice("skyflow reidentify: gzip inflate failed; skipping"); return
+        end
+        body, was_encoded = dec, true
+      else
+        kong.log.notice("skyflow reidentify: unsupported Content-Encoding '", enc, "'; skipping"); return
+      end
+    end
 
     local newbody
     if wants_json(conf, ct) then
-      local doc = cjson.decode(raw)
+      local doc = cjson.decode(body)
       if doc == nil then
-        kong.log.notice("skyflow reidentify: body is not decodable JSON (len=", #raw,
-                        " enc=", tostring(enc), ") -- likely compressed; skipping")
-        return
+        kong.log.notice("skyflow reidentify: body not decodable JSON (len=", #body, "); skipping"); return
       end
       local spans = collect_spans(doc, effective_paths(conf, "response"))
       kong.log.notice("skyflow reidentify: matched ", #spans, " response span(s)")
       if #spans == 0 then return end
       for _, span in ipairs(spans) do
-        kong.log.notice("skyflow reidentify: -> vault call (span len=", #span.text, ")")
         local restored, rerr = restore(span.text)
-        kong.log.notice("skyflow reidentify: <- vault call ok=", tostring(restored ~= nil))
         if not restored then call_err = rerr; return end
         span.parent[span.key] = restored
       end
       newbody = cjson.encode(doc)
     else
-      local restored, rerr = restore(raw)
+      local restored, rerr = restore(body)
       if not restored then call_err = rerr; return end
       newbody = restored
     end
 
     if newbody then
       kong.response.set_raw_body(newbody)
+      if was_encoded then kong.response.clear_header("Content-Encoding") end
       kong.response.set_header("Content-Length", #newbody)
-      kong.log.notice("skyflow reidentify: restored response via ", strat)
+      kong.log.notice("skyflow reidentify: restored response via ", strat,
+                      was_encoded and " (inflated gzip)" or "")
     end
   end)
 
