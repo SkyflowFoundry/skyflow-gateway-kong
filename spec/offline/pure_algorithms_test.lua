@@ -25,7 +25,7 @@ local doc = { messages = {
   }, prompt = "hi" }
 local conf = { profile = "openai", request_json_paths = {}, response_json_paths = {} }
 local paths = T.effective_paths(conf, "request")
-local spans = T.collect_spans(doc, paths, 64)
+local spans = T.collect_spans(doc, paths)
 eq(#spans, 3, "collect_spans found 3 string leaves")
 -- replace and confirm mutation
 for _, s in ipairs(spans) do s.parent[s.key] = "X" end

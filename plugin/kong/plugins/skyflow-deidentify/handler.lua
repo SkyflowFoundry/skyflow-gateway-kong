@@ -423,7 +423,7 @@ function SkyflowDeidentify:response(conf)
     if wants_json(conf, ct) then
       local doc = cjson.decode(raw)
       if doc == nil then return end
-      local spans = collect_spans(doc, effective_paths(conf, "response"), conf.max_spans)
+      local spans = collect_spans(doc, effective_paths(conf, "response"))
       if #spans == 0 then return end
       for _, span in ipairs(spans) do
         span.parent[span.key] = reidentify_string(span.text, by_token, treatment_fn)
