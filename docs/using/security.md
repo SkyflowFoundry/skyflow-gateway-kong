@@ -1,9 +1,9 @@
-# 07 — Security & Governance
+# Security & Governance
 
 The plugin *is* a security control, so its own security posture matters as much
 as its function. This document covers the threat model, data handling, secrets,
 governance/RBAC, compliance, and the privacy invariants enforced by tests
-([`docs/06 §6.5`](06-testing.md#65-security--privacy-tests-must-pass-invariants)).
+([`testing §6.5`](../contributing/testing.md#65-security--privacy-tests-must-pass-invariants)).
 
 ## 7.1 Security objectives
 
@@ -30,7 +30,7 @@ governance/RBAC, compliance, and the privacy invariants enforced by tests
 | **Token forgery / replay** | Crafted tokens in a response to detokenize arbitrary data | `mapping_only` restores only tokens minted **this** request; `detokenize`/`reidentify` are governed by vault policy regardless of token origin. |
 | **MITM to Skyflow** | Network interception | TLS to `*.vault.skyflowapis.com`; cert verification on (no `ssl_verify=false` in prod); optional pinning. |
 | **DoS / amplification** | Huge bodies, many spans | `max_body_size`, `max_spans`, `max_concurrency`, `deadline_ms`; oversized ⇒ posture. |
-| **Tampering with ordering** | Plugin runs after AI Proxy sends | Priority + explicit dynamic ordering `before: access: [ai-proxy,…]`; ordering test. |
+| **Tampering with ordering** | Raw PII reaches upstream before tokenization | De-identify runs in `access` before the request is proxied; with `ai-proxy` the nested-proxy topology keeps de-identify on the front route so the internal `ai-proxy` route only ever receives tokens. |
 | **Replay of bearer token** | Stolen cached token reused | Short TTL (~60 min) + skew refresh; SA-JWT scoped to roles; rotate on incident. |
 | **Supply chain** | Compromised rock dependency | Minimal deps (`resty.http`, optional `resty.jwt`); pinned versions; CI dependency review; prefer bundled `resty.openssl`. |
 
@@ -89,7 +89,7 @@ is centralized and audited:
 
 ## 7.7 Privacy invariants (enforced in CI)
 
-Restated from [`docs/06 §6.5`](06-testing.md#65-security--privacy-tests-must-pass-invariants),
+Restated from [`testing §6.5`](../contributing/testing.md#65-security--privacy-tests-must-pass-invariants),
 these are release-gating:
 
 1. No PII reaches the upstream on any `deny` error path.
@@ -105,6 +105,6 @@ these are release-gating:
   intended upstreams.
 - Keep `ssl_verify` on for Skyflow; use system or pinned CA bundle.
 - Set `dry_run=true` during initial rollout to observe detections without
-  altering traffic, then flip to enforcing (see [`docs/08`](08-operations.md)).
+  altering traffic, then flip to enforcing (see [`operations`](operations.md)).
 - Alert on `skyflow_*_error` rate and on `posture=allow` events (a fail-open
   event is a privacy-relevant signal).

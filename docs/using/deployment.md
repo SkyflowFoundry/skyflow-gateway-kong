@@ -1,4 +1,4 @@
-# 09 — Konnect Dedicated Cloud Gateways Deployment
+# Konnect Deployment
 
 This is the chosen deployment target, and it constrains packaging. This doc
 captures the constraints, the resulting code shape, and how to upload + run the
@@ -25,10 +25,10 @@ self-contained files**:
   JSONPath-lite body targeting, the request map, and re-identify. It requires
   only runtime-provided libs (`resty.http`, `cjson`).
 
-The logical module decomposition in [`docs/02 §2.2`](02-architecture.md#22-module-decomposition)
+The logical module decomposition in [`architecture §2.2`](../contributing/architecture.md#22-module-decomposition)
 still describes the design; it is simply physically consolidated into
 `handler.lua` for this target. (If you also deploy to self-managed nodes, the
-same two files work there via the [rockspec](../plugin/kong/plugins/skyflow-deidentify/skyflow-deidentify-0.2.0-1.rockspec).)
+same two files work there via the [rockspec](../../plugin/kong/plugins/skyflow-deidentify/skyflow-deidentify-0.2.0-1.rockspec).)
 
 ## 9.2 What's implemented vs. follow-up (this build)
 
@@ -75,7 +75,7 @@ de-identify/re-identify permission.
 3. Konnect validates the schema and streams the plugin to the cloud data
    planes automatically.
 4. Add a **Plugin** instance (`skyflow-deidentify`) scoped to your Route/Service
-   with the config from [`docs/08 §8.2`](08-operations.md#82-configuration-examples).
+   with the config from [`operations §8.2`](operations.md#82-configuration-examples).
 
 ### Option B — Konnect API (custom plugin schema + entity)
 
@@ -114,7 +114,7 @@ curl -i https://<your-gw-host>/v1/chat/completions \
 Check the upstream/provider view (or a request-logging echo upstream during
 testing) to confirm `Jane Doe` / `jane@acme.com` arrived as `[NAME_…]` /
 `[EMAIL_ADDRESS_…]`. Enable `dry_run=true` first to observe detections without
-altering traffic (see the rollout playbook in [`docs/08 §8.5`](08-operations.md#85-rollout-playbook)).
+altering traffic (see the rollout playbook in [`operations §8.5`](operations.md#85-rollout-playbook)).
 
 ## 9.5a Free path: self-managed (hybrid) data plane on Konnect
 
@@ -124,7 +124,7 @@ run one Kong DP container, manage it from the Konnect UI, and the custom plugin
 runs because the DP is yours. (The free **Serverless** gateway cannot run custom
 plugins at all.)
 
-A ready-to-run kit lives in [`deploy/konnect-hybrid/`](../deploy/konnect-hybrid/):
+A ready-to-run kit lives in [`deploy/konnect-hybrid/`](../../deploy/konnect-hybrid):
 `docker-compose.yml` (DP + mock Skyflow + echo upstream), `deck/kong.yaml`
 (Service/Route/plugin), and a step-by-step `README.md`. The plugin's
 `require`-free `schema.lua` uploads cleanly to the control plane for hybrid
@@ -135,9 +135,9 @@ config validation — the same 2-file shape used for Dedicated Cloud Gateways.
 Fastest iteration is **local Docker Kong (self-managed)** with the in-repo
 Skyflow mock — same two files, full `pongo`/`busted` suite, no Konnect tier
 needed — then promote the validated files to the Dedicated Cloud Gateways
-control plane. See [`docs/06`](06-testing.md).
+control plane. See [`testing`](../contributing/testing.md).
 
 For an end-to-end offline loop that includes **`ai-proxy`** (de-id → ai-proxy →
 mock LLM → re-id, plus a route that reproduces the #14380 conflict), use the
-db-less harness in [`deploy/local-dbless/`](../deploy/local-dbless/) — no Konnect
+db-less harness in [`deploy/local-dbless/`](../../deploy/local-dbless) — no Konnect
 PAT or OpenAI key required.

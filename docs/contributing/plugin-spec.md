@@ -1,8 +1,8 @@
-# 04 — Plugin Specification
+# Plugin Specification
 
 Defines the plugin's identity, module layout, configuration schema, lifecycle
 handlers, and PDK usage. The reference skeleton in
-[`plugin/kong/plugins/skyflow-deidentify/`](../plugin/kong/plugins/skyflow-deidentify)
+[`plugin/kong/plugins/skyflow-deidentify/`](../../plugin/kong/plugins/skyflow-deidentify)
 implements this spec.
 
 ## 4.1 Identity
@@ -11,7 +11,7 @@ implements this spec.
 | --------- | ----- |
 | Plugin name | `skyflow-deidentify` |
 | Lua namespace | `kong.plugins.skyflow-deidentify.*` |
-| Priority (default) | `775` — de-identify runs in `access`; below AI PII Sanitizer (776). Composes with `ai-proxy` via **nested routes**, not shared-route priority (see [`docs/02 §2.8`](02-architecture.md#28-deployment-topologies)) |
+| Priority (default) | `775` — de-identify runs in `access`; below AI PII Sanitizer (776). Composes with `ai-proxy` via **nested routes**, not shared-route priority (see [`architecture §2.8`](architecture.md#28-deployment-topologies)) |
 | Phases implemented | `access`, `response`, `log` (the design also allows `init_worker`/`configure`; the Konnect single-file build omits them) |
 | Protocols | `http`, `https`, `grpc`, `grpcs`, `ws`, `wss` |
 | Scopes | global, Service, Route, Consumer, Consumer Group |
@@ -22,7 +22,7 @@ implements this spec.
 > which require two self-contained files. The module layout in §4.2 is the
 > *logical* design; physically, `auth`/`client`/`body`/`mapping` are inlined
 > into `handler.lua`, and `schema.lua` is `require`-free. See
-> [`docs/09`](09-konnect-deployment.md).
+> [`deployment`](../using/deployment.md).
 >
 > **Why `response` not `header_filter`+`body_filter`:** Kong forbids a plugin
 > from implementing `response` *and* `header_filter`/`body_filter`. We use
@@ -36,11 +36,11 @@ implements this spec.
 kong/plugins/skyflow-deidentify/
   handler.lua    -- PDK lifecycle orchestration (this doc §4.4)
   schema.lua     -- configuration contract (this doc §4.3)
-  auth.lua       -- bearer-token manager (docs/03 §3.2)
-  client.lua     -- Detect REST client (docs/03 §3.3–3.5, §3.8)
+  auth.lua       -- bearer-token manager (skyflow-integration §3.2)
+  client.lua     -- Detect REST client (skyflow-integration §3.3–3.5, §3.8)
   body.lua       -- payload profiles + span extract/replace (this doc §4.5)
-  mapping.lua    -- request-scoped token map (docs/03 §3.6)
-  *.rockspec     -- packaging (docs/05)
+  mapping.lua    -- request-scoped token map (skyflow-integration §3.6)
+  *.rockspec     -- packaging (development)
 ```
 
 ## 4.3 Configuration schema (`schema.lua`)
@@ -87,17 +87,17 @@ are never stored in plaintext in the DB and never appear in `GET /plugins`.
 | `deidentify.allow_regex` | array<string> | `[]` | Patterns to **never** tokenize. |
 | `deidentify.restrict_regex` | array<string> | `[]` | Extra patterns to **always** tokenize. |
 | `deidentify.shift_dates` | record | — | `{ enabled, min_days, max_days, entities[] }`. |
-| `deidentify.batch_mode` | string (enum) | `per_span` | `per_span`\|`joined` (docs/03 §3.4). |
+| `deidentify.batch_mode` | string (enum) | `per_span` | `per_span`\|`joined` (skyflow-integration §3.4). |
 
 ### 4.3.4 Re-identify behavior
 
 | Field | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
 | `reidentify.enabled` | boolean | `false` | Master switch for response re-hydration. |
-| `reidentify.strategy` | string (enum) | `reidentify_text` | `reidentify_text`\|`detokenize`\|`mapping_only` (docs/03 §3.5). |
+| `reidentify.strategy` | string (enum) | `reidentify_text` | `reidentify_text`\|`detokenize`\|`mapping_only` (skyflow-integration §3.5). |
 | `reidentify.entity_treatment` | map<string,string> | `{}` | Per-entity: `plain_text`\|`masked`\|`redacted`. Unlisted ⇒ `default_treatment`. |
 | `reidentify.default_treatment` | string (enum) | `plain_text` | Treatment for entities not in the map. |
-| `reidentify.streaming` | string (enum) | `buffer` | `buffer`\|`passthrough`\|`reassemble` (docs/02 §2.5). |
+| `reidentify.streaming` | string (enum) | `buffer` | `buffer`\|`passthrough`\|`reassemble` (architecture §2.5). |
 | `reidentify.on_error` | string (enum) | `return_tokenized` | `return_tokenized`\|`deny`. |
 
 ### 4.3.5 Resilience & limits

@@ -1,4 +1,4 @@
-# 01 — Overview
+# Overview
 
 ## 1.1 Problem statement
 
@@ -75,14 +75,15 @@ Any upstream. Operator points the plugin at specific JSON fields via JSONPath
 
 - **Not** a replacement for Kong **AI Proxy** — this plugin does *not* normalize
   provider request formats or manage provider credentials/routing. It composes
-  with AI Proxy (runs before it on the request, after it on the response).
+  with AI Proxy via a **nested-proxy** topology (see
+  [`architecture.md §2.8`](../contributing/architecture.md#28-deployment-topologies)).
 - **Not** a DLP/classification UI — entity taxonomy, policies, and audit live in
   **Skyflow**, not in the gateway.
 - **Not** doing client-side cryptography or holding the vault's keys. The gateway
   holds only a Skyflow credential (API key or service-account) and call config.
 - **No persistence of plaintext** at the gateway. Token↔value maps are
   request-scoped and never written to disk or shared caches (see
-  [`docs/07`](07-security-and-governance.md)).
+  [`security`](security.md)).
 - **v1 does not** transform binary/multipart uploads or non-text modalities
   (image/audio). Skyflow Detect supports files; that is a documented v2
   extension.
@@ -93,14 +94,14 @@ Any upstream. Operator points the plugin at specific JSON fields via JSONPath
 | - | -------- | --------- | ----------------------- |
 | D1 | **Lua plugin** (native PDK), name `skyflow-deidentify` | Full PDK access (body rewrite, buffered proxy, caching, timers); matches all bundled AI plugins; lowest latency; no sidecar process | Go/Python/JS PDK (extra runtime + IPC hop); external service like ai-sanitizer's anonymizer container (adds a network hop we already pay to Skyflow) |
 | D2 | De-identify in **`access`**, re-identify in **`response`** (buffered) | `access` runs before upstream send and can rewrite the request body; `response` can read the full upstream body. Mirrors AI PII Sanitizer. | `body_filter` streaming rewrite (token reassembly across chunks is error-prone — offered as advanced option only) |
-| D3 | Default **priority 775** + documented **dynamic ordering** before `ai-proxy`/`ai-proxy-advanced` | Must de-identify before AI Proxy (priority 770) serializes/sends the request; 775 sits just below AI PII Sanitizer (776) | Hard-coding a number only; we additionally support `ordering.before.access` |
+| D3 | Compose with `ai-proxy` via a **nested proxy** (two routes), not shared-route ordering | `ai-proxy` transforms the buffered response in `header_filter`, which collides with our `response`-phase rewrite on the same route (Kong #14380, gzip responses); separate routes give independent buffered cycles | Same-route priority / dynamic ordering (fails on gzip); see [`architecture.md §2.8`](../contributing/architecture.md#28-deployment-topologies) |
 | D4 | **Payload profiles** (`openai`, `anthropic`, `mcp`, `generic`) + JSONPath overrides | Covers the "LLM/MCP/etc." surface without bespoke code per upstream | One-size whole-body text (loses structure, risks corrupting JSON) |
 | D5 | Re-hydration via Detect **`reidentify_text`** by default; **vault `detokenize`** when using `VAULT_TOKEN` per-field | `reidentify_text` restores values inside free text in one call; detokenize is the canonical per-token path for structured fields | Only one of the two (each is weak for the other payload shape) |
 | D6 | **API key** credential recommended for PoC; **service-account JWT** for prod | API key avoids in-gateway RS256 signing; SA-JWT is the standard, supports scoped roles & policy context | Static bearer token (expires in 60 min — operationally poor) |
 | D7 | Configurable **fail-closed** default (`on_skyflow_error = "deny"`) | A privacy control must not leak raw PII upstream when the de-identifier is down | `fail-open` available but off by default |
 
 > These decisions are revisited where relevant in each detailed doc. Items
-> flagged **(confirm)** in [`docs/03`](03-skyflow-integration.md) are tenant /
+> flagged **(confirm)** in [`skyflow-integration`](../contributing/skyflow-integration.md) are tenant /
 > Detect-API-version dependent and should be validated against your Skyflow
 > account during implementation.
 

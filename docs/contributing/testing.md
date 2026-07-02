@@ -1,4 +1,4 @@
-# 06 — Testing Strategy
+# Testing Strategy
 
 Testing is first-class: a privacy control that occasionally leaks is worse than
 none, so the suite is built to **prove** the security invariants, not just happy
@@ -49,7 +49,7 @@ This keeps unit + integration tests **hermetic, deterministic, and fast**.
 | ---- | ------ | --------- |
 | `01-schema_spec.lua` | `schema.lua` | valid full config; missing `vault_id`/`cluster_id`; **exactly-one-of** credentials (none / two ⇒ invalid); `mapping_only` + `ENTITY_ONLY` ⇒ invalid; `deadline_ms < timeout_ms` ⇒ invalid; `generic` without paths ⇒ invalid; referenceable+encrypted credential fields accept `{vault://…}`. |
 | `04-auth_spec.lua` | `auth.lua` | api_key path sets header; SA-JWT builds correct claims & RS256-signs; token cached & reused; refresh at `expiry−skew`; **single-flight** under concurrent misses (one mint); 401 ⇒ one forced refresh+retry. |
-| `client_spec.lua` | `client.lua` | request body matches [`docs/03 §3.3`](03-skyflow-integration.md#33-de-identify-operation); timeout/5xx/429 ⇒ `retryable`; 403 ⇒ non-retryable + clear error; non-JSON ⇒ error; deadline halts retries; keepalive reused. |
+| `client_spec.lua` | `client.lua` | request body matches [`skyflow-integration §3.3`](skyflow-integration.md#33-de-identify-operation); timeout/5xx/429 ⇒ `retryable`; 403 ⇒ non-retryable + clear error; non-JSON ⇒ error; deadline halts retries; keepalive reused. |
 | `05-body_spec.lua` | `body.lua` | each profile extracts the right spans (incl. OpenAI array-content form, MCP `arguments.*`, Anthropic `system`); JSONPath subset (`$.a.b`, `[*]`, `[n]`, string-leaf recursion); non-string leaves skipped; replace is exact & order-independent; `text` content-type whole-body; malformed JSON ⇒ error. |
 | `mapping_spec.lua` | `mapping.lua` | put/get round-trip; entity counts; isolation (a new ctx is empty); never serializes values to a shared store. |
 
@@ -115,7 +115,7 @@ A representative cross-product runs in CI; the full matrix runs nightly.
 - **Metrics:** added p50/p95/p99 latency vs a no-plugin baseline; throughput;
   worker memory under sustained load; token-cache hit ratio (expect ≈100% after
   warm-up); single-flight verified (one token mint under a cold-start burst).
-- **Budgets:** see [`docs/08 §8.4`](08-operations.md#84-latency-budget). Perf
+- **Budgets:** see [`operations §8.4`](../using/operations.md#84-latency-budget). Perf
   job fails if p95 overhead exceeds budget at target RPS.
 
 ## 6.8 Local developer loop

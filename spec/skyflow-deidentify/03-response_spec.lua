@@ -1,5 +1,5 @@
 -- Integration tests for the re-identify (response) path.
--- See docs/06 §6.4 / §6.5. Cases are `pending` until Phase 4 (docs/05) lands.
+-- See docs/contributing/testing.md §6.4 / §6.5. Cases are `pending` until Phase 4 (docs/contributing/development.md) lands.
 
 local helpers = require "spec.helpers"
 local PLUGIN_NAME = "skyflow-deidentify"
@@ -29,7 +29,7 @@ for _, strategy in helpers.each_strategy() do
 
     pending("reidentify disabled imposes NO buffering (streaming still works)", function() end)
 
-    -- Security invariants (docs/06 §6.5 / docs/07 §7.7)
+    -- Security invariants (docs/contributing/testing.md §6.5 / docs/using/security.md §7.7)
     pending("masked/redacted entities are NEVER returned in plaintext", function() end)
     pending("no fixture PII value appears in logs or metrics", function() end)
     pending("GET /plugins never returns raw credentials", function() end)

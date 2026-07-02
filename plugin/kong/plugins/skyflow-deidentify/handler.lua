@@ -15,7 +15,7 @@
 --   * reidentify strategy `detokenize` (vault /detokenize API)
 --   * service-account JWT auth (RS256 via resty.openssl)
 --   * per-span concurrency, streaming `reassemble`
--- See docs/03 and docs/05.
+-- See docs/contributing/skyflow-integration.md and docs/contributing/development.md.
 
 local http  = require "resty.http"
 local cjson = require "cjson.safe"

@@ -1,4 +1,4 @@
-# 03 — Skyflow Detect Integration
+# Skyflow Detect Integration
 
 This document specifies exactly how the plugin talks to Skyflow: authentication,
 the De-identify / Re-identify / Detokenize operations, the request/response wire
@@ -32,7 +32,7 @@ the host may differ (e.g. `*.vault.skyflowapis.dev`) — exposed via
 ## 3.2 Authentication (`auth.lua`)
 
 Three credential types, mirroring the Skyflow SDKs. The plugin selects whichever
-is configured (see `config.credentials` in [`docs/04`](04-plugin-spec.md)).
+is configured (see `config.credentials` in [`plugin-spec`](plugin-spec.md)).
 
 ### 3.2.1 API key (recommended for the PoC)
 

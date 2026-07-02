@@ -2,7 +2,7 @@
 --
 -- NOTE: Konnect Dedicated Cloud Gateways do NOT use this rockspec. For Konnect
 -- you upload the two self-contained files (schema.lua + handler.lua) to the
--- control plane directly (see docs/09-konnect-deployment.md). This rockspec is
+-- control plane directly (see docs/using/deployment.md). This rockspec is
 -- for `luarocks make` on self-managed nodes and for local Docker testing.
 --
 -- Build: luarocks make

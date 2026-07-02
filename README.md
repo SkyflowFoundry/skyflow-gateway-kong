@@ -106,7 +106,7 @@ uncompressed JSON — handled exactly like a plain LLM upstream. This is verifie
 live and reproduced/verified offline in [`deploy/local-dbless/`](deploy/local-dbless/).
 
 The only parties that ever see raw values are the client, Kong worker memory
-(transiently), and the Skyflow vault. Full design in [`docs/02`](docs/02-architecture.md).
+(transiently), and the Skyflow vault. Full design in [`architecture`](docs/contributing/architecture.md).
 
 ## Getting started
 
@@ -182,7 +182,7 @@ curl -s localhost:8000/ai/chat -H 'content-type: application/json' \
 ### Deploying to a paid Dedicated Cloud Gateway
 
 Same two files, uploaded via Konnect (schema **and** handler, since Kong runs the
-data plane for you). See [`docs/09`](docs/09-konnect-deployment.md).
+data plane for you). See [`deployment`](docs/using/deployment.md).
 
 ## Repository layout
 
@@ -222,19 +222,26 @@ docs/                    # design spec (see Documentation map below)
 
 ## Documentation map
 
+**For operators / users** — [`docs/using/`](docs/using/):
+
 | Doc | What's inside |
 | --- | --- |
-| [`docs/01-overview.md`](docs/01-overview.md) | Goals, use cases (LLM, MCP, generic), non-goals, glossary, design decisions |
-| [`docs/02-architecture.md`](docs/02-architecture.md) | Components, phases, sequence diagrams, the `ai-proxy` nested-proxy pattern, streaming, topologies, failure modes |
-| [`docs/03-skyflow-integration.md`](docs/03-skyflow-integration.md) | Skyflow Detect De-identify / Re-identify / Detokenize APIs, auth, token formats, mapping model |
-| [`docs/04-plugin-spec.md`](docs/04-plugin-spec.md) | Full `schema.lua` config reference, handler phases, PDK usage, scoping/priority |
-| [`docs/05-implementation-plan.md`](docs/05-implementation-plan.md) | Milestones, repo layout, dependencies, tooling, CI |
-| [`docs/06-testing.md`](docs/06-testing.md) | Unit / integration / e2e strategy, Pongo + busted, mocks, fixtures |
-| [`docs/07-security-and-governance.md`](docs/07-security-and-governance.md) | Threat model, data handling, RBAC/governance, compliance, logging & redaction |
-| [`docs/08-operations.md`](docs/08-operations.md) | Observability, caching, latency budget, rollout, decK/Konnect config examples |
-| [`docs/09-konnect-deployment.md`](docs/09-konnect-deployment.md) | Konnect packaging constraints, the 2-file build, upload & validate steps |
+| [overview.md](docs/using/overview.md) | Goals, use cases (LLM, MCP, generic), non-goals, glossary, design decisions |
+| [security.md](docs/using/security.md) | Threat model, data handling, RBAC/governance, compliance, logging & redaction |
+| [operations.md](docs/using/operations.md) | Config recipes (decK/Admin/KIC/Konnect), observability, latency budget, rollout |
+| [deployment.md](docs/using/deployment.md) | Konnect packaging constraints, the 2-file build, upload & validate steps |
+
+**For contributors** — [`docs/contributing/`](docs/contributing/):
+
+| Doc | What's inside |
+| --- | --- |
+| [architecture.md](docs/contributing/architecture.md) | Components, phases, sequence diagrams, the `ai-proxy` nested-proxy pattern, streaming, failure modes |
+| [skyflow-integration.md](docs/contributing/skyflow-integration.md) | Skyflow Detect De-identify / Re-identify / Detokenize APIs, auth, token formats, mapping model |
+| [plugin-spec.md](docs/contributing/plugin-spec.md) | Full `schema.lua` config reference, handler phases, PDK usage, scoping/priority |
+| [testing.md](docs/contributing/testing.md) | Unit / integration / e2e strategy, Pongo + busted, mocks, fixtures |
+| [development.md](docs/contributing/development.md) | Repo layout, dependencies, local dev loop, CI |
 
 ## License & ownership
 
-Internal Skyflow proof-of-concept. See [`docs/01-overview.md`](docs/01-overview.md#non-goals)
+Internal Skyflow proof-of-concept. See [overview.md](docs/using/overview.md#14-non-goals)
 for scope boundaries.

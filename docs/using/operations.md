@@ -1,4 +1,4 @@
-# 08 — Operations
+# Operations
 
 Configuration recipes, observability, performance budgets, and rollout guidance.
 
@@ -43,30 +43,42 @@ services:
           on_skyflow_error: deny
 ```
 
-### decK (de-identify + re-identify, composed with AI Proxy)
+### decK (de-identify + re-identify, composed with AI Proxy — nested proxy)
+
+`skyflow-deidentify` and `ai-proxy` **cannot share a route** (Kong #14380 — see
+[`architecture.md §2.8`](../contributing/architecture.md#28-deployment-topologies)).
+Use two routes: a **front route** runs de-identify + re-identify and proxies
+(loopback) to an **internal route** that runs `ai-proxy` alone.
 
 ```yaml
-plugins:
-  - name: skyflow-deidentify
-    config:
-      vault_id: "${SKYFLOW_VAULT_ID}"
-      cluster_id: "${SKYFLOW_CLUSTER_ID}"
-      credentials:
-        service_account_json: "{vault://hcv/skyflow/sa}"
-      profile: openai
-      deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
-      reidentify:
-        enabled: true
-        strategy: reidentify_text
-        default_treatment: plain_text
-        entity_treatment: { CREDIT_CARD: masked, SSN: redacted }
-        streaming: buffer
-    ordering:
-      before:
-        access: [ai-proxy, ai-proxy-advanced]
-  - name: ai-proxy
-    config: { route_type: "llm/v1/chat", model: { provider: openai } }
+services:
+  - name: ai-front
+    url: http://127.0.0.1:8000/_ai_upstream   # loopback to the internal route
+    routes:
+      - name: ai-chat
+        paths: ["/ai/chat"]
+    plugins:
+      - name: skyflow-deidentify
+        config:
+          vault_id: "${SKYFLOW_VAULT_ID}"
+          cluster_id: "${SKYFLOW_CLUSTER_ID}"
+          credentials: { api_key: "{vault://env/SKYFLOW_API_KEY}" }
+          profile: openai
+          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
+          reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
+          on_skyflow_error: deny
+  - name: ai-upstream
+    url: http://localhost:32000               # placeholder; ai-proxy overrides upstream
+    routes:
+      - name: ai-upstream
+        paths: ["/_ai_upstream"]              # restrict in prod so it can't be called directly
+    plugins:
+      - name: ai-proxy
+        config: { route_type: "llm/v1/chat", model: { provider: openai, name: gpt-4o-mini } }
 ```
+
+A ready-to-run version is in
+[`deploy/konnect-hybrid/deck/real-vault.yaml`](../../deploy/konnect-hybrid/deck/real-vault.yaml).
 
 ### Admin API
 
@@ -177,7 +189,7 @@ migration, no schema/DAO state.
 - The bearer-token cache is node-wide; expect a single mint per node per token
   lifetime under single-flight.
 - For very large corpora or file modalities, prefer an async pipeline over the
-  synchronous proxy path (out of scope for v1; see [`docs/01`](01-overview.md#14-non-goals)).
+  synchronous proxy path (out of scope for v1; see [`overview`](overview.md#14-non-goals)).
 
 ## 8.7 Troubleshooting
 
@@ -185,7 +197,7 @@ migration, no schema/DAO state.
 | ------- | ------------ | ------ |
 | 502 with `skyflow_errors_total{class="timeout"}` | Skyflow unreachable/slow | check egress/DNS/TLS to cluster; raise `timeout_ms`/`deadline_ms`; verify region. |
 | 403 from Skyflow | SA role lacks Detect permission | grant "De-identify and reidentify…"; for detokenize, add read/detokenize. |
-| Upstream still sees PII | plugin after AI Proxy, or wrong profile/paths | set dynamic `ordering.before.access`; verify `profile`/`request_json_paths`. |
+| Upstream still sees PII | de-identify not on the request path, or wrong profile/paths | with `ai-proxy`, use the nested-proxy layout (de-identify on the front route; §8.2); verify `profile`/`request_json_paths`. |
 | Re-identify not happening | `reidentify.enabled=false`, streamed + `passthrough`, or `mapping_only` missing tokens | enable; use `buffer`; check token source. |
 | Credentials visible concern | — | they're `encrypted`+`referenceable`; confirm via `GET /plugins` returns no raw secret. |
 | High latency | cold token cache / no keepalive / serial batching | confirm cache hits; raise `keepalive_pool_size`; use `per_span` concurrency or `mapping_only`. |
