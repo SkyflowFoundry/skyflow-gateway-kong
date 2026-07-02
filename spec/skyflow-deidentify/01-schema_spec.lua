@@ -1,6 +1,6 @@
 -- Schema validation unit tests for skyflow-deidentify.
 -- Run with busted (via Pongo): `pongo run spec/skyflow-deidentify/01-schema_spec.lua`
--- Mirrors docs/06 §6.3 and the entity checks in docs/04 §4.3.7.
+-- Mirrors docs/contributing/testing.md §6.3 and the entity checks in docs/contributing/plugin-spec.md §4.3.7.
 
 local PLUGIN_NAME = "skyflow-deidentify"
 

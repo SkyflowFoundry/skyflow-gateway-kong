@@ -1,4 +1,4 @@
--- In-process mock of the Skyflow Detect API for hermetic tests (docs/06 §6.2).
+-- In-process mock of the Skyflow Detect API for hermetic tests (docs/contributing/testing.md §6.2).
 --
 -- Two ways to use it:
 --   1) As a PURE function in unit tests: `mock.handle(path, body, headers)`

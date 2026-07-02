@@ -1,7 +1,7 @@
 -- Integration tests for the de-identify (request) path.
 -- Real Kong (via Pongo + spec.helpers) pointed at the in-repo Skyflow mock.
--- See docs/06 §6.4 for the full case list. Cases are `pending` until the
--- corresponding implementation phase (docs/05) lands; the structure encodes
+-- See docs/contributing/testing.md §6.4 for the full case list. Cases are `pending` until the
+-- corresponding implementation phase (docs/contributing/development.md) lands; the structure encodes
 -- the acceptance criteria.
 
 local helpers = require "spec.helpers"

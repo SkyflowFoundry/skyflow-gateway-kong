@@ -8,7 +8,7 @@
 --     Lua (no os.*, no globals, no requires).
 --   * Pairs with a self-contained handler.lua; no extra modules/DAOs/migrations.
 --
--- See docs/04-plugin-spec.md §4.3 for the field reference and docs/08 for the
+-- See docs/contributing/plugin-spec.md §4.3 for the field reference and docs/using/operations.md for the
 -- Konnect upload steps.
 
 local TOKEN_FORMATS = { "VAULT_TOKEN", "ENTITY_ONLY", "ENTITY_UNQ_COUNTER" }
@@ -17,7 +17,7 @@ local ENVS          = { "PROD", "SANDBOX", "DEV", "STAGE" }
 local TREATMENTS    = { "plain_text", "masked", "redacted" }
 -- mapping_only is the strategy implemented in this build; reidentify_text /
 -- detokenize are accepted but degrade to return_tokenized until implemented
--- (see handler.lua / docs/03 §3.5).
+-- (see handler.lua / docs/contributing/skyflow-integration.md §3.5).
 local STRATEGIES    = { "mapping_only", "reidentify_text", "detokenize" }
 -- 'reassemble' streaming is a self-managed-only future option; omitted here so
 -- it cannot be selected on the cloud build (avoids os.* in schema validation).

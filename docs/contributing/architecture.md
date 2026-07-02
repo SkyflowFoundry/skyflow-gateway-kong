@@ -1,4 +1,4 @@
-# 02 — Architecture
+# Architecture
 
 ## 2.1 Where the plugin sits
 
@@ -70,7 +70,7 @@ kong.plugins.skyflow-deidentify
 - `handler.lua` knows **Kong** (PDK), not Skyflow wire format.
 - `client.lua`/`auth.lua` know **Skyflow**, not Kong request shape.
 - `body.lua` knows **payload shape**, not Skyflow or Kong I/O.
-- This keeps each unit independently unit-testable (see [`docs/06`](06-testing.md)).
+- This keeps each unit independently unit-testable (see [`testing`](testing.md)).
 
 ## 2.3 Request path (de-identify) — sequence
 
@@ -103,7 +103,7 @@ Client          Kong (access)            body.lua        auth.lua        client.
 **Batching.** All text spans for a request are de-identified in **one** Detect
 call where possible (the Detect API processes a text payload at a time; multiple
 chat messages are joined with unambiguous separators or sent as repeated calls
-per the chosen batching strategy — see [`docs/03 §3.4`](03-skyflow-integration.md#34-batching-multiple-spans)).
+per the chosen batching strategy — see [`skyflow-integration §3.4`](skyflow-integration.md#34-batching-multiple-spans)).
 This bounds the added latency to a single round-trip regardless of message count.
 
 ## 2.4 Response path (re-identify) — sequence
@@ -128,7 +128,7 @@ Re-identify uses the **mapping** captured during `access` to know which tokens
 to restore and as which entity class (`redacted`/`masked`/`plain_text`). When
 `VAULT_TOKEN` format is used and the payload is structured, the plugin can
 instead call vault **detokenize** per token. See
-[`docs/03 §3.5`](03-skyflow-integration.md#35-re-hydration-strategies).
+[`skyflow-integration §3.5`](skyflow-integration.md#35-re-hydration-strategies).
 
 ## 2.5 Streaming considerations
 
@@ -156,7 +156,7 @@ When `reidentify.enabled = false` (de-identify only — the most common posture)
 | Skyflow **bearer token** | `kong.cache` (mlcache over the shared dict; node-wide, multi-worker) | `expiry − skew` (≈55 min for 60-min tokens) | Avoid re-minting on every request; single-flight refresh under `lua-resty-lock`. |
 | HTTP **keepalive** to Skyflow | `lua-resty-http` connection pool per worker | pool idle timeout | Amortize TLS handshake; bounded pool size. |
 | **Token↔value mapping** | `kong.ctx.plugin` (request-scoped, in-memory) | one request | Needed to re-identify the matching response. **Never** shared or persisted. |
-| Detect **results** | *not cached* | — | Per-request data; caching plaintext would be a leak (see [`docs/07`](07-security-and-governance.md)). |
+| Detect **results** | *not cached* | — | Per-request data; caching plaintext would be a leak (see [`security`](../using/security.md)). |
 
 ## 2.7 Failure modes & posture
 
@@ -166,7 +166,7 @@ When `reidentify.enabled = false` (de-identify only — the most common posture)
 | Skyflow auth failure (401/403) | Always `deny` + log; attempt one token refresh+retry first | A bad credential must not silently fall through. |
 | Body not parseable for the profile | `skip` (forward unchanged) or `deny`, per `on_parse_error` | A non-JSON body to the `openai` profile is a misconfiguration signal. |
 | Skyflow error on **re-identify** | Return the **tokenized** response (never 5xx the user over re-ID), log, metric | The upstream succeeded; degrade to tokens rather than failing the call. Configurable via `reidentify.on_error`. |
-| Request body exceeds `max_body_size` | `deny` or `skip` per config | Avoid unbounded memory; large bodies handled per [`docs/08`](08-operations.md). |
+| Request body exceeds `max_body_size` | `deny` or `skip` per config | Avoid unbounded memory; large bodies handled per [`operations`](../using/operations.md). |
 | Plugin internal error | `pcall`-guarded; same posture as `on_skyflow_error` | Never crash the worker; structured error log. |
 
 ## 2.8 Deployment topologies
@@ -187,8 +187,8 @@ rewrite of the gzip body → `500 "no response body found"`). So they run on two
 routes: a **front route** does de-id + re-id and proxies (loopback to Kong's own
 port) to an **internal route** that runs `ai-proxy` alone. Two independent
 buffered cycles, no collision. Ready-to-run in
-[`deploy/konnect-hybrid/deck/real-vault.yaml`](../deploy/konnect-hybrid/deck/real-vault.yaml);
-reproduced + verified offline in [`deploy/local-dbless/`](../deploy/local-dbless/).
+[`deploy/konnect-hybrid/deck/real-vault.yaml`](../../deploy/konnect-hybrid/deck/real-vault.yaml);
+reproduced + verified offline in [`deploy/local-dbless/`](../../deploy/local-dbless).
 
 ### T2 — Standalone proxy to any upstream (MCP / generic)
 
@@ -208,13 +208,13 @@ IP allowlists and mTLS to providers.
 
 Control plane in Konnect, data planes self-hosted near the workloads. Plugin
 config is declarative and distributed by Konnect; Skyflow credentials injected
-to data planes via env/secret references (see [`docs/07`](07-security-and-governance.md)).
+to data planes via env/secret references (see [`security`](../using/security.md)).
 
 ## 2.9 Concurrency & performance shape
 
 - **Added latency** ≈ auth (amortized to ~0 via cache) + **1** Detect round-trip
   on the request, and (if enabled) **1** Re-identify round-trip on the response.
-  Budget and tuning in [`docs/08 §8.4`](08-operations.md#84-latency-budget).
+  Budget and tuning in [`operations §8.4`](../using/operations.md#84-latency-budget).
 - All Skyflow I/O uses OpenResty's non-blocking cosockets — a worker handles
   other requests while awaiting Skyflow.
 - No blocking calls, no `os.time`-based sleeps in the hot path; token refresh is
@@ -236,4 +236,4 @@ to data planes via env/secret references (see [`docs/07`](07-security-and-govern
 The only parties that ever see raw values are the **client**, the **Kong worker
 memory** (transiently), and the **Skyflow vault**. The upstream model/tool sees
 only tokens. This is the core security property; it is restated and threat-
-modeled in [`docs/07`](07-security-and-governance.md).
+modeled in [`security`](../using/security.md).
