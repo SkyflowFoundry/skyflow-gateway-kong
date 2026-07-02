@@ -115,7 +115,7 @@ A representative cross-product runs in CI; the full matrix runs nightly.
 - **Metrics:** added p50/p95/p99 latency vs a no-plugin baseline; throughput;
   worker memory under sustained load; token-cache hit ratio (expect ≈100% after
   warm-up); single-flight verified (one token mint under a cold-start burst).
-- **Budgets:** see [`operations §8.4`](../using/operations.md#84-latency-budget). Perf
+- **Budgets:** see [`operations §8.4`](../using/operations.md#latency-budget). Perf
   job fails if p95 overhead exceeds budget at target RPS.
 
 ## 6.8 Local developer loop

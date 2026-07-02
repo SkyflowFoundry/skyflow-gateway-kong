@@ -2,7 +2,7 @@
 
 Configuration recipes, observability, performance budgets, and rollout guidance.
 
-## 8.1 Installation
+## Installation
 
 ```bash
 # Into a Kong node / image
@@ -17,7 +17,7 @@ kong reload
 
 Confirm: `curl localhost:8001/plugins/enabled | jq '.enabled_plugins[]' | grep skyflow`.
 
-## 8.2 Configuration examples
+## Configuration examples
 
 ### decK (de-identify only — most common)
 
@@ -102,7 +102,7 @@ plugin: skyflow-deidentify
 config:
   vault_id: { valueFrom: { secretKeyRef: { name: skyflow, key: vault_id } } }
   cluster_id: { valueFrom: { secretKeyRef: { name: skyflow, key: cluster_id } } }
-  credentials: { service_account_json: "{vault://k8s/skyflow/sa}" }
+  credentials: { api_key: "{vault://k8s/skyflow/api-key}" }
   profile: openai
   deidentify: { entities: [NAME, EMAIL_ADDRESS], token_format: VAULT_TOKEN }
 # annotate the Ingress/HTTPRoute/Service: konghq.com/plugins: skyflow-deidentify
@@ -113,37 +113,32 @@ config:
 Same `config` block via the Konnect control-plane API/UI; inject credentials as
 control-plane secrets and let data planes resolve the `{vault://…}` references.
 
-## 8.3 Observability
+## Observability
 
-### Metrics (emitted in the `log` phase; Prometheus/StatsD friendly)
+When `log.detections = true`, the plugin adds these fields to Kong's log
+serializer in the `log` phase (they flow to whatever logging/analytics you run —
+Konnect analytics, file-log, http-log, etc.):
 
-| Metric | Type | Labels | Meaning |
-| ------ | ---- | ------ | ------- |
-| `skyflow_requests_total` | counter | `phase`, `result` | de-identify/re-identify attempts by outcome |
-| `skyflow_entities_detected_total` | counter | `entity` | count of detected entities by type (no values) |
-| `skyflow_latency_ms` | histogram | `phase` | Skyflow round-trip latency |
-| `skyflow_errors_total` | counter | `phase`, `class` | timeout/5xx/401/403/429/parse |
-| `skyflow_posture_total` | counter | `posture` | deny/allow/skip taken |
-| `skyflow_token_cache` | counter | `event` | hit/miss/refresh/mint |
-| `skyflow_spans` | histogram | `phase` | spans processed per request |
+- `skyflow.entities_by_type` — per-request counts of detected entities by class.
+- `skyflow.posture` — the posture taken for the request (`enforce` / `allow`).
 
-### Logs
+**Values are never logged** — only counts, types, and posture.
 
-Structured JSON via `kong.log`: request id, route/service/consumer ids, profile,
-spans, `entities_by_type` counts, Skyflow latency, error class, posture,
-`dry_run`. **Never** values. Tunable via `log.sample_rate`.
+What to watch:
 
-### Alerts (suggested)
+- A rise in de-identify failures / `502`s → Skyflow degradation (check egress,
+  DNS, and TLS to the vault cluster).
+- Any `skyflow.posture = allow` when you run `on_skyflow_error = deny` → a
+  fail-open slipped through; treat as a privacy-relevant signal.
 
-- `skyflow_errors_total` rate > threshold → Skyflow degradation.
-- `skyflow_posture_total{posture="allow"} > 0` → **fail-open occurred** (privacy
-  signal) — page if `on_skyflow_error=allow` is unexpected.
-- token `mint` rate spikes → cache/single-flight regression.
-- p95 `skyflow_latency_ms` breach → upstream/network issue.
+> Dedicated Prometheus/StatsD counters (request outcomes, Skyflow latency, error
+> classes) are a planned enhancement; today, derive signals from the fields above
+> plus Kong's built-in request metrics.
 
-## 8.4 Latency budget
+## Latency budget
 
-Added latency ≈ Skyflow round-trips (auth is amortized to ≈0 via cache):
+Added latency ≈ Skyflow round-trips (API-key auth adds no extra round-trip — the
+key is sent directly):
 
 | Posture | Extra round-trips | Typical added p95* |
 | ------- | ----------------- | ------------------ |
@@ -164,7 +159,7 @@ Added latency ≈ Skyflow round-trips (auth is amortized to ≈0 via cache):
 Because Skyflow I/O is non-blocking (cosockets), added latency does **not**
 proportionally reduce worker throughput.
 
-## 8.5 Rollout playbook
+## Rollout playbook
 
 1. **Observe (`dry_run=true`):** enable on a Route; the plugin detects and logs
    entity counts but does **not** alter traffic. Validate detection coverage and
@@ -182,22 +177,22 @@ proportionally reduce worker throughput.
 Rollback is a config flip (`dry_run=true` or disable the plugin) — no data
 migration, no schema/DAO state.
 
-## 8.6 Capacity & limits
+## Capacity & limits
 
 - Memory: bounded by `max_body_size` × in-flight requests; size workers
   accordingly for large prompts.
-- The bearer-token cache is node-wide; expect a single mint per node per token
-  lifetime under single-flight.
+- HTTP connections to Skyflow are pooled per worker (`keepalive_pool_size`) to
+  avoid a TLS handshake on every call.
 - For very large corpora or file modalities, prefer an async pipeline over the
-  synchronous proxy path (out of scope for v1; see [`overview`](overview.md#14-non-goals)).
+  synchronous proxy path (not supported today; see [overview](overview.md#non-goals)).
 
-## 8.7 Troubleshooting
+## Troubleshooting
 
 | Symptom | Likely cause | Action |
 | ------- | ------------ | ------ |
-| 502 with `skyflow_errors_total{class="timeout"}` | Skyflow unreachable/slow | check egress/DNS/TLS to cluster; raise `timeout_ms`/`deadline_ms`; verify region. |
-| 403 from Skyflow | SA role lacks Detect permission | grant "De-identify and reidentify…"; for detokenize, add read/detokenize. |
-| Upstream still sees PII | de-identify not on the request path, or wrong profile/paths | with `ai-proxy`, use the nested-proxy layout (de-identify on the front route; §8.2); verify `profile`/`request_json_paths`. |
-| Re-identify not happening | `reidentify.enabled=false`, streamed + `passthrough`, or `mapping_only` missing tokens | enable; use `buffer`; check token source. |
-| Credentials visible concern | — | they're `encrypted`+`referenceable`; confirm via `GET /plugins` returns no raw secret. |
-| High latency | cold token cache / no keepalive / serial batching | confirm cache hits; raise `keepalive_pool_size`; use `per_span` concurrency or `mapping_only`. |
+| 502 on de-identify | Skyflow unreachable/slow (fail-closed) | check egress/DNS/TLS to the vault cluster; raise `timeout_ms`/`deadline_ms`; verify region. |
+| 403 from Skyflow | the API key's role lacks the Detect permission | grant Detect de-identify (and reidentify, if you re-identify). |
+| Upstream still sees PII | de-identify not on the request path, or wrong profile/paths | with `ai-proxy`, use the nested-proxy layout (de-identify on the front route; see the nested-proxy example above); verify `profile`/`request_json_paths`. |
+| Re-identify not happening | `reidentify.enabled=false`, streamed + `passthrough`, or `mapping_only` missing tokens | enable it; use `buffer`; check the token source. |
+| Credential visible concern | — | credentials are `encrypted`+`referenceable`; confirm `GET /plugins` returns no raw secret. |
+| High latency | no keepalive / serial batching | raise `keepalive_pool_size`; use `per_span` concurrency or `mapping_only`; co-locate near the vault region. |
