@@ -22,8 +22,10 @@ lint:
 	luacheck plugin spec *.rockspec
 
 # Markdown lint (config in .markdownlint.jsonc). `make lint-md FIX=1` to auto-fix.
+# Version pinned so local and CI (.github/workflows/markdownlint.yml) match.
+MDLINT_VERSION := 0.23.0
 lint-md:
-	npx --yes markdownlint-cli2 $(if $(FIX),--fix) "**/*.md"
+	npx --yes markdownlint-cli2@$(MDLINT_VERSION) $(if $(FIX),--fix) "**/*.md"
 
 # No Kong, no Docker: validates the pure path/mask/re-identify algorithms.
 unit-pure:
