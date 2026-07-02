@@ -17,14 +17,14 @@ at all, so this is the path.
         ▲ demo traffic :8000
 ```
 
-> **Heads up / honesty:** I authored this from an environment whose egress
-> policy blocks `*.api.konghq.com`, so I could **not** test the live Konnect
-> handshake or the exact cluster endpoints. The steps below are the standard
-> Konnect hybrid flow; the **UI path is authoritative** for the cert + endpoints
-> (Konnect generates them for you). File/Lua/YAML here are validated; the
-> Konnect-side values you fill in from your account.
+> **Verified working.** This flow has been run end-to-end against a live Konnect
+> control plane and a real Skyflow vault + real OpenAI: the DP connects, `deck
+> gateway sync` applies, and `/ai/chat` round-trips (de-id → `ai-proxy` → LLM →
+> re-id). The **Konnect UI is authoritative** for the cert + cluster endpoints —
+> it generates them for your account; fill those into `certs/` and `.env`.
 
 ## Prerequisites
+
 - Docker + Docker Compose
 - [`deck`](https://docs.konghq.com/deck/) (for the Service/Route/plugin config)
 - Your Konnect PAT in the shell: `export KONNECT_PAT=kpat_...`
@@ -32,13 +32,16 @@ at all, so this is the path.
 ## Steps
 
 ### 1. Create a hybrid control plane
+
 Konnect → **Gateway Manager** → **New control plane** → **Self-Managed Hybrid**.
 Name it `skyflow-hybrid`.
 
 ### 2. Add a data plane node (gets you certs + endpoints)
+
 In the control plane → **Data plane nodes** → **New data plane node** →
 **Docker**. Konnect generates a **certificate + key** and shows a `docker run`
 with the **control-plane** and **telemetry** endpoints.
+
 - Save the cert/key as `certs/tls.crt` and `certs/tls.key` here.
 - `cp .env.example .env` and copy the four endpoint values from that command
   into `.env` (the `cp0`/`tp0` hostnames and `:443`).
@@ -47,6 +50,7 @@ with the **control-plane** and **telemetry** endpoints.
 
 Control plane → **Plugins** → **Custom Plugins** → **New**. Upload **only the
 schema**:
+
 - `../../plugin/kong/plugins/skyflow-deidentify/schema.lua`  (it's `require`-free, as Konnect requires)
 
 That is all Konnect needs in **hybrid** mode — the schema lets the control plane
@@ -62,6 +66,7 @@ volume mount in `docker-compose.yml` (plus `KONG_PLUGINS=bundled,skyflow-deident
 > Two routes = two independent buffered cycles. One plugin does both halves,
 > exactly like `/vault/chat`. See `deck/real-vault.yaml` and, for an offline
 > reproduction + verification, `deploy/local-dbless/`.
+
 Uploading the handler to Konnect only applies to **Dedicated Cloud Gateways**,
 where Kong runs the data plane for you.
 
@@ -70,14 +75,17 @@ where Kong runs the data plane for you.
 > via `deck sync` — that is separate, and not a prerequisite for this step.
 
 ### 4. Start the data plane + demo services
+
 ```bash
 cd deploy/konnect-hybrid
 docker compose up -d
 docker compose logs -f kong-dp     # wait for "started" / no cluster errors
 ```
+
 In Konnect, the data plane node should flip to **Connected**.
 
 ### 5. Push the Service/Route/plugin config
+
 ```bash
 deck gateway sync \
   --konnect-token "$KONNECT_PAT" \
@@ -86,27 +94,59 @@ deck gateway sync \
 ```
 
 ### 6. Demo it
+
 ```bash
 curl -s localhost:8000/demo/chat \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Email Jane Doe at jane@acme.com about card 4111111111111111"}]}' | jq .
 ```
+
 The `echo` upstream reflects **what it received** — you'll see the content the
 "LLM" got was tokenized:
+
 ```
 "Email [NAME_aB3xQ] at [EMAIL_ADDRESS_kp2] about card [CREDIT_CARD_N92QAVa]"
 ```
+
 The original PII (`Jane Doe`, `jane@acme.com`, the card) never left the data
 plane. Flip `dry_run: true` in `deck/kong.yaml` + re-sync to show detections
 without altering traffic; toggle `reidentify` to show re-hydration.
 
+### 7. AI Gateway flow — de-identify → `ai-proxy` → real LLM → re-identify
+
+`deck/kong.yaml` (above) uses an echo upstream. To run the full AI Gateway
+round-trip through `ai-proxy`, sync one of the AI configs instead — each defines
+the nested-proxy routes (`/ai/chat` front + `/_ai_upstream` internal):
+
+- `deck/ai-gateway.yaml` — mock Skyflow, real LLM. Needs `DECK_OPENAI_API_KEY`.
+- `deck/real-vault.yaml` — real Skyflow vault + real LLM. Needs `DECK_SKYFLOW_*`
+  and `DECK_OPENAI_API_KEY`.
+
+```bash
+export DECK_OPENAI_API_KEY=sk-...
+# real vault also needs: export DECK_SKYFLOW_VAULT_ID=... DECK_SKYFLOW_CLUSTER_ID=... DECK_SKYFLOW_API_KEY=...
+deck gateway sync --konnect-token "$KONNECT_PAT" \
+  --konnect-control-plane-name skyflow-hybrid \
+  deck/real-vault.yaml            # or deck/ai-gateway.yaml
+
+curl -s localhost:8000/ai/chat -H 'content-type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi my name is Jane Doe"}]}' | jq .
+```
+
+You get a real LLM reply with `Jane Doe` restored, while the provider only ever
+saw a token. See the repo root [`README.md`](../../README.md#architecture) for
+why the routes are nested, and [`deck/VERIFY-DETECT.md`](deck/VERIFY-DETECT.md)
+to confirm the live Detect contract before pointing at a real vault.
+
 ## Point at a real Skyflow vault (optional)
+
 In `deck/kong.yaml`, remove `skyflow_base_url_override`, set the real
 `vault_id`/`cluster_id`, and set `credentials.api_key` to a Skyflow key with the
 Detect de-identify permission; re-sync. (Use a Konnect Vault reference for the
 key in anything beyond a throwaway demo.)
 
 ## Troubleshooting
+
 | Symptom | Fix |
 | --- | --- |
 | `Bind for 0.0.0.0:8000 failed: port is already allocated` | Something else holds the port. Free it (`lsof -i :8000`, or stop the other container), or set `PROXY_HTTP_PORT`/`PROXY_HTTPS_PORT` in `.env` and re-run. |

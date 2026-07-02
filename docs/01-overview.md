@@ -46,24 +46,28 @@ Skyflow Data Privacy Vault.
 ## 1.3 Use cases
 
 ### UC-1 — LLM chat completion (de-identify only)
+
 A client calls `POST /v1/chat/completions` through Kong. The plugin extracts the
 `messages[*].content` strings, de-identifies them, and forwards the tokenized
 prompt to OpenAI (directly or via AI Proxy). The model never sees raw PII. The
 response is returned as-is (it only references tokens, if any).
 
 ### UC-2 — LLM chat completion (de-identify + re-identify)
+
 As UC-1, but `reidentify.enabled = true`. The model's answer (which may echo the
 tokens it was given) is re-identified on the way back so the human sees real
 values. Example: *"Email a summary to [EMAIL_ADDRESS_aB3]"* → the provider
 sees the token; the user sees `jane@acme.com`.
 
 ### UC-3 — MCP tool call
+
 An agent calls an MCP server through Kong using JSON-RPC. Tool arguments
 (`params.arguments.*`) carry customer data. The plugin de-identifies the
 argument values so the tool/provider operates on tokens; tool results are
 optionally re-identified for the agent.
 
 ### UC-4 — Generic JSON API
+
 Any upstream. Operator points the plugin at specific JSON fields via JSONPath
 (e.g. `$.customer.notes`, `$.ticket.body`) or treats the whole body as text.
 

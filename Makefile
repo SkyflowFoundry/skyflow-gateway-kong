@@ -4,11 +4,12 @@
 PLUGIN := skyflow-deidentify
 VERSION := 0.2.0-1
 
-.PHONY: help lint unit-pure test unit integration e2e sandbox-smoke pack clean
+.PHONY: help lint lint-md unit-pure test unit integration e2e sandbox-smoke pack clean
 
 help:
 	@echo "Targets:"
 	@echo "  lint           luacheck the plugin + specs"
+	@echo "  lint-md        markdownlint the docs (needs node/npx)"
 	@echo "  unit-pure      offline algorithm tests (luajit only, no Kong/Docker)"
 	@echo "  test           full suite (unit-pure + Pongo integration) against the mock Skyflow"
 	@echo "  unit           busted unit specs only (no Kong, no network)"
@@ -19,6 +20,10 @@ help:
 
 lint:
 	luacheck plugin spec *.rockspec
+
+# Markdown lint (config in .markdownlint.jsonc). `make lint-md FIX=1` to auto-fix.
+lint-md:
+	npx --yes markdownlint-cli2 $(if $(FIX),--fix) "**/*.md"
 
 # No Kong, no Docker: validates the pure path/mask/re-identify algorithms.
 unit-pure:

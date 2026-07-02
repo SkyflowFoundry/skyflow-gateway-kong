@@ -1,0 +1,22 @@
+{
+  // Repo markdown style. Also read automatically by the VS Code markdownlint
+  // extension and by `make lint-md` (markdownlint-cli2).
+  "default": true,
+
+  // Repo convention: dash bullets everywhere.
+  "MD004": { "style": "dash" },
+
+  // Prose, tables, and long links wrap naturally — no hard line-length cap.
+  "MD013": false,
+
+  // The docs lean heavily on ASCII architecture diagrams and directory trees in
+  // fenced blocks, which have no meaningful language to tag.
+  "MD040": false,
+
+  // Allow the occasional inline HTML (e.g. <br>) in tables.
+  "MD033": false,
+
+  // Bold labels are used intentionally as captions for example/request blocks
+  // (e.g. **Client → Kong**), which the emphasis-as-heading heuristic misflags.
+  "MD036": false
+}

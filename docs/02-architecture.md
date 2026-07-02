@@ -7,12 +7,20 @@ plugin is an **HTTP-module** plugin that acts in two phases:
 
 - **`access`** — runs for every request before it is proxied upstream. This is
   where we read the client request body, call Skyflow **De-identify**, and
-  rewrite the outbound body. It runs **before** AI Proxy (priority 770) so the
-  upstream only ever receives tokenized content.
+  rewrite the outbound body so the upstream only ever receives tokenized content.
 - **`response`** — runs after the full upstream response is received but before
   any byte is sent to the client (this implicitly enables Kong's **buffered
   proxy** mode). This is where we call Skyflow **Re-identify** and rewrite the
   response body. Only active when `reidentify.enabled = true`.
+
+> **Composing with AI Proxy.** The plugin does **not** share a route with
+> `ai-proxy`. `ai-proxy` transforms the LLM response in its `header_filter`,
+> while our re-identify must run in the `response` phase (it calls Skyflow over a
+> cosocket, banned in `body_filter`); on one route the two fight over the
+> buffered body and `ai-proxy` 500s with "no response body found when
+> transforming response" whenever the upstream body is gzip-encoded (real OpenAI
+> always is — [Kong #14380](https://github.com/Kong/kong/issues/14380)). Instead
+> they run on **two routes** — see the nested-proxy topology in [§2.8](#28-deployment-topologies).
 
 We also use:
 
@@ -58,6 +66,7 @@ kong.plugins.skyflow-deidentify
 ```
 
 ### Separation of concerns
+
 - `handler.lua` knows **Kong** (PDK), not Skyflow wire format.
 - `client.lua`/`auth.lua` know **Skyflow**, not Kong request shape.
 - `body.lua` knows **payload shape**, not Skyflow or Kong I/O.
@@ -162,26 +171,41 @@ When `reidentify.enabled = false` (de-identify only — the most common posture)
 
 ## 2.8 Deployment topologies
 
-### T1 — Sidecar to AI Proxy (recommended for LLMs)
+### T1 — Nested proxy with AI Proxy (recommended for LLMs)
+
 ```
-client → [ skyflow-deidentify (access) ] → [ ai-proxy ] → provider
-client ← [ skyflow-deidentify (response) ] ← [ ai-proxy ] ← provider
+client → [ /ai/chat: skyflow-deidentify (access: de-id) ]
+             → (loopback) → [ /_ai_upstream: ai-proxy ] → provider
+client ← [ /ai/chat: skyflow-deidentify (response: re-id) ]
+             ← (loopback) ← [ /_ai_upstream: ai-proxy ] ← provider
 ```
-The plugin de-identifies before AI Proxy normalizes/sends, and re-identifies
-after AI Proxy receives. Ordering enforced via priority + dynamic ordering.
+
+`ai-proxy` and the response-phase re-identifier **cannot share a route**
+(Kong [#14380](https://github.com/Kong/kong/issues/14380): `ai-proxy` reads the
+buffered response in its `header_filter`, which collides with our `response`-phase
+rewrite of the gzip body → `500 "no response body found"`). So they run on two
+routes: a **front route** does de-id + re-id and proxies (loopback to Kong's own
+port) to an **internal route** that runs `ai-proxy` alone. Two independent
+buffered cycles, no collision. Ready-to-run in
+[`deploy/konnect-hybrid/deck/real-vault.yaml`](../deploy/konnect-hybrid/deck/real-vault.yaml);
+reproduced + verified offline in [`deploy/local-dbless/`](../deploy/local-dbless/).
 
 ### T2 — Standalone proxy to any upstream (MCP / generic)
+
 ```
 client → [ skyflow-deidentify ] → Kong Service/Route → upstream (MCP server, REST API)
 ```
+
 No AI Proxy; the plugin is the only AI/privacy plugin on the Route.
 
 ### T3 — Egress gateway
+
 Kong deployed as a forward/egress proxy so *all* outbound AI traffic from a VPC
 passes the plugin globally (plugin scoped **global** or per-Service). Pairs with
 IP allowlists and mTLS to providers.
 
 ### T4 — Konnect / hybrid
+
 Control plane in Konnect, data planes self-hosted near the workloads. Plugin
 config is declarative and distributed by Konnect; Skyflow credentials injected
 to data planes via env/secret references (see [`docs/07`](07-security-and-governance.md)).

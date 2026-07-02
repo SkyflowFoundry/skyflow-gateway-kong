@@ -4,7 +4,9 @@ Status: **working**. Self-managed DP on Konnect runs `skyflow-deidentify`;
 de-identify **and** the vault-backed re-identify round-trip are working.
 
 ## What's proven
+
 Prompt PII is tokenized before it reaches the LLM, then restored on the way back:
+
 ```
 client req:   "Email Jane Doe at jane@acme.com"
 LLM sees:     "Email [NAME_aB3xQ] at [EMAIL_ADDRESS_kp2]"   # only tokens
@@ -12,6 +14,7 @@ client resp:  "... Jane Doe ... jane@acme.com ..."          # values restored vi
 ```
 
 ## Demo script
+
 1. **De-identify** (the win): the basic curl → inspect echoed `body`, PII is tokens.
 2. **More entities**: send SSN / card / phone; show they tokenize too.
 3. **Fail-closed** (no silent leak):
@@ -23,6 +26,7 @@ client resp:  "... Jane Doe ... jane@acme.com ..."          # values restored vi
    real values back (`VAULT_TOKEN` + `reidentify_text`; the mock reverses them).
 
 ## Next improvements (before a polished demo)
+
 - **Broader coverage**: multiple messages (batching), `anthropic`/`mcp` profiles,
   large bodies, streaming responses (streamed LLM output can't be re-identified in
   `buffer` mode — the common chat UX still needs a story here).
@@ -33,10 +37,14 @@ client resp:  "... Jane Doe ... jane@acme.com ..."          # values restored vi
   own `docker run` does, to avoid the PEM-file friction from setup.
 
 ## Ready-to-run configs (in `deck/`)
-- `ai-gateway.yaml` — chains `skyflow-deidentify` + `ai-proxy` to a real LLM
-  (mock Skyflow). `/ai/chat` does the full vault-backed round-trip
-  (`VAULT_TOKEN` + `reidentify_text`); `/demo/chat` keeps `mapping_only` to show
-  masked/redacted treatments. Set `DECK_OPENAI_API_KEY`, then sync.
+
+- `ai-gateway.yaml` — `skyflow-deidentify` + `ai-proxy` to a real LLM (mock
+  Skyflow), via the **nested-proxy** routes (`/ai/chat` front does de-id + re-id
+  and loops back to the internal `/_ai_upstream` route running `ai-proxy` alone —
+  they can't share a route, see the repo README). `/ai/chat` does the full
+  round-trip (`VAULT_TOKEN` + `reidentify_text`); `/demo/chat` keeps
+  `mapping_only` to show masked/redacted treatments. Set `DECK_OPENAI_API_KEY`,
+  then sync.
 - `real-vault.yaml` — same AI route against a **real Skyflow vault** via
   `DECK_SKYFLOW_*` envs (already set to `VAULT_TOKEN` + `reidentify_text`).
 - `VERIFY-DETECT.md` — checklist to confirm the live Detect **de-id and re-id**
@@ -45,6 +53,7 @@ client resp:  "... Jane Doe ... jane@acme.com ..."          # values restored vi
   full desired state; sync one at a time.
 
 ## Housekeeping
+
 - **Rotate the Konnect PAT** used during setup.
 - Plugin is unit-tested (pure fns); live de-identify + vault-backed re-identify
   verified. Other profiles (`anthropic`/`mcp`) and streaming are not yet

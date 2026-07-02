@@ -68,6 +68,7 @@ de-identify/re-identify permission.
 > different/paid tier than the free Serverless gateway).
 
 ### Option A — Konnect UI
+
 1. Control plane → **Plugins** → **Custom Plugins** → **New**.
 2. Upload `schema.lua` and `handler.lua` from
    `plugin/kong/plugins/skyflow-deidentify/`.
@@ -77,6 +78,7 @@ de-identify/re-identify permission.
    with the config from [`docs/08 §8.2`](08-operations.md#82-configuration-examples).
 
 ### Option B — Konnect API (custom plugin schema + entity)
+
 ```bash
 # 1) Register the custom plugin (schema + handler) on the control plane
 curl -X POST "https://{region}.api.konghq.com/v2/control-planes/{cp}/core-entities/plugin-schemas" \
@@ -96,6 +98,7 @@ curl -X POST "https://{region}.api.konghq.com/v2/control-planes/{cp}/core-entiti
 ```
 
 ### Option C — decK
+
 Manage the plugin instance config declaratively (same `config` block as the
 Admin API); the custom plugin code itself is uploaded once via UI/API.
 
@@ -107,6 +110,7 @@ curl -i https://<your-gw-host>/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"Email Jane Doe at jane@acme.com"}]}'
 ```
+
 Check the upstream/provider view (or a request-logging echo upstream during
 testing) to confirm `Jane Doe` / `jane@acme.com` arrived as `[NAME_…]` /
 `[EMAIL_ADDRESS_…]`. Enable `dry_run=true` first to observe detections without
@@ -132,3 +136,8 @@ Fastest iteration is **local Docker Kong (self-managed)** with the in-repo
 Skyflow mock — same two files, full `pongo`/`busted` suite, no Konnect tier
 needed — then promote the validated files to the Dedicated Cloud Gateways
 control plane. See [`docs/06`](06-testing.md).
+
+For an end-to-end offline loop that includes **`ai-proxy`** (de-id → ai-proxy →
+mock LLM → re-id, plus a route that reproduces the #14380 conflict), use the
+db-less harness in [`deploy/local-dbless/`](../deploy/local-dbless/) — no Konnect
+PAT or OpenAI key required.
