@@ -1,0 +1,55 @@
+# Fully-local, db-less Kong harness — NO Konnect, NO real OpenAI key.
+#
+# Purpose: iterate on the skyflow plugins + ai-proxy composition offline. Proves
+# the de-id -> ai-proxy(LLM) -> re-id round-trip against a mock LLM and a mock
+# Skyflow, so you can reproduce the #14380 conflict and verify the nested-proxy
+# fix without touching the Konnect control plane.
+#
+#   docker compose -f deploy/local-dbless/docker-compose.yml up -d
+#   curl -s localhost:8010/ai/chat -H 'content-type: application/json' \
+#     -d '{"messages":[{"role":"user","content":"Reply to Jane Doe at jane@acme.com"}]}' | jq .
+#
+# Proxy is on host port 8010 (the Konnect DP demo uses 8000). Inside the
+# container Kong still listens on 8000, so the loopback upstream used by the
+# nested-proxy route is http://127.0.0.1:8000.
+
+services:
+  kong:
+    image: ${KONG_GATEWAY_IMAGE:-kong/kong-gateway:3.14}
+    container_name: skyflow-kong-local
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yaml
+      KONG_ROUTER_FLAVOR: expressions
+      KONG_PLUGINS: bundled,skyflow-deidentify
+      KONG_LUA_PACKAGE_PATH: /kong-plugins/?.lua;;
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_LOG_LEVEL: notice
+      # ai-proxy needs *some* auth header; the mock LLM ignores it.
+      KONG_NGINX_WORKER_PROCESSES: "1"
+    volumes:
+      - ../../plugin:/kong-plugins:ro
+      - ./kong.yaml:/kong/kong.yaml:ro
+    ports:
+      - "8010:8000"
+    depends_on:
+      - mock-skyflow
+      - mock-llm
+
+  # Reuse the exact mocks from the Konnect-hybrid demo.
+  mock-skyflow:
+    image: openresty/openresty:alpine
+    container_name: skyflow-mock-local
+    volumes:
+      - ../konnect-hybrid/mock-skyflow/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    expose:
+      - "8080"
+
+  # gzip-enabled mock LLM (faithful to real OpenAI, which gzips responses).
+  mock-llm:
+    image: openresty/openresty:alpine
+    container_name: skyflow-mock-llm-local
+    volumes:
+      - ./mock-llm/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    expose:
+      - "8080"

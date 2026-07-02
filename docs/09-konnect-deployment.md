@@ -38,8 +38,9 @@ same two files work there via the [rockspec](../plugin/kong/plugins/skyflow-deid
 | Profiles openai / anthropic / mcp / generic + JSONPath-lite | ✅ implemented |
 | Fail-closed/open posture, dry-run, size/span limits | ✅ implemented |
 | Re-identify via `mapping_only` (no extra Skyflow call) | ✅ implemented |
+| Re-identify via `reidentify_text` (vault-backed, `/v1/detect/reidentify/string`) | ✅ implemented |
 | Auth: API key / static bearer token | ✅ implemented |
-| Re-identify via `reidentify_text` / `detokenize` | ⏳ follow-up (degrades to `return_tokenized` + warn) |
+| Re-identify via `detokenize` (vault `/detokenize` API) | ⏳ follow-up (degrades to `return_tokenized` + warn) |
 | Service-account JWT auth (RS256 via `resty.openssl`) | ⏳ follow-up |
 | Per-span concurrency, streaming `reassemble` | ⏳ follow-up |
 

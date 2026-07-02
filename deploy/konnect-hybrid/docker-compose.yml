@@ -55,6 +55,7 @@ services:
     depends_on:
       - mock-skyflow
       - echo
+      - mock-llm
 
   # Mock Skyflow Detect API (de-identify). The plugin points at this via
   # config.skyflow_base_url_override = http://mock-skyflow:8080
@@ -73,5 +74,16 @@ services:
     container_name: skyflow-echo
     environment:
       HTTP_PORT: "8080"
+    expose:
+      - "8080"
+
+  # Mock LLM (OpenAI chat-completions shaped) — lets us prove the full de-id ->
+  # LLM -> re-id round-trip WITHOUT ai-proxy (which collides with our response
+  # phase). It echoes the tokenized prompt back in choices[].message.content.
+  mock-llm:
+    image: openresty/openresty:alpine
+    container_name: skyflow-mock-llm
+    volumes:
+      - ./mock-llm/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     expose:
       - "8080"

@@ -1,0 +1,91 @@
+# Local db-less config. Three flows, all against the mocks:
+#
+#   /vault/chat       baseline (PROVEN): skyflow-deidentify de-id + re-id, upstream
+#                     = mock-llm directly. No ai-proxy. Sanity check.
+#
+#   /broken/chat      REPRODUCES Kong #14380: skyflow-deidentify (de-id + re-id)
+#                     and ai-proxy on ONE route. ai-proxy transforms the response
+#                     in header_filter while the plugin's :response() phase also
+#                     rewrites the buffered gzip body -> ai-proxy 500s with
+#                     "no response body found when transforming response".
+#
+#   /ai/chat          THE FIX (nested proxy): front route runs de-id + re-id ONLY
+#                     (proven /vault/chat plugin), and its upstream is the internal
+#                     /_ai_upstream route which runs ai-proxy ALONE. Two routes =
+#                     two independent buffered cycles = no collision.
+#
+#   /_ai_upstream     internal: ai-proxy -> mock LLM. No skyflow plugins.
+
+_format_version: "3.0"
+
+services:
+  # -- baseline: proven de-id -> LLM -> re-id, no ai-proxy ------------------
+  - name: vault-chat
+    url: http://mock-llm:8080
+    routes:
+      - name: vault-chat
+        paths: ["/vault/chat"]
+
+        protocols: ["http", "https"]
+        strip_path: true
+    plugins:
+      - name: skyflow-deidentify
+        config: &skyflow_deid_reid
+          vault_id: demo-vault
+          cluster_id: demo
+          skyflow_base_url_override: "http://mock-skyflow:8080"
+          credentials: { api_key: "demo-key" }
+          profile: openai
+          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
+          reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
+          on_skyflow_error: deny
+
+  # -- REPRO of the #14380 conflict: ai-proxy + a response-phase re-identify on
+  #    ONE route. skyflow-deidentify does both de-id (access) AND re-id
+  #    (response) here, so its response-phase body rewrite collides with
+  #    ai-proxy's header_filter transform over the gzip body. => 500.
+  - name: broken
+    url: http://localhost:32000   # placeholder; ai-proxy overrides upstream
+    routes:
+      - name: broken-chat
+        paths: ["/broken/chat"]
+        protocols: ["http", "https"]
+        strip_path: true
+    plugins:
+      - name: skyflow-deidentify
+        config: *skyflow_deid_reid   # de-id + re-id on the SAME route as ai-proxy
+      - name: ai-proxy
+        config: &ai_proxy_mock
+          route_type: "llm/v1/chat"
+          auth: { header_name: Authorization, header_value: "Bearer sk-mock" }
+          model:
+            provider: openai
+            name: gpt-4o-mini
+            options:
+              upstream_url: "http://mock-llm:8080/v1/chat/completions"
+
+  # -- THE FIX: front route (de-id + re-id) -> internal ai-proxy route ------
+  - name: ai-front
+    # loopback to Kong's own proxy port; hits the /_ai_upstream route below.
+    url: http://127.0.0.1:8000/_ai_upstream
+    routes:
+      - name: ai-chat
+        paths: ["/ai/chat"]
+
+        protocols: ["http", "https"]
+        strip_path: true
+    plugins:
+      - name: skyflow-deidentify
+        config: *skyflow_deid_reid   # identical to the proven /vault/chat plugin
+
+  - name: ai-upstream
+    url: http://localhost:32000   # placeholder; ai-proxy overrides upstream
+    routes:
+      - name: ai-upstream
+        paths: ["/_ai_upstream"]
+
+        protocols: ["http", "https"]
+        strip_path: true
+    plugins:
+      - name: ai-proxy
+        config: *ai_proxy_mock

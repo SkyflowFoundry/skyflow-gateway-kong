@@ -145,6 +145,13 @@ return {
               then_field = "deidentify.token_format", then_match = { ne = "ENTITY_ONLY" },
           } },
 
+          -- Vault-authoritative re-id can only resolve tokens that were actually
+          -- stored in the vault, i.e. VAULT_TOKEN de-identification.
+          { conditional = {
+              if_field = "reidentify.strategy", if_match = { eq = "reidentify_text" },
+              then_field = "deidentify.token_format", then_match = { eq = "VAULT_TOKEN" },
+          } },
+
           { custom_entity_check = {
               field_sources = { "profile", "request_json_paths", "content_type" },
               fn = function(entity)

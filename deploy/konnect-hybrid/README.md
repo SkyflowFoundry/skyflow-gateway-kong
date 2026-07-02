@@ -44,6 +44,7 @@ with the **control-plane** and **telemetry** endpoints.
   into `.env` (the `cp0`/`tp0` hostnames and `:443`).
 
 ### 3. Register the custom plugin schema on the control plane
+
 Control plane → **Plugins** → **Custom Plugins** → **New**. Upload **only the
 schema**:
 - `../../plugin/kong/plugins/skyflow-deidentify/schema.lua`  (it's `require`-free, as Konnect requires)
@@ -52,6 +53,15 @@ That is all Konnect needs in **hybrid** mode — the schema lets the control pla
 validate the plugin's config. **There is no `handler.lua` upload here**: in
 hybrid, the handler runs on *your* data plane, delivered by the `../../plugin`
 volume mount in `docker-compose.yml` (plus `KONG_PLUGINS=bundled,skyflow-deidentify`).
+
+> **How does re-identify run after ai-proxy?** Not on the same route — that hits
+> Kong #14380 (ai-proxy 500s "no response body found" when a response-phase
+> plugin rewrites its gzip-encoded body). Instead the `/ai/chat` config uses a
+> **nested proxy**: a front route runs `skyflow-deidentify` (de-id + re-id) and
+> its upstream is an internal `/_ai_upstream` route that runs ai-proxy alone.
+> Two routes = two independent buffered cycles. One plugin does both halves,
+> exactly like `/vault/chat`. See `deck/real-vault.yaml` and, for an offline
+> reproduction + verification, `deploy/local-dbless/`.
 Uploading the handler to Konnect only applies to **Dedicated Cloud Gateways**,
 where Kong runs the data plane for you.
 
