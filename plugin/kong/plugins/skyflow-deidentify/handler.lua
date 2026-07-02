@@ -499,9 +499,11 @@ function SkyflowDeidentify:response(conf)
     local raw = kong.service.response.get_raw_body()
     local ct  = kong.service.response.get_header("Content-Type")
     local enc = kong.service.response.get_header("Content-Encoding")
+    -- Every "couldn't re-identify" path below sets call_err so the on_error
+    -- gate applies uniformly -- fail-closed (deny) must not silently forward a
+    -- tokenized body just because we couldn't read/parse it.
     if not raw or raw == "" then
-      kong.log.notice("skyflow reidentify: no buffered response body; skipping")
-      return
+      call_err = "no buffered response body"; return
     end
 
     -- Inflate gzip so the body is parseable. We emit the re-identified body
@@ -512,11 +514,11 @@ function SkyflowDeidentify:response(conf)
       if enc:lower():find("gzip", 1, true) and inflate_gzip then
         local iok, dec = pcall(inflate_gzip, raw)
         if not iok or not dec then
-          kong.log.notice("skyflow reidentify: gzip inflate failed; skipping"); return
+          call_err = "gzip inflate failed"; return
         end
         body, was_encoded = dec, true
       else
-        kong.log.notice("skyflow reidentify: unsupported Content-Encoding '", enc, "'; skipping"); return
+        call_err = "unsupported Content-Encoding '" .. enc .. "'"; return
       end
     end
 
@@ -524,7 +526,7 @@ function SkyflowDeidentify:response(conf)
     if wants_json(conf, ct) then
       local doc = cjson.decode(body)
       if doc == nil then
-        kong.log.notice("skyflow reidentify: body not decodable JSON (len=", #body, "); skipping"); return
+        call_err = "response body not decodable JSON"; return
       end
       local spans = collect_spans(doc, effective_paths(conf, "response"))
       if #spans == 0 then return end
