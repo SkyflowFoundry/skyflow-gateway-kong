@@ -14,11 +14,13 @@ export KONG_PLUGINS=bundled,skyflow-deidentify
 
 kong reload
 ```
+
 Confirm: `curl localhost:8001/plugins/enabled | jq '.enabled_plugins[]' | grep skyflow`.
 
 ## 8.2 Configuration examples
 
 ### decK (de-identify only — most common)
+
 ```yaml
 _format_version: "3.0"
 services:
@@ -42,6 +44,7 @@ services:
 ```
 
 ### decK (de-identify + re-identify, composed with AI Proxy)
+
 ```yaml
 plugins:
   - name: skyflow-deidentify
@@ -66,6 +69,7 @@ plugins:
 ```
 
 ### Admin API
+
 ```bash
 curl -X POST http://localhost:8001/routes/chat/plugins \
   --data name=skyflow-deidentify \
@@ -77,6 +81,7 @@ curl -X POST http://localhost:8001/routes/chat/plugins \
 ```
 
 ### Kubernetes (KIC)
+
 ```yaml
 apiVersion: configuration.konghq.com/v1
 kind: KongPlugin
@@ -92,12 +97,14 @@ config:
 ```
 
 ### Konnect
+
 Same `config` block via the Konnect control-plane API/UI; inject credentials as
 control-plane secrets and let data planes resolve the `{vault://…}` references.
 
 ## 8.3 Observability
 
 ### Metrics (emitted in the `log` phase; Prometheus/StatsD friendly)
+
 | Metric | Type | Labels | Meaning |
 | ------ | ---- | ------ | ------- |
 | `skyflow_requests_total` | counter | `phase`, `result` | de-identify/re-identify attempts by outcome |
@@ -109,11 +116,13 @@ control-plane secrets and let data planes resolve the `{vault://…}` references
 | `skyflow_spans` | histogram | `phase` | spans processed per request |
 
 ### Logs
+
 Structured JSON via `kong.log`: request id, route/service/consumer ids, profile,
 spans, `entities_by_type` counts, Skyflow latency, error class, posture,
 `dry_run`. **Never** values. Tunable via `log.sample_rate`.
 
 ### Alerts (suggested)
+
 - `skyflow_errors_total` rate > threshold → Skyflow degradation.
 - `skyflow_posture_total{posture="allow"} > 0` → **fail-open occurred** (privacy
   signal) — page if `on_skyflow_error=allow` is unexpected.
@@ -131,6 +140,7 @@ Added latency ≈ Skyflow round-trips (auth is amortized to ≈0 via cache):
 | + mapping_only re-identify | 1 | ~1× Detect RTT (no 2nd call) |
 
 \*Excludes the LLM/upstream time, which usually dominates. Tuning levers:
+
 - `batch_mode=per_span` + `max_concurrency` to keep multi-message prompts at
   ~one RTT.
 - `mapping_only` to avoid the second Skyflow call entirely when applicable.

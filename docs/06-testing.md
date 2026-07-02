@@ -28,8 +28,10 @@ Detect API so the bulk of tests run hermetically with no network or live vault.
 - Specs under `spec/skyflow-deidentify/` (see reference skeletons in this repo).
 
 ### The Skyflow mock (`helpers/mock_skyflow.lua`)
+
 A tiny HTTP server (Kong `http_mock` / a `mockbin`-style Service, or an OpenResty
 `content_by_lua` server started by the spec) that emulates the Detect API:
+
 - `POST /v1/detect/deidentify/string` → deterministic tokenization: replaces
   known fixtures (`Jane Doe`→`[NAME_aB3xQ]`, …) and echoes an `entities[]` map.
 - `POST /v1/detect/reidentify/string` → inverse mapping.

@@ -11,7 +11,7 @@ implements this spec.
 | --------- | ----- |
 | Plugin name | `skyflow-deidentify` |
 | Lua namespace | `kong.plugins.skyflow-deidentify.*` |
-| Priority (default) | `775` — runs in `access` **before** AI Proxy (770); below AI PII Sanitizer (776) |
+| Priority (default) | `775` — de-identify runs in `access`; below AI PII Sanitizer (776). Composes with `ai-proxy` via **nested routes**, not shared-route priority (see [`docs/02 §2.8`](02-architecture.md#28-deployment-topologies)) |
 | Phases implemented | `access`, `response`, `log` (the design also allows `init_worker`/`configure`; the Konnect single-file build omits them) |
 | Protocols | `http`, `https`, `grpc`, `grpcs`, `ws`, `wss` |
 | Scopes | global, Service, Route, Consumer, Consumer Group |
@@ -23,7 +23,7 @@ implements this spec.
 > *logical* design; physically, `auth`/`client`/`body`/`mapping` are inlined
 > into `handler.lua`, and `schema.lua` is `require`-free. See
 > [`docs/09`](09-konnect-deployment.md).
-
+>
 > **Why `response` not `header_filter`+`body_filter`:** Kong forbids a plugin
 > from implementing `response` *and* `header_filter`/`body_filter`. We use
 > `response` (which wraps both and auto-enables buffered proxy) for the
@@ -123,6 +123,7 @@ are never stored in plaintext in the DB and never appear in `GET /plugins`.
 | `metrics.enabled` | boolean | `true` | Emit Prometheus/StatsD-compatible metrics via the log phase. |
 
 ### 4.3.7 Schema-level validation (entity checks)
+
 - `credentials`: exactly one of `api_key` / `token` / `service_account_json`
   (`mutually_exclusive` + `at_least_one_of`).
 - `reidentify.strategy = mapping_only` ⇒ require `deidentify.token_format ≠
@@ -139,16 +140,19 @@ local SkyflowDeidentify = { PRIORITY = 775, VERSION = "0.1.0" }
 ```
 
 ### `init_worker()`
+
 - Initialize metrics counters/histograms.
 - Nothing network-bound (workers start before config may be ready).
 
 ### `configure(configs)`
+
 - Called whenever the plugin iterator rebuilds (3.4+). For each config:
   validate derived base URL, and **pre-warm** an auth token (best-effort, in a
   `ngx.timer` so startup isn't blocked). Surfaces credential/permission errors
   early in logs.
 
 ### `access(conf)`
+
 1. Short-circuit if method/content-type indicates no body, or body > limits.
 2. `body = kong.request.get_raw_body()` (+ buffered re-read if Kong spilled to
    disk; else `kong.request.get_body()` for parsed form).
@@ -166,6 +170,7 @@ local SkyflowDeidentify = { PRIORITY = 775, VERSION = "0.1.0" }
 11. Record detection counts in `kong.ctx.plugin` for the `log` phase.
 
 ### `response(conf)` *(only when `reidentify.enabled`)*
+
 1. Skip non-success or non-matching `Content-Type`.
 2. `body = kong.service.response.get_raw_body()`.
 3. `spans = body.extract_response(body, conf)`.
@@ -177,6 +182,7 @@ local SkyflowDeidentify = { PRIORITY = 775, VERSION = "0.1.0" }
 6. `body.replace` + `kong.response.set_raw_body(newBody)`; fix headers.
 
 ### `log(conf)`
+
 - Emit structured log + metrics: `spans`, `entities_by_type` counts, Skyflow
   latencies, error class, posture taken, `dry_run` flag. **No values.**
 
@@ -195,6 +201,7 @@ A **profile** maps a payload shape to the spans that carry user text.
 | `generic` | `config.request_json_paths` (required) or whole body as text | `config.response_json_paths` or whole body |
 
 Implementation notes:
+
 - A small, dependency-free **JSONPath subset** (`$`, `.key`, `[*]`, `[n]`,
   recursive string-leaf selection) covers these needs; documented grammar in
   the module header. Avoids pulling a heavy JSONPath lib into the data plane.
@@ -222,6 +229,7 @@ Implementation notes:
 
 - **Ordering:** ship priority `775`, but for determinism document explicit
   dynamic ordering so de-identify always precedes the proxy:
+
   ```yaml
   plugins:
     - name: skyflow-deidentify
@@ -230,6 +238,7 @@ Implementation notes:
         before:
           access: [ai-proxy, ai-proxy-advanced]
   ```
+
 - On the response, Kong runs `response`/body handlers in reverse, so
   re-identify naturally runs after AI Proxy has produced the body.
 - The plugin is **transport-aware but provider-agnostic**: it edits the JSON

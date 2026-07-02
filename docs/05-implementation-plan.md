@@ -47,6 +47,7 @@ dependencies = {
   "lua-resty-jwt >= 0.2.3",
 }
 ```
+
 - `cjson`, `resty.*`, `lua-resty-lock` are provided by the Kong/OpenResty
   runtime — not vendored.
 - For SA-JWT, prefer `resty.openssl` (bundled in modern Kong) for RS256 signing
@@ -55,12 +56,14 @@ dependencies = {
 ## 5.3 Phases
 
 ### Phase 0 — Project scaffolding *(0.5 day)*
+
 - **Objective:** repo builds, lints, and runs an empty test.
 - **Deliverables:** rockspec, `.luacheckrc`, `.busted`, `Makefile`
   (`make lint test pack`), CI skeleton (§5.5), `docker-compose.yml` placeholder.
 - **Gate:** `make lint test` green on an empty plugin; `luarocks make` packs.
 
 ### Phase 1 — Schema + plugin loads *(1 day)*
+
 - **Objective:** Kong loads the plugin; config validates.
 - **Deliverables:** `schema.lua` (all fields, entity checks from
   [`docs/04 §4.3.7`](04-plugin-spec.md#4317-schema-level-validation-entity-checks)),
@@ -70,6 +73,7 @@ dependencies = {
   `GET /plugins/enabled`.
 
 ### Phase 2 — Skyflow client + auth *(2 days)*
+
 - **Objective:** talk to Skyflow (against the mock first, then a sandbox vault).
 - **Deliverables:** `auth.lua` (api_key + SA-JWT + caching/single-flight),
   `client.lua` (`deidentify`, `reidentify`, `detokenize`; timeouts, retries,
@@ -79,6 +83,7 @@ dependencies = {
   Skyflow **sandbox** de-identifies a sample string.
 
 ### Phase 3 — De-identify path *(2 days)*
+
 - **Objective:** request bodies are de-identified end-to-end.
 - **Deliverables:** `body.lua` (openai/anthropic/mcp/generic profiles, JSONPath
   subset, extract/replace), `handler.access` (steps in
@@ -88,6 +93,7 @@ dependencies = {
   leaves body intact, oversized/non-JSON handled.
 
 ### Phase 4 — Re-identify path *(2 days)*
+
 - **Objective:** responses are re-hydrated for authorized callers.
 - **Deliverables:** `handler.response` (buffered), all three strategies
   (`reidentify_text`, `detokenize`, `mapping_only`), entity treatment,
@@ -97,6 +103,7 @@ dependencies = {
   re-identify when disabled (and no buffering imposed then).
 
 ### Phase 5 — Observability & resilience *(1 day)*
+
 - **Objective:** production signals + bounded behavior.
 - **Deliverables:** `log.lua` metrics (counts/latency/error class), deadline
   enforcement, concurrency caps, Prometheus/StatsD-friendly counters.
@@ -104,6 +111,7 @@ dependencies = {
   timeouts/5xx/429) respect deadline and posture.
 
 ### Phase 6 — Streaming reassembler (experimental) *(2 days, optional)*
+
 - **Objective:** incremental re-identify for SSE.
 - **Deliverables:** `body_filter` build-flagged variant with partial-token
   buffering + flush-on-finish.
@@ -111,6 +119,7 @@ dependencies = {
   correctly; final flush complete).
 
 ### Phase 7 — Packaging, docs, examples *(1 day)*
+
 - **Objective:** installable and demoable.
 - **Deliverables:** finalized rockspec, decK/Konnect/KIC/Terraform examples
   ([`docs/08`](08-operations.md)), `docker-compose` e2e demo (Kong + mock
@@ -140,6 +149,7 @@ Full v1 (with re-identify + hardening): **+P4,P5 ≈ 9.5 days**.
 ## 5.5 CI pipeline
 
 GitHub Actions (extends the existing workflow dir):
+
 1. **lint** — `luacheck kong spec`.
 2. **unit** — `busted spec` with `mock_skyflow.lua` (no network).
 3. **integration** — `pongo run` matrix across Kong versions
