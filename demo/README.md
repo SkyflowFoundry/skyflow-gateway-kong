@@ -46,8 +46,15 @@ deck gateway sync --konnect-token "$KONNECT_PAT" \
   deploy/konnect-hybrid/deck/real-vault.yaml
 ```
 
-(`deck gateway sync` deletes anything not in the file, so keep the full desired
-state there. `DECK_OPENAI_API_KEY` and `DECK_SKYFLOW_*` must be exported.)
+`real-vault.yaml` is the **canonical / default** config for this demo — it holds
+all three routes the steps use (`/demo/deid`, `/vault/chat`, `/ai/chat`) and is
+the file kept synced to the `skyflow-hybrid` control plane.
+
+> ⚠️ **The control plane is shared and `deck gateway sync` is destructive** — it
+> makes the CP match the synced file exactly and deletes anything not in it. If a
+> teammate syncs a different deck file (`kong.yaml`, `ai-gateway.yaml`), these
+> routes disappear and the demo 404s. **Fix:** re-sync `real-vault.yaml` (needs
+> `KONNECT_PAT`, `DECK_OPENAI_API_KEY`, `DECK_SKYFLOW_*` exported).
 
 See the skill's `SKILL.md` for the full recorder reference (screen selection,
 audio, cropping, re-processing a capture).

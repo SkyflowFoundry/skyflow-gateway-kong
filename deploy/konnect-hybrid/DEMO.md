@@ -45,12 +45,20 @@ client resp:  "... Jane Doe ... jane@acme.com ..."          # values restored vi
   round-trip (`VAULT_TOKEN` + `reidentify_text`); `/demo/chat` keeps
   `mapping_only` to show masked/redacted treatments. Set `DECK_OPENAI_API_KEY`,
   then sync.
-- `real-vault.yaml` — same AI route against a **real Skyflow vault** via
-  `DECK_SKYFLOW_*` envs (already set to `VAULT_TOKEN` + `reidentify_text`).
+- **`real-vault.yaml` — the canonical / default demo config.** Same AI route
+  against a **real Skyflow vault** via `DECK_SKYFLOW_*` envs (`VAULT_TOKEN` +
+  `reidentify_text`), **plus** the `/demo/deid` token-proof route (de-identify
+  only, re-identify OFF, echo upstream) that the recorded demo (`demo/steps.sh`)
+  drives. This is the file kept synced to the CP — sync it, not the others,
+  unless you specifically want the mock/echo variants.
 - `VERIFY-DETECT.md` — checklist to confirm the live Detect **de-id and re-id**
   contracts match the plugin (do this before `real-vault.yaml`).
-- ⚠️ `deck gateway sync` deletes anything not in the synced file — each file is a
-  full desired state; sync one at a time.
+- ⚠️ `deck gateway sync` makes the control plane match the synced file EXACTLY
+  and **deletes anything not in it**. The CP is shared — syncing `kong.yaml` or
+  `ai-gateway.yaml` will remove `real-vault.yaml`'s routes (`/vault/chat`,
+  `/ai/chat`, `/demo/deid`) and break the demo. To restore, re-sync
+  `real-vault.yaml`. Sync one file at a time and treat `real-vault.yaml` as the
+  default.
 
 ## Housekeeping
 

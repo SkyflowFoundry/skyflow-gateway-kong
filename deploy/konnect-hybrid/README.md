@@ -118,16 +118,20 @@ without altering traffic; toggle `reidentify` to show re-hydration.
 round-trip through `ai-proxy`, sync one of the AI configs instead — each defines
 the nested-proxy routes (`/ai/chat` front + `/_ai_upstream` internal):
 
-- `deck/ai-gateway.yaml` — mock Skyflow, real LLM. Needs `DECK_OPENAI_API_KEY`.
-- `deck/real-vault.yaml` — real Skyflow vault + real LLM. Needs `DECK_SKYFLOW_*`
-  and `DECK_OPENAI_API_KEY`.
+- **`deck/real-vault.yaml` — the canonical / default demo config.** Real Skyflow
+  vault + real LLM (needs `DECK_SKYFLOW_*` and `DECK_OPENAI_API_KEY`). Defines
+  `/vault/chat`, `/ai/chat`, **and `/demo/deid`** — the de-identify-only echo
+  route the recorded demo (`../../demo/steps.sh`) uses to *show* the tokenized
+  request the upstream receives. **This is the file kept synced to the CP.**
+- `deck/ai-gateway.yaml` — mock Skyflow, real LLM (needs `DECK_OPENAI_API_KEY`).
+  No `/demo/deid` or `/vault/chat` — a mock alternative, not the demo default.
 
 ```bash
 export DECK_OPENAI_API_KEY=sk-...
-# real vault also needs: export DECK_SKYFLOW_VAULT_ID=... DECK_SKYFLOW_CLUSTER_ID=... DECK_SKYFLOW_API_KEY=...
+export DECK_SKYFLOW_VAULT_ID=... DECK_SKYFLOW_CLUSTER_ID=... DECK_SKYFLOW_API_KEY=...
 deck gateway sync --konnect-token "$KONNECT_PAT" \
   --konnect-control-plane-name skyflow-hybrid \
-  deck/real-vault.yaml            # or deck/ai-gateway.yaml
+  deck/real-vault.yaml            # canonical; the demo expects this on the CP
 
 curl -s localhost:8000/ai/chat -H 'content-type: application/json' \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hi my name is Jane Doe"}]}' | jq .
@@ -137,6 +141,12 @@ You get a real LLM reply with `Jane Doe` restored, while the provider only ever
 saw a token. See the repo root [`README.md`](../../README.md#architecture) for
 why the routes are nested, and [`deck/VERIFY-DETECT.md`](deck/VERIFY-DETECT.md)
 to confirm the live Detect contract before pointing at a real vault.
+
+> ⚠️ **The control plane is shared and `deck gateway sync` is destructive** — it
+> makes the CP match the synced file exactly and deletes anything not in it.
+> Syncing `deck/kong.yaml` or `deck/ai-gateway.yaml` removes `real-vault.yaml`'s
+> routes (`/vault/chat`, `/ai/chat`, `/demo/deid`) and breaks the demo. Treat
+> `deck/real-vault.yaml` as the default; if the demo 404s, re-sync it to restore.
 
 ## Point at a real Skyflow vault (optional)
 
