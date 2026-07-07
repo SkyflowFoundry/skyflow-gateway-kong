@@ -19,15 +19,15 @@ plus a GIF (for inline sharing). The recorder lives with the skill, not here:
 ## Use
 
 1. Bring up the Konnect-hybrid data plane (see the repo README) so `:8000` is live.
-2. Make `record-demo.sh` available — install the skill (`claude-sample/install.sh`
-   symlinks it into `~/.claude/skills/demo-media/`) and run it from there, or copy
-   the script locally.
+2. Get the `record-demo` command — clone <https://github.com/jstjoe/claude-sample>
+   and run `./install.sh`. It symlinks the `demo-media` skill into `~/.claude/skills/`
+   and drops a `record-demo` command on your PATH (`~/.local/bin`). One-time, per machine.
 3. From the repo root:
 
    ```bash
-   record-demo.sh --steps demo/steps.sh              # record -> demo-out/<stamp>.{mp4,gif}
-   record-demo.sh --steps demo/steps.sh --no-record  # rehearse the curls, no capture
-   INCLUDE_LIVE=0 record-demo.sh --steps demo/steps.sh   # skip the real-OpenAI step
+   record-demo --steps demo/steps.sh              # record -> demo-out/<stamp>.{mp4,gif}
+   record-demo --steps demo/steps.sh --no-record  # rehearse the curls, no capture
+   INCLUDE_LIVE=0 record-demo --steps demo/steps.sh   # skip the real-OpenAI step
    ```
 
 Outputs land in `demo-out/` (git-ignored). Step 3 hits real OpenAI — redact
