@@ -7,7 +7,7 @@
 #
 # All steps hit the Konnect-hybrid data plane (:8000) backed by the real Skyflow
 # vault, and use the SAME prompt — only the route changes. INCLUDE_LIVE=0 skips
-# the two real-OpenAI steps (1 and 4).
+# the real-OpenAI step.
 
 DEMO_TITLE="Skyflow × Kong — de-identify PII in your LLM traffic"
 
@@ -17,28 +17,24 @@ HOST="${HOST:-localhost:8000}"   # Konnect-hybrid data plane (real Skyflow vault
 PROMPT='{"messages":[{"role":"user","content":"Draft a friendly one-sentence appointment reminder for Jane Doe (jane@acme.com, 415-555-0132)."}]}'
 
 demo() {
-  # 1) BEFORE (red) — no gateway protection. /_ai_upstream is the ai-proxy
-  #    passthrough with NO de-identify plugin, so raw PII goes straight to OpenAI.
-  if [ "${INCLUDE_LIVE:-1}" = "1" ]; then
-    step "Raw: prompts with PII hit AI" \
-      "curl -s $HOST/_ai_upstream -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'" \
-      "$c_red"
-  fi
+  # ── Before vs after: what the model actually receives ──────────────────────
+  group "What the LLM sees"
 
-  # 2) (green) /demo/deid de-identifies then echoes the request, so you SEE the
-  #    tokenized prompt the model would receive — no raw PII.
+  # RAW (red) — /demo/raw has NO de-identify plugin, so the echo reflects the
+  # request exactly as an unprotected upstream would get it: real PII.
+  step "Raw: prompts with PII hit AI" \
+    "curl -s $HOST/demo/raw -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'" \
+    "$c_red"
+
+  # DE-IDENTIFIED (green) — /demo/deid de-identifies first, so the echo shows the
+  # tokenized request. Same prompt, no raw PII.
   step "De-identified: what the LLM receives" \
     "curl -s $HOST/demo/deid -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'"
 
-  # 3) (orange) Skyflow reverses the tokens on demand. /vault/chat de-identifies,
-  #    the mock LLM echoes the tokens, and re-identify restores the prompt.
-  step "Re-identified prompt: prompts can be re-identified on demand" \
-    "curl -s $HOST/vault/chat -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'" \
-    "$c_orange"
-
-  # 4) (green) Full flow on real OpenAI: prompt de-identified -> LLM -> response
-  #    re-identified by Skyflow. Same useful answer as step 1, PII never exposed.
+  # ── The actual experience of using the gateway ─────────────────────────────
+  # de-identify -> real OpenAI -> re-identify. Skip with INCLUDE_LIVE=0.
   if [ "${INCLUDE_LIVE:-1}" = "1" ]; then
+    group "Using the gateway — de-identify + re-identify"
     step "Re-identified response: prompt de-identified and sent to LLM, response re-identified by Skyflow" \
       "curl -s $HOST/ai/chat -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'"
   fi

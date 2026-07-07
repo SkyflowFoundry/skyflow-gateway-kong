@@ -117,3 +117,14 @@ services:
           deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
           reidentify: { enabled: false }
           on_skyflow_error: deny
+
+  # 5) RAW route: NO plugin at all -> echo upstream. The echo reflects the raw
+  #    request, so the response shows the original PII exactly as an unprotected
+  #    upstream (LLM) would receive it. The "before" half of the what-the-LLM-sees
+  #    contrast (pairs with /demo/deid, which shows the de-identified version).
+  - name: demo-raw
+    url: http://echo:8080
+    routes:
+      - name: demo-raw
+        paths: ["/demo/raw"]
+        strip_path: true

@@ -1,21 +1,21 @@
 # Demo recording
 
-`steps.sh` is the on-camera script for this project's demo. It tells the whole
-value story in four requests against the Konnect data plane (`:8000`, real
-Skyflow vault):
+`steps.sh` is the on-camera script for this project's demo. One PII prompt runs
+through the Konnect data plane (`:8000`, real Skyflow vault) in two groups:
 
-1. **Raw: prompts with PII hit AI** — `/_ai_upstream` is the ai-proxy passthrough
-   with *no* de-identify plugin, so the raw PII prompt goes straight to OpenAI.
-   The "before" — this is the risk.
-2. **De-identified: what the LLM receives** — `/demo/deid` de-identifies then
-   echoes the request, so you *see* the tokenized prompt the model would get
-   (`[NAME_…]`, `[EMAIL_ADDRESS_…]`, `[PHONE_NUMBER_…]`) — no raw PII.
-3. **Re-identified prompt: prompts can be re-identified on demand** — `/vault/chat`
-   de-identifies, the mock LLM echoes the tokens back, and Skyflow re-identifies
-   them, restoring the original prompt.
-4. **Re-identified response** — `/ai/chat`: prompt de-identified → real OpenAI →
-   response re-identified by Skyflow. Same useful answer as step 1, PII never
-   exposed to the model.
+**What the LLM sees** — before vs after, both via an echo upstream that reflects
+the request the model would receive:
+
+1. **Raw: prompts with PII hit AI** — `/demo/raw` (no de-identify plugin) echoes
+   the request unchanged: the raw PII an unprotected upstream would get.
+2. **De-identified: what the LLM receives** — `/demo/deid` de-identifies first,
+   so the echo shows the tokenized prompt (`[NAME_…]`, `[EMAIL_ADDRESS_…]`,
+   `[PHONE_NUMBER_…]`) — same prompt, no raw PII.
+
+**Using the gateway — de-identify + re-identify:**
+
+- **Re-identified response** — `/ai/chat`: prompt de-identified → real OpenAI →
+  response re-identified by Skyflow. A useful answer, PII never exposed to the model.
 
 It's driven by **`record-demo.sh`** from the personal `demo-media` skill, which
 screen-records, runs these steps, and emits a timestamped MP4 (for a talk track)
@@ -36,16 +36,18 @@ plus a GIF (for inline sharing). The recorder lives with the skill, not here:
    INCLUDE_LIVE=0 record-demo --steps demo/steps.sh   # skip the real-OpenAI step
    ```
 
-Outputs land in `demo-out/` (git-ignored). Steps 1 and 4 hit real OpenAI —
-redact anything sensitive before sharing, or record with `INCLUDE_LIVE=0` (which
-skips both, leaving the de-identify/re-identify steps that only use the vault).
+Outputs land in `demo-out/` (git-ignored). The **Re-identified response** step
+hits real OpenAI — redact anything sensitive before sharing, or record with
+`INCLUDE_LIVE=0` (which skips it, leaving the two echo-based steps that only use
+the vault).
 
-## The `/demo/deid` proof route
+## The `/demo/raw` and `/demo/deid` echo routes
 
-Step 1 needs a de-identify-**only** route (re-identify disabled) pointed at the
-echo upstream — otherwise re-identify would restore the tokens in the echoed body
-and you'd see no proof. That route (`demo-echo` → `/demo/deid`) lives in
-`deploy/konnect-hybrid/deck/real-vault.yaml` and is applied with:
+The "what the LLM sees" contrast uses two routes onto the same echo upstream:
+`/demo/raw` (no plugin → reflects the raw PII) and `/demo/deid` (de-identify
+**only**, re-identify disabled → reflects the tokens). Re-identify must be *off*
+on `/demo/deid` — otherwise it would restore the tokens in the echoed body and
+you'd see no proof. Both live in `deploy/konnect-hybrid/deck/real-vault.yaml`:
 
 ```bash
 deck gateway sync --konnect-token "$KONNECT_PAT" \
