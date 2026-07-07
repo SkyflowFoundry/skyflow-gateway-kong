@@ -1,15 +1,21 @@
 # Demo recording
 
 `steps.sh` is the on-camera script for this project's demo. It tells the whole
-value story in three requests against the Konnect data plane (`:8000`, real
+value story in four requests against the Konnect data plane (`:8000`, real
 Skyflow vault):
 
-1. **What your LLM vendor actually receives** — `/demo/deid` de-identifies then
-   echoes the request back, so you *see* the tokenized body the upstream got
+1. **Raw: prompts with PII hit AI** — `/_ai_upstream` is the ai-proxy passthrough
+   with *no* de-identify plugin, so the raw PII prompt goes straight to OpenAI.
+   The "before" — this is the risk.
+2. **De-identified: what the LLM receives** — `/demo/deid` de-identifies then
+   echoes the request, so you *see* the tokenized prompt the model would get
    (`[NAME_…]`, `[EMAIL_ADDRESS_…]`, `[PHONE_NUMBER_…]`) — no raw PII.
-2. **What your caller gets back** — the same request through de-id → LLM → re-id
-   returns the real details, though the model only ever processed tokens.
-3. **End-to-end on real OpenAI** — a useful answer, PII protected in transit.
+3. **Re-identified prompt: prompts can be re-identified on demand** — `/vault/chat`
+   de-identifies, the mock LLM echoes the tokens back, and Skyflow re-identifies
+   them, restoring the original prompt.
+4. **Re-identified response** — `/ai/chat`: prompt de-identified → real OpenAI →
+   response re-identified by Skyflow. Same useful answer as step 1, PII never
+   exposed to the model.
 
 It's driven by **`record-demo.sh`** from the personal `demo-media` skill, which
 screen-records, runs these steps, and emits a timestamped MP4 (for a talk track)
@@ -30,8 +36,9 @@ plus a GIF (for inline sharing). The recorder lives with the skill, not here:
    INCLUDE_LIVE=0 record-demo --steps demo/steps.sh   # skip the real-OpenAI step
    ```
 
-Outputs land in `demo-out/` (git-ignored). Step 3 hits real OpenAI — redact
-anything sensitive before sharing, or record with `INCLUDE_LIVE=0`.
+Outputs land in `demo-out/` (git-ignored). Steps 1 and 4 hit real OpenAI —
+redact anything sensitive before sharing, or record with `INCLUDE_LIVE=0` (which
+skips both, leaving the de-identify/re-identify steps that only use the vault).
 
 ## The `/demo/deid` proof route
 
