@@ -23,7 +23,7 @@ plus a GIF (for inline sharing). The recorder lives with the skill, not here:
    INCLUDE_LIVE=0 record-demo.sh --steps demo/steps.sh   # skip the real-OpenAI step
    ```
 
-Outputs land in `demo-out/` (git-ignored). The live step (`3/3`) hits real OpenAI —
+Outputs land in `demo-out/` (git-ignored). The live step hits real OpenAI —
 redact anything sensitive before sharing, or record with `INCLUDE_LIVE=0`.
 
 See the skill's `SKILL.md` for the full recorder reference (screen selection,
