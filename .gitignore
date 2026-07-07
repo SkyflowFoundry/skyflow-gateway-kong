@@ -12,3 +12,6 @@ deploy/konnect-hybrid/certs/*.pem
 # Local env
 .env
 .env.local
+
+# demo outputs
+demo-out/
