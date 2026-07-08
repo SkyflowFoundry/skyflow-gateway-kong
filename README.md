@@ -26,8 +26,8 @@ the model provider only ever sees tokens.
 > OpenAI, with Kong `ai-proxy` in the path**. Packaged as the two self-contained
 > files Konnect requires ([`schema.lua`](plugin/kong/plugins/skyflow-deidentify/schema.lua)
 > and [`handler.lua`](plugin/kong/plugins/skyflow-deidentify/handler.lua)).
-> `detokenize`, service-account JWT auth, and streaming re-identify are
-> documented follow-ups. See the [capability matrix](#capabilities) for details.
+> Service-account JWT auth, streaming re-identify, and file-attachment
+> de-identify are documented follow-ups. See the [roadmap](#roadmap).
 
 ---
 
@@ -198,6 +198,8 @@ deploy/
 └── konnect-hybrid/     # Option 2: self-managed DP on Konnect + deck configs
     └── deck/           # real-vault.yaml, ai-gateway.yaml, kong.yaml, VERIFY-DETECT.md
 
+demo/                   # on-camera steps for recording the walkthrough (see demo/README.md)
+
 spec/
 ├── offline/pure_algorithms_test.lua   # runs under luajit — no Kong/Docker (make unit-pure)
 └── skyflow-deidentify/                # schema + access + response specs (Pongo/busted)
@@ -205,20 +207,17 @@ spec/
 docs/                    # design spec (see Documentation map below)
 ```
 
-## Capabilities
+## Roadmap
 
-| Capability | Status |
+The core de-identify → LLM → re-identify flow — including vault-backed
+re-identify — is implemented and verified live (see [What it does](#what-it-does)).
+Planned next:
+
+| Planned | Notes |
 | --- | --- |
-| De-identify request bodies (Skyflow Detect) | ✅ implemented, verified live |
-| Re-identify responses — `mapping_only` (no extra call) | ✅ implemented |
-| Re-identify responses — `reidentify_text` (vault-backed) | ✅ implemented, verified live |
-| Compose with Kong `ai-proxy` (nested proxy) | ✅ verified live + offline |
-| Profiles: `openai` / `anthropic` / `mcp` / `generic` + JSONPath-lite overrides | ✅ implemented (`openai` exercised live) |
-| Fail-closed/open posture (de-id **and** re-id), `dry_run`, size/span limits | ✅ implemented |
-| Auth: API key / static bearer token | ✅ implemented |
-| Re-identify via vault `detokenize` | ⏳ follow-up (degrades to tokenized + warn) |
-| Service-account JWT auth (RS256) | ⏳ follow-up |
-| Streaming re-identify (`reassemble`) | ⏳ follow-up (`buffer`/`passthrough` today) |
+| Service-account JWT auth (RS256) | Today: API key / static bearer token |
+| Streaming re-identification | Reassemble streamed responses; today `buffer` / `passthrough` |
+| File-attachment de-identification | De-identify uploaded files, not just JSON request bodies |
 
 ## Documentation map
 
