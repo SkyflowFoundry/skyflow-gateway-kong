@@ -19,19 +19,22 @@ PROMPT='{"messages":[{"role":"user","content":"Draft a friendly one-sentence app
 demo() {
   # WITHOUT Skyflow (red) — /demo/raw has no de-identify plugin, so the echo
   # reflects the request exactly as an unprotected upstream would get it: raw PII.
+  # Labeled "Request" because the echoed body IS the prompt the LLM would receive.
   step "What the LLM sees without Skyflow" \
     "curl -s $HOST/demo/raw -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'" \
-    "$c_red"
+    "$c_red" "Request" "echo: calling OpenAI via Kong with echo back"
 
   # WITH Skyflow (green) — /demo/deid de-identifies first, so the echo shows the
   # tokenized request. Same prompt, no raw PII.
   step "What the LLM sees with Skyflow" \
-    "curl -s $HOST/demo/deid -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'"
+    "curl -s $HOST/demo/deid -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'" \
+    "$c_green" "Request" "echo: calling OpenAI via Kong + Skyflow with echo back"
 
   # The caller's experience (green) — de-identify -> real OpenAI -> re-identify.
   # Skip with INCLUDE_LIVE=0.
   if [ "${INCLUDE_LIVE:-1}" = "1" ]; then
     step "What the caller gets back — re-identified by Skyflow" \
-      "curl -s $HOST/ai/chat -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'"
+      "curl -s $HOST/ai/chat -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'" \
+      "$c_green" "Response" "e2e: calling OpenAI via Kong + Skyflow with real re-identified response"
   fi
 }
