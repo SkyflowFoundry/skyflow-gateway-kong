@@ -16,6 +16,9 @@ HOST="${HOST:-localhost:8000}"   # Konnect-hybrid data plane (real Skyflow vault
 # One PII-laden prompt, reused for every step.
 PROMPT='{"messages":[{"role":"user","content":"Draft a friendly one-sentence appointment reminder for Jane Doe (jane@acme.com, 415-555-0132)."}]}'
 
+# Highlight the PII red in the payload/output (Skyflow tokens are auto-highlighted green).
+HL_SENSITIVE="Jane Doe|jane@acme.com|415-555-0132"
+
 demo() {
   # echo: calling OpenAI via Kong with echo back
   step "What the LLM sees without Skyflow" \
