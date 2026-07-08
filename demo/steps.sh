@@ -9,7 +9,7 @@
 # vault, and use the SAME prompt — only the route changes. INCLUDE_LIVE=0 skips
 # the real-OpenAI step.
 
-DEMO_TITLE="Skyflow × Kong — de-identify PII in your LLM traffic"
+DEMO_TITLE="Skyflow × Kong AI Gateway"
 
 HOST="${HOST:-localhost:8000}"   # Konnect-hybrid data plane (real Skyflow vault)
 
