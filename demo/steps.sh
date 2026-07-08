@@ -27,7 +27,7 @@ demo() {
     "curl -s $HOST/demo/deid -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'" \
     "$c_green" "Prompt" "echo: calling OpenAI via Kong + Skyflow with echo back"
 
-  # e2e: calling OpenAI via Kong + Skyflow with real re-identified response (INCLUDE_LIVE=0 to skip)
+  # e2e: calling OpenAI via Kong + Skyflow with real re-identified response
   if [ "${INCLUDE_LIVE:-1}" = "1" ]; then
     step "What the caller gets back — re-identified by Skyflow" \
       "curl -s $HOST/ai/chat -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'" \
