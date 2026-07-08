@@ -21,18 +21,18 @@ HL_SENSITIVE="Jane Doe|jane@acme.com|415-555-0132"
 
 demo() {
   # echo: calling OpenAI via Kong with echo back
-  step "What the LLM sees without Skyflow" \
+  step "1 · What the LLM sees without Skyflow" \
     "curl -s $HOST/demo/raw -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'" \
     "$c_purple" "Prompt (raw)" "echo: calling OpenAI via Kong with echo back"
 
   # echo: calling OpenAI via Kong + Skyflow with echo back
-  step "What the LLM sees with Skyflow" \
+  step "2 · What the LLM sees with Skyflow" \
     "curl -s $HOST/demo/deid -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'" \
     "$c_purple" "Prompt (de-identified)" "echo: calling OpenAI via Kong + Skyflow with echo back"
 
   # e2e: calling OpenAI via Kong + Skyflow with real re-identified response
   if [ "${INCLUDE_LIVE:-1}" = "1" ]; then
-    step "What the caller gets back — re-identified by Skyflow" \
+    step "3 · What the caller gets back — re-identified by Skyflow" \
       "curl -s $HOST/ai/chat -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'" \
       "$c_purple" "Response (re-identified)" "e2e: calling OpenAI via Kong + Skyflow with real re-identified response"
   fi
