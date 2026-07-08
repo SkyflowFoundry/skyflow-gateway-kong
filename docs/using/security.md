@@ -1,110 +1,107 @@
 # Security & Governance
 
-The plugin *is* a security control, so its own security posture matters as much
-as its function. This document covers the threat model, data handling, secrets,
-governance/RBAC, compliance, and the privacy invariants enforced by tests
-([`testing §6.5`](../contributing/testing.md#65-security--privacy-tests-must-pass-invariants)).
+The plugin *is* a security control, so its own posture matters. This covers the
+threat model, data handling, secrets, governance, and compliance.
 
-## 7.1 Security objectives
+## Security objectives
 
-- **SO1 — No raw sensitive data reaches the upstream** (LLM/MCP/API) when
-  de-identify is active. This is the core promise; tested as *no-leak-upstream*.
-- **SO2 — Re-identification is authorized and governed** by Skyflow (roles,
-  policies, audit) — the gateway cannot unilaterally reveal more than policy
-  permits.
-- **SO3 — No sensitive data persists at the gateway** (no disk, no shared cache,
-  no logs).
-- **SO4 — Credentials are protected** at rest and in transit and never exposed
-  via the Admin API.
-- **SO5 — Fail closed**: faults degrade toward *less* exposure, never more.
+- **No raw sensitive data reaches the upstream** (LLM/MCP/API) when de-identify
+  is active — the core promise, backed by a fail-closed default.
+- **Re-identification is governed by Skyflow** (roles, policies, audit) — the
+  gateway can't reveal more than policy permits.
+- **No sensitive data persists at the gateway** — no disk, no shared cache, no
+  logs.
+- **Credentials are protected** at rest and in transit, and never exposed via the
+  Admin API.
+- **Fail closed** — faults degrade toward *less* exposure, never more.
 
-## 7.2 Threat model (STRIDE-ish)
+## Threat model
 
 | Threat | Vector | Mitigation |
-| ------ | ------ | ---------- |
-| **Data exfiltration to provider** | PII forwarded before tokenization | De-identify in `access` before upstream send; fail-closed default; *no-leak-upstream* test; auth failures always deny. |
-| **Leak via logs/metrics** | Values printed in debug/error logs | Logs carry **counts/types only**; *no-PII-in-logs* test; sampling doesn't change redaction; pcall error paths log messages, not bodies. |
-| **Leak via cache/state** | Plaintext written to `kong.cache`/disk | Only the bearer token is cached; mapping is request-scoped (`kong.ctx.plugin`); *no-PII-at-rest* test. |
-| **Credential theft** | Reading plugin config / DB / Admin API | Credentials `encrypted` + `referenceable` (`{vault://…}`); never returned by `GET /plugins`; keyring/Vault-backed in prod. |
-| **Unauthorized re-identification** | Caller restores data they shouldn't | Skyflow roles + policy `ctx` derived from the Kong Consumer; `entity_treatment` masks/redacts even on the return path; `mapping_only` avoids any vault detokenize. |
-| **Token forgery / replay** | Crafted tokens in a response to detokenize arbitrary data | `mapping_only` restores only tokens minted **this** request; `detokenize`/`reidentify` are governed by vault policy regardless of token origin. |
-| **MITM to Skyflow** | Network interception | TLS to `*.vault.skyflowapis.com`; cert verification on (no `ssl_verify=false` in prod); optional pinning. |
-| **DoS / amplification** | Huge bodies, many spans | `max_body_size`, `max_spans`, `max_concurrency`, `deadline_ms`; oversized ⇒ posture. |
-| **Tampering with ordering** | Raw PII reaches upstream before tokenization | De-identify runs in `access` before the request is proxied; with `ai-proxy` the nested-proxy topology keeps de-identify on the front route so the internal `ai-proxy` route only ever receives tokens. |
-| **Replay of bearer token** | Stolen cached token reused | Short TTL (~60 min) + skew refresh; SA-JWT scoped to roles; rotate on incident. |
-| **Supply chain** | Compromised rock dependency | Minimal deps (`resty.http`, optional `resty.jwt`); pinned versions; CI dependency review; prefer bundled `resty.openssl`. |
+| --- | --- | --- |
+| **Data exfiltration to provider** | PII forwarded before tokenization | De-identify in `access` before the request is proxied; fail-closed by default; auth failures always deny. |
+| **Leak via logs** | Values printed in debug/error logs | Logs carry counts/types/posture only — never values; error paths log messages, not bodies. |
+| **Leak via cache/state** | Plaintext written to `kong.cache`/disk | No plaintext is cached; the token↔value map lives only in `kong.ctx.plugin` for the request. |
+| **Credential theft** | Reading plugin config / DB / Admin API | Credentials are `encrypted` + `referenceable` (`{vault://…}`); never returned by `GET /plugins`. |
+| **Unauthorized re-identification** | Caller restores data they shouldn't | Skyflow role governs what the credential may re-identify; `entity_treatment` masks/redacts even on the return path; `mapping_only` avoids any vault detokenize. |
+| **Token forgery / replay** | Crafted tokens in a response | `mapping_only` restores only tokens minted **this** request; vault-backed re-identify is governed by Skyflow policy regardless of token origin. |
+| **MITM to Skyflow** | Network interception | TLS to `*.vault.skyflowapis.com`; certificate verification on (never `ssl_verify=false` in prod). |
+| **DoS / amplification** | Huge bodies, many spans | `max_body_size`, `max_spans`, `max_concurrency`, `deadline_ms`; oversized ⇒ configured posture. |
+| **PII reaches upstream before tokenization** | Plugin not on the request path | De-identify runs in `access`; with `ai-proxy` the nested-proxy topology keeps de-identify on the front route so the internal `ai-proxy` route only ever sees tokens. |
+| **Credential compromise** | Leaked API key reused | Store as a secret reference; rotate out-of-band; scope the Skyflow role to least privilege. |
 
-## 7.3 Data handling & residency
+## Data handling & residency
 
-- **In memory only.** Request/response bodies and the token↔value map exist
-  solely in worker memory for the request's lifetime; GC'd at request end.
-- **PII egress is to the vault only.** The single external destination that ever
-  sees raw values is Skyflow over TLS. The upstream sees tokens.
-- **Residency** is governed by the Skyflow vault region (`cluster_id`/env), not
-  the gateway. For data-residency requirements, point at the in-region cluster
-  and pin `skyflow_base_url_override` to the regional/private endpoint.
-- **No analytics on values.** Metrics are aggregate counts by entity type.
+- **In memory only.** Request/response bodies and the token↔value map exist only
+  in worker memory for the request's lifetime, then are garbage-collected.
+- **PII egress is to the vault only.** The single external destination that sees
+  raw values is Skyflow, over TLS. The upstream sees tokens.
+- **Residency** follows the Skyflow vault region (`cluster_id`), not the gateway.
+  For data-residency needs, target the in-region cluster (or pin
+  `skyflow_base_url_override` to a regional/private endpoint).
+- **No analytics on values.** Emitted signals are aggregate counts by entity type.
 
-## 7.4 Secrets management
+## Secrets management
 
-- Credentials are schema-typed `encrypted` + `referenceable`:
-  - **PoC:** `credentials.api_key` via env/Kong vault reference.
-  - **Prod:** `credentials.service_account_json` via Kong **Secrets
-    Management** (`{vault://env/...}`, HashiCorp Vault, AWS SM, GCP SM).
-- The RSA private key (SA-JWT) is used only to sign the short-lived assertion;
-  it is read from the referenced secret, never logged, never echoed.
-- Rotation: API keys rotated out-of-band; SA keys rotated in Skyflow Studio and
-  swapped via the secret reference with no plugin code change.
+- Credentials are schema-typed `encrypted` + `referenceable`, so they're never
+  stored in plaintext and never returned by the Admin API.
+- Provide `credentials.api_key` as a secret reference — Kong **Secrets
+  Management** (`{vault://env/...}`, HashiCorp Vault, AWS/GCP SM) or a Konnect
+  control-plane secret.
+- Rotate the API key out-of-band and swap the referenced secret; no plugin change
+  needed.
 
-## 7.5 Governance & RBAC (delegated to Skyflow)
+> Service-account JWT auth (short-lived, role-scoped tokens signed in-gateway) is
+> a planned addition; today, use an API key with a least-privilege Skyflow role.
 
-The gateway delegates *authorization of data exposure* to Skyflow so that policy
-is centralized and audited:
+## Governance & RBAC (delegated to Skyflow)
 
-- **Roles:** the gateway's service account is granted exactly the Detect
-  permissions it needs (de-identify/re-identify; detokenize only if used). Least
-  privilege — a de-identify-only deployment need not hold detokenize rights.
-- **Policy context:** scoped tokens carry `ctx` (e.g. consumer id, department)
-  so Skyflow policies can allow/deny re-identification per caller, enabling
-  end-to-end, attribute-based governance without gateway-side authz logic.
-- **Audit:** Skyflow logs detokenize/re-identify events with the policy context,
-  giving a tamper-evident record of *who re-identified what* — something the
-  gateway alone can't provide.
-- **Entity treatment** (`plain_text`/`masked`/`redacted`) is a gateway-side
-  guardrail layered on top of vault policy: even an authorized re-identify can
-  be down-graded to masked for specific entity classes per Route/Consumer.
+Authorization of data exposure is delegated to Skyflow so policy is centralized
+and audited:
 
-## 7.6 Compliance posture
+- **Least privilege** — the credential's Skyflow role is granted only the Detect
+  permissions it needs (de-identify; re-identify only if used). A de-identify-only
+  deployment need not hold re-identify rights.
+- **Audit** — Skyflow logs re-identify/detokenize events, giving a record of
+  *who re-identified what* that the gateway alone can't provide.
+- **Gateway-side guardrail** — `entity_treatment` (`plain_text`/`masked`/
+  `redacted`) can down-grade even an authorized re-identify per entity class,
+  Route, or Consumer.
 
-- **GDPR / CCPA:** supports data minimization (providers process tokens, not
-  identities) and purpose limitation (per-Route entity sets); right-to-erasure
-  is handled in the vault, not the gateway.
-- **HIPAA:** PHI entities (MRN, name, DOB, etc.) can be tokenized before reaching
-  a model; the model/provider is removed from PHI scope for tokenized fields.
-- **PCI DSS:** PAN (`CREDIT_CARD`) tokenized before egress; re-identify can keep
-  it `masked` even on the return path.
-- These are *enabled by* the architecture; formal attestations depend on the
-  Skyflow vault configuration and the surrounding deployment, not this plugin
-  alone.
+> Per-caller policy context (scoped tokens carrying consumer/department `ctx` for
+> attribute-based re-identification decisions) arrives with service-account JWT
+> auth — see the planned-addition note above.
 
-## 7.7 Privacy invariants (enforced in CI)
+## Compliance posture
 
-Restated from [`testing §6.5`](../contributing/testing.md#65-security--privacy-tests-must-pass-invariants),
-these are release-gating:
+- **GDPR / CCPA** — data minimization (providers process tokens, not identities)
+  and purpose limitation (per-Route entity sets); right-to-erasure lives in the
+  vault.
+- **HIPAA** — PHI entities can be tokenized before reaching a model, removing the
+  provider from PHI scope for tokenized fields.
+- **PCI DSS** — PAN (`CREDIT_CARD`) tokenized before egress; re-identify can keep
+  it `masked` on the return path.
+
+These are *enabled by* the architecture; formal attestations depend on the
+Skyflow vault configuration and the surrounding deployment, not this plugin alone.
+
+## Privacy invariants
+
+The design upholds these invariants (and they're the assertions the test suite
+targets — see [testing](../contributing/testing.md#65-security--privacy-tests-must-pass-invariants)):
 
 1. No PII reaches the upstream on any `deny` error path.
-2. No PII appears in logs or metrics.
+2. No PII appears in logs.
 3. No PII persists in any cache or on disk.
-4. Credentials never returned by the Admin API.
-5. `masked`/`redacted` entities never returned in plaintext.
+4. Credentials are never returned by the Admin API.
+5. `masked`/`redacted` entities are never returned in plaintext.
 6. Auth failures (401/403) never fall through to forwarding raw data.
 
-## 7.8 Operational security guidance
+## Operational security guidance
 
-- Run data planes with outbound egress limited to the Skyflow cluster +
-  intended upstreams.
-- Keep `ssl_verify` on for Skyflow; use system or pinned CA bundle.
-- Set `dry_run=true` during initial rollout to observe detections without
-  altering traffic, then flip to enforcing (see [`operations`](operations.md)).
-- Alert on `skyflow_*_error` rate and on `posture=allow` events (a fail-open
-  event is a privacy-relevant signal).
+- Limit data-plane egress to the Skyflow cluster + intended upstreams.
+- Keep `ssl_verify` on for Skyflow; use a system or pinned CA bundle.
+- Roll out with `dry_run: true` to observe detections without altering traffic,
+  then enforce (see [operations](operations.md#rollout-playbook)).
+- Treat any fail-open (`skyflow.posture = allow` when configured `deny`) as a
+  privacy-relevant signal to alert on.

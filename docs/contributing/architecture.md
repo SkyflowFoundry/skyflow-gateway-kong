@@ -214,7 +214,7 @@ to data planes via env/secret references (see [`security`](../using/security.md)
 
 - **Added latency** ≈ auth (amortized to ~0 via cache) + **1** Detect round-trip
   on the request, and (if enabled) **1** Re-identify round-trip on the response.
-  Budget and tuning in [`operations §8.4`](../using/operations.md#84-latency-budget).
+  Budget and tuning in [`operations §8.4`](../using/operations.md#latency-budget).
 - All Skyflow I/O uses OpenResty's non-blocking cosockets — a worker handles
   other requests while awaiting Skyflow.
 - No blocking calls, no `os.time`-based sleeps in the hot path; token refresh is

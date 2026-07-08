@@ -243,5 +243,5 @@ docs/                    # design spec (see Documentation map below)
 
 ## License & ownership
 
-Internal Skyflow proof-of-concept. See [overview.md](docs/using/overview.md#14-non-goals)
+Internal Skyflow proof-of-concept. See [overview.md](docs/using/overview.md#non-goals)
 for scope boundaries.
