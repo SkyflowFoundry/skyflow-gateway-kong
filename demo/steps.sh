@@ -17,25 +17,20 @@ HOST="${HOST:-localhost:8000}"   # Konnect-hybrid data plane (real Skyflow vault
 PROMPT='{"messages":[{"role":"user","content":"Draft a friendly one-sentence appointment reminder for Jane Doe (jane@acme.com, 415-555-0132)."}]}'
 
 demo() {
-  # ── Before vs after: what the model actually receives ──────────────────────
-  group "What the LLM sees"
-
-  # RAW (red) — /demo/raw has NO de-identify plugin, so the echo reflects the
-  # request exactly as an unprotected upstream would get it: real PII.
-  step "Raw: prompts with PII hit AI" \
+  # echo: calling OpenAI via Kong with echo back
+  step "What the LLM sees without Skyflow" \
     "curl -s $HOST/demo/raw -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'" \
-    "$c_red"
+    "$c_red" "Prompt" "echo: calling OpenAI via Kong with echo back"
 
-  # DE-IDENTIFIED (green) — /demo/deid de-identifies first, so the echo shows the
-  # tokenized request. Same prompt, no raw PII.
-  step "De-identified: what the LLM receives" \
-    "curl -s $HOST/demo/deid -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'"
+  # echo: calling OpenAI via Kong + Skyflow with echo back
+  step "What the LLM sees with Skyflow" \
+    "curl -s $HOST/demo/deid -H 'content-type: application/json' -d '$PROMPT' | jq -r '.json.messages[-1].content'" \
+    "$c_green" "Prompt" "echo: calling OpenAI via Kong + Skyflow with echo back"
 
-  # ── The actual experience of using the gateway ─────────────────────────────
-  # de-identify -> real OpenAI -> re-identify. Skip with INCLUDE_LIVE=0.
+  # e2e: calling OpenAI via Kong + Skyflow with real re-identified response
   if [ "${INCLUDE_LIVE:-1}" = "1" ]; then
-    group "Using the gateway — de-identify + re-identify"
-    step "Re-identified response: prompt de-identified and sent to LLM, response re-identified by Skyflow" \
-      "curl -s $HOST/ai/chat -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'"
+    step "What the caller gets back — re-identified by Skyflow" \
+      "curl -s $HOST/ai/chat -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'" \
+      "$c_green" "Response" "e2e: calling OpenAI via Kong + Skyflow with real re-identified response"
   fi
 }
