@@ -198,6 +198,8 @@ deploy/
 └── konnect-hybrid/     # Option 2: self-managed DP on Konnect + deck configs
     └── deck/           # real-vault.yaml, ai-gateway.yaml, kong.yaml, VERIFY-DETECT.md
 
+demo/                   # on-camera steps for recording the walkthrough (see demo/README.md)
+
 spec/
 ├── offline/pure_algorithms_test.lua   # runs under luajit — no Kong/Docker (make unit-pure)
 └── skyflow-deidentify/                # schema + access + response specs (Pongo/busted)
