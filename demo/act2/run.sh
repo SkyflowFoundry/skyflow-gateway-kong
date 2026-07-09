@@ -56,13 +56,16 @@ run_turn() {
   opencode run -m "$MODEL" "$@" "$prompt" 2>&1
 }
 
-echo "════ Turn 1 — summarize meds + implement interaction check ════"
-run_turn "Read patient_intake.py. Implement the flag_interactions(patients) function described in the TODO, then give me a short summary of each patient's active medications and any interaction warnings."
+# Read-only tasks (tools write/edit/bash/webfetch/task are disabled in
+# opencode.json) — the agent reasons over the PHI, it never edits the repo or
+# spins sub-agents. Keeps the recording clean and deterministic.
+echo "════ Turn 1 — summarize meds + flag interaction risks ════"
+run_turn "Read patient_intake.py and summarize each patient's active medications, flagging any obvious drug-interaction risks. Do not modify any files."
 
 echo
 echo "════ Turn 2 — draft a follow-up for one patient (same session) ════"
-run_turn "Draft a two-sentence appointment-reminder message for Maria Gonzalez, using the contact details in patient_intake.py." --continue \
-  || run_turn "Draft a two-sentence appointment-reminder message for Maria Gonzalez, using the contact details in patient_intake.py."
+run_turn "Using the details in patient_intake.py, draft a two-sentence appointment-reminder message for Maria Gonzalez." --continue \
+  || run_turn "Using the details in patient_intake.py, draft a two-sentence appointment-reminder message for Maria Gonzalez."
 
 echo
 echo "✔ Done. The agent saw real names; OpenAI saw only [TOKEN]s. Check gateway logs:"

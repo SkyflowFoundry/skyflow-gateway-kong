@@ -46,6 +46,10 @@ patient_intake.py
 `run.sh` sets `OPENCODE_CONFIG` to [opencode.json](opencode.json), a dummy
 `OPENAI_API_KEY`, and `KONG_AI_BASE_URL`, then runs two turns of `opencode run`.
 
+To **record** Act 2, screen-record while running it — `record-demo --steps
+demo/act2/run.sh` captures the screen and runs the script (it's a plain script,
+not a `step`-based curl file like Act 1's `steps.sh`).
+
 ## Prove OpenAI only saw tokens
 
 While it runs (or after), confirm the gateway de-identified the outbound request:
@@ -99,6 +103,12 @@ in `run` mode.
 
 ## opencode config gotchas
 
+- **Read-only tools (recording safety).** `opencode.json` disables `write`, `edit`,
+  `patch`, `bash`, `webfetch`, and `task`. Without this, an open-ended prompt makes
+  the agent **edit the fixture**, spawn sub-agents (which hit an opencode `task`
+  bug — `Expected a string starting with "ses"`) and chase WebFetch — noisy on
+  camera and it mutates the repo. Locked to read/glob/grep, the agent just reasons
+  over the PHI. Keep the `run.sh` prompts read-only to match.
 - **Output limit.** opencode defaults `max_tokens` to 32000; gpt-4o-mini caps at 16384
   → `400 max_tokens is too large`. `opencode.json` pins `limit.output: 16384`.
 - **PATH.** The installer puts `opencode` in `~/.opencode/bin`, not always on PATH.
