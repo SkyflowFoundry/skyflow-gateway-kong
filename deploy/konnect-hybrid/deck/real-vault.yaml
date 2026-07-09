@@ -58,7 +58,12 @@ services:
           cluster_id: '${{ env "DECK_SKYFLOW_CLUSTER_ID" }}'
           credentials: { api_key: '${{ env "DECK_SKYFLOW_API_KEY" }}' }
           profile: openai
-          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
+          # Healthcare-flavored entity set — breadth in one prompt. Empty = detect-all.
+          deidentify:
+            entities: [NAME, NAME_GIVEN, NAME_MEDICAL_PROFESSIONAL, OCCUPATION,
+                       HEALTHCARE_NUMBER, ORGANIZATION_MEDICAL_FACILITY, CONDITION,
+                       DRUG, DOSE, DOB, EMAIL_ADDRESS, PHONE_NUMBER]
+            token_format: VAULT_TOKEN
           reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
           on_skyflow_error: deny
 
@@ -67,8 +72,13 @@ services:
   - name: ai-front
     url: http://127.0.0.1:8000/_ai_upstream
     routes:
+      # /ai/chat            — bare curl demo (Acts 1 & 3 of the steps script).
+      # /ai/v1/chat/completions — OpenAI Chat Completions shape, so any OpenAI-SDK
+      #   client is drop-in: point it at base_url http://localhost:8000/ai/v1 and it
+      #   POSTs here. Used by the opencode coding-agent demo (see demo/act2). Both
+      #   paths strip to the same loopback upstream (/_ai_upstream -> ai-proxy).
       - name: ai-chat
-        paths: ["/ai/chat"]
+        paths: ["/ai/chat", "/ai/v1/chat/completions"]
         strip_path: true
     plugins:
       - name: skyflow-deidentify
@@ -89,6 +99,12 @@ services:
       - name: ai-proxy
         config:
           route_type: "llm/v1/chat"
+          # Real coding-agent requests carry a large system prompt + tool schemas
+          # (tens of KB). ai-proxy's default cap (~8KB) rejects them with
+          # "request body doesn't contain valid inputs" once nginx spools the body
+          # to a temp file. Raise it so agent-sized bodies parse. Pairs with the
+          # DP's KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE bump (docker-compose.yml).
+          max_request_body_size: 16777216
           auth:
             header_name: Authorization
             header_value: 'Bearer ${{ env "DECK_OPENAI_API_KEY" }}'
@@ -114,7 +130,11 @@ services:
           cluster_id: '${{ env "DECK_SKYFLOW_CLUSTER_ID" }}'
           credentials: { api_key: '${{ env "DECK_SKYFLOW_API_KEY" }}' }
           profile: openai
-          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
+          deidentify:
+            entities: [NAME, NAME_GIVEN, NAME_MEDICAL_PROFESSIONAL, OCCUPATION,
+                       HEALTHCARE_NUMBER, ORGANIZATION_MEDICAL_FACILITY, CONDITION,
+                       DRUG, DOSE, DOB, EMAIL_ADDRESS, PHONE_NUMBER]
+            token_format: VAULT_TOKEN
           reidentify: { enabled: false }
           on_skyflow_error: deny
 

@@ -71,5 +71,18 @@ for _, strategy in helpers.each_strategy() do
     pending("denies/skip on non-JSON or oversized body per on_parse_error", function() end)
     pending("mcp profile tokenizes params.arguments.* string leaves only", function() end)
     pending("Content-Length is corrected after rewrite", function() end)
+
+    -- Agent-traffic hardening (see demo/act2/README.md "What it took"). These
+    -- paths only surface with real streaming, tool-using agents, not curls.
+    pending("skips empty-string content spans (no Skyflow 400)", function()
+      -- An assistant turn that only made tool calls carries content "". Skyflow
+      -- Detect 400s on empty text, so the plugin must skip it, not fail the
+      -- request. Send messages with a "" content span; expect 200, upstream hit.
+    end)
+    pending("reads a request body spooled to a temp file (large agent body)", function()
+      -- A body larger than client_body_buffer_size makes get_raw_body() return
+      -- nil; the plugin must fall back to ngx.req.get_body_file(). Send a body
+      -- above the buffer size; expect it de-identified, not "body unavailable".
+    end)
   end)
 end

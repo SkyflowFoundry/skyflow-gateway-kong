@@ -36,7 +36,14 @@ services:
           skyflow_base_url_override: "http://mock-skyflow:8080"
           credentials: { api_key: "demo-key" }
           profile: openai
-          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
+          # Mirrors deploy/konnect-hybrid/deck/real-vault.yaml. The local mock
+          # tokenizes by lookup table (ignores entity_types), so this list is for
+          # parity; the healthcare values live in mock-skyflow/nginx.conf.
+          deidentify:
+            entities: [NAME, NAME_GIVEN, NAME_MEDICAL_PROFESSIONAL, OCCUPATION,
+                       HEALTHCARE_NUMBER, ORGANIZATION_MEDICAL_FACILITY, CONDITION,
+                       DRUG, DOSE, DOB, EMAIL_ADDRESS, PHONE_NUMBER]
+            token_format: VAULT_TOKEN
           reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
           on_skyflow_error: deny
 
@@ -57,6 +64,7 @@ services:
       - name: ai-proxy
         config: &ai_proxy_mock
           route_type: "llm/v1/chat"
+          max_request_body_size: 16777216   # agent-sized bodies (see demo/act2)
           auth: { header_name: Authorization, header_value: "Bearer sk-mock" }
           model:
             provider: openai
@@ -69,8 +77,11 @@ services:
     # loopback to Kong's own proxy port; hits the /_ai_upstream route below.
     url: http://127.0.0.1:8000/_ai_upstream
     routes:
+      # /ai/v1/chat/completions makes this an OpenAI-compatible endpoint for the
+      # opencode coding-agent demo (base_url http://localhost:8010/ai/v1). Mirrors
+      # real-vault.yaml; both paths strip to the same /_ai_upstream loopback.
       - name: ai-chat
-        paths: ["/ai/chat"]
+        paths: ["/ai/chat", "/ai/v1/chat/completions"]
 
         protocols: ["http", "https"]
         strip_path: true
