@@ -29,6 +29,27 @@ for _, strategy in helpers.each_strategy() do
 
     pending("reidentify disabled imposes NO buffering (streaming still works)", function() end)
 
+    -- Agent-traffic hardening (see demo/act2/README.md "What it took"). A real
+    -- OpenAI client streams and uses tools; the gateway must buffer to
+    -- re-identify, then re-emit as SSE. `sse_chunk` is unit-tested offline
+    -- (spec/offline/pure_algorithms_test.lua); these assert the wired behavior.
+    pending("client stream:true -> upstream forced non-stream, response re-emitted as SSE", function()
+      -- Send stream:true. Assert: (a) upstream received stream:false (no SSE to
+      -- re-identify across chunks); (b) client got Content-Type text/event-stream
+      -- with a chat.completion.chunk data frame + a `data: [DONE]` sentinel;
+      -- (c) the token in the answer was restored to its real value.
+    end)
+    pending("re-identifies tool_calls[*].function.arguments, not just content", function()
+      -- Upstream returns a tool_call whose arguments string contains a token
+      -- (e.g. a tokenized username in a file path). Assert the client sees the
+      -- restored value in the arguments, so the agent acts on the real path.
+    end)
+    pending("skips empty content spans on re-id (tool_call response, content:null)", function()
+      -- A tool_call completion has content null/absent (0 content spans). With a
+      -- streaming client, assert it is still re-emitted as SSE rather than passed
+      -- through as raw JSON (which would stall the client).
+    end)
+
     -- Security invariants (docs/contributing/testing.md §6.5 / docs/using/security.md §7.7)
     pending("masked/redacted entities are NEVER returned in plaintext", function() end)
     pending("no fixture PII value appears in logs or metrics", function() end)

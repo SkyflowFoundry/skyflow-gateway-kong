@@ -301,8 +301,26 @@ end
 -- MUST NOT call kong.response.exit: it unwinds via a sentinel error that the
 -- caller's pcall would swallow, silently defeating fail-closed. Body rewrites
 -- (set_raw_body / enable_buffering) are plain PDK calls and are safe here.
-local function run_access(conf, ctx)
+-- kong.request.get_raw_body() returns nil when nginx spooled the request body to
+-- a temp file instead of keeping it in memory -- which happens once the body
+-- exceeds client_body_buffer_size. Small curls stay in memory; real API clients
+-- (e.g. a coding agent sending a large system prompt + tool schemas) do not, so
+-- without this fallback the plugin would deny every genuine agent request as
+-- "body unavailable". Read the spooled file directly to recover the full body.
+local function read_request_body()
   local raw = kong.request.get_raw_body()
+  if raw ~= nil then return raw end
+  local path = ngx.req.get_body_file()
+  if not path then return nil end
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local data = f:read("*a")
+  f:close()
+  return data
+end
+
+local function run_access(conf, ctx)
+  local raw = read_request_body()
   if raw == nil then
     if conf.on_parse_error == "deny" then
       return { deny = true, status = 422, body = { message = "request blocked: body unavailable" } }
@@ -358,6 +376,13 @@ local function run_access(conf, ctx)
   -- De-identify each span (sequential; deadline-bounded). Aggregate the map.
   local by_token, counts = {}, {}
   for _, span in ipairs(spans) do
+    -- Skip empty spans: agent conversations carry messages with content "" (e.g.
+    -- an assistant turn that only made tool calls). Skyflow Detect 400s on empty
+    -- text, so leave it untouched rather than fail the whole request.
+    if span.text == "" then
+      span.processed = span.text
+      goto continue
+    end
     local processed, ents = deidentify_text(conf, authz, span.text, deadline)
     if not processed then
       return fail_action(conf, ctx, ents)   -- on failure `ents` is the error string
@@ -372,6 +397,7 @@ local function run_access(conf, ctx)
         counts[etype or "?"] = (counts[etype or "?"] or 0) + 1
       end
     end
+    ::continue::
   end
 
   ctx.mapping = by_token
@@ -382,6 +408,17 @@ local function run_access(conf, ctx)
     local newbody
     if json_mode then
       for _, span in ipairs(spans) do span.parent[span.key] = span.processed end
+      -- Re-identification must buffer the whole response, which is impossible over
+      -- a streamed (SSE) response: a vault token like [NAME_xjv74g] gets split
+      -- across chunks and can't be matched. So force the upstream call
+      -- non-streaming, remember the client wanted a stream, and re-emit the
+      -- re-identified answer as SSE in :response(). (See demo/act2 — real coding
+      -- agents always stream.)
+      if doc.stream == true then
+        ctx.client_stream = true
+        doc.stream = false
+        doc.stream_options = nil
+      end
       local enc, eerr = cjson.encode(doc)
       if not enc then return fail_action(conf, ctx, "re-encode failed: " .. tostring(eerr)) end
       newbody = enc
@@ -431,6 +468,33 @@ function SkyflowDeidentify:access(conf)
   if action and action.deny then
     return kong.response.exit(action.status, action.body)
   end
+end
+
+-- Pure: build the single streaming chunk from a buffered chat.completion. The
+-- delta carries the whole answer -- content AND tool_calls, so an agent's tool
+-- loop still works. Exposed via _test for offline unit testing.
+local function sse_chunk(doc)
+  local choice = (doc.choices and doc.choices[1]) or {}
+  local delta  = choice.message or { role = "assistant", content = "" }
+  -- OpenAI's streamed tool_call deltas carry an `index`; the buffered completion
+  -- form omits it. Add it so the client can reassemble the tool calls.
+  if type(delta.tool_calls) == "table" then
+    for i, tc in ipairs(delta.tool_calls) do tc.index = i - 1 end
+  end
+  return {
+    id = doc.id, object = "chat.completion.chunk",
+    created = doc.created, model = doc.model,
+    choices = { { index = 0, delta = delta, finish_reason = choice.finish_reason or "stop" } },
+  }
+end
+
+-- Serialize a (re-identified) chat.completion as a minimal SSE stream, so a
+-- streaming OpenAI client (e.g. a coding agent) gets the event-stream it asked
+-- for even though the gateway had to buffer the full response to re-identify it.
+-- One chunk + a [DONE] sentinel. The client renders it at once instead of
+-- token-by-token, an acceptable trade for never leaking PII.
+local function completion_to_sse(doc)
+  return "data: " .. cjson.encode(sse_chunk(doc)) .. "\n\ndata: [DONE]\n\n"
 end
 
 function SkyflowDeidentify:response(conf)
@@ -523,19 +587,57 @@ function SkyflowDeidentify:response(conf)
     end
 
     local newbody
+    local streamed = false
     if wants_json(conf, ct) then
       local doc = cjson.decode(body)
       if doc == nil then
         call_err = "response body not decodable JSON"; return
       end
-      local spans = collect_spans(doc, effective_paths(conf, "response"))
-      if #spans == 0 then return end
-      for _, span in ipairs(spans) do
-        local restored, rerr = restore(span.text)
-        if not restored then call_err = rerr; return end
-        span.parent[span.key] = restored
+      -- Restore tokens the model echoed back inside tool_call arguments (e.g. a
+      -- username tokenized as a NAME inside a file path). The agent acts on these
+      -- values, so they must be real, not tokens -- and collect_spans only covers
+      -- message content, not tool_calls.
+      local tool_changed = false
+      if doc.choices then
+        for _, ch in ipairs(doc.choices) do
+          local tcs = ch.message and ch.message.tool_calls
+          if type(tcs) == "table" then
+            for _, tc in ipairs(tcs) do
+              local fn = tc["function"]
+              if fn and type(fn.arguments) == "string" and fn.arguments ~= "" then
+                local restored, rerr = restore(fn.arguments)
+                if not restored then call_err = rerr; return end
+                fn.arguments = restored
+                tool_changed = true
+              end
+            end
+          end
+        end
       end
-      newbody = cjson.encode(doc)
+
+      local spans = collect_spans(doc, effective_paths(conf, "response"))
+      if #spans == 0 and not tool_changed then
+        -- Nothing to re-identify (e.g. an empty response). If the client is
+        -- streaming we STILL must hand back SSE, not the raw JSON completion, or
+        -- the client stalls waiting for event-stream frames.
+        if not ctx.client_stream then return end
+        newbody = completion_to_sse(doc)
+        streamed = true
+      else
+        for _, span in ipairs(spans) do
+          if span.text ~= "" then
+            local restored, rerr = restore(span.text)
+            if not restored then call_err = rerr; return end
+            span.parent[span.key] = restored
+          end
+        end
+        newbody = cjson.encode(doc)
+        -- Client asked to stream; re-emit the re-identified completion as SSE.
+        if ctx.client_stream then
+          newbody = completion_to_sse(doc)
+          streamed = true
+        end
+      end
     else
       local restored, rerr = restore(body)
       if not restored then call_err = rerr; return end
@@ -545,6 +647,7 @@ function SkyflowDeidentify:response(conf)
     if newbody then
       kong.response.set_raw_body(newbody)
       if was_encoded then kong.response.clear_header("Content-Encoding") end
+      if streamed then kong.response.set_header("Content-Type", "text/event-stream") end
       kong.response.set_header("Content-Length", #newbody)
     end
   end)
@@ -575,6 +678,7 @@ SkyflowDeidentify._test = {
   mask              = mask,
   plain_replace     = plain_replace,
   reidentify_string = reidentify_string,
+  sse_chunk         = sse_chunk,
 }
 
 return SkyflowDeidentify

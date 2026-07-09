@@ -41,6 +41,13 @@ services:
       KONG_PLUGINS: bundled,skyflow-deidentify
       KONG_LUA_PACKAGE_PATH: /kong-plugins/?.lua;;
       KONG_PROXY_LISTEN: 0.0.0.0:8000, 0.0.0.0:8443 ssl
+      # Keep agent-sized request bodies (large system prompt + tool schemas, tens
+      # of KB) in memory instead of spooling to a temp file — so both the
+      # skyflow-deidentify plugin and ai-proxy can read the body. Without this,
+      # real coding-agent requests fail ("body unavailable" / ai-proxy "unable to
+      # parse request body"); small curls are unaffected. See demo/act2.
+      KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE: 16m
+      KONG_NGINX_HTTP_CLIENT_MAX_BODY_SIZE: 16m
     volumes:
       # repo `plugin/` dir -> package path root, so
       # kong.plugins.skyflow-deidentify.{handler,schema} resolves

@@ -24,6 +24,9 @@ services:
       KONG_PLUGINS: bundled,skyflow-deidentify
       KONG_LUA_PACKAGE_PATH: /kong-plugins/?.lua;;
       KONG_PROXY_LISTEN: 0.0.0.0:8000
+      # Keep agent-sized request bodies in memory (see demo/act2 + konnect-hybrid).
+      KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE: 16m
+      KONG_NGINX_HTTP_CLIENT_MAX_BODY_SIZE: 16m
       KONG_LOG_LEVEL: notice
       # ai-proxy needs *some* auth header; the mock LLM ignores it.
       KONG_NGINX_WORKER_PROCESSES: "1"

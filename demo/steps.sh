@@ -6,18 +6,19 @@
 #   record-demo --steps demo/steps.sh --no-record  # rehearse the curls only
 #
 # All steps hit the Konnect-hybrid data plane (:8000) backed by the real Skyflow
-# vault, and use the SAME prompt — only the route changes. INCLUDE_LIVE=0 skips
-# the real-OpenAI step.
+# vault. Content (the prompt, the highlight list, the recurring pair) comes from a
+# swappable SCENARIO file so the demo can be re-skinned per vertical without
+# touching this script. INCLUDE_LIVE=0 skips the real-OpenAI step.
 
 DEMO_TITLE="Skyflow × Kong AI Gateway"
 
 HOST="${HOST:-localhost:8000}"   # Konnect-hybrid data plane (real Skyflow vault)
 
-# One PII-laden prompt, reused for every step.
-PROMPT='{"messages":[{"role":"user","content":"Draft a friendly one-sentence appointment reminder for Jane Doe (jane@acme.com, 415-555-0132)."}]}'
-
-# Highlight the PII red in the payload/output (Skyflow tokens are auto-highlighted green).
-HL_SENSITIVE="Jane Doe|jane@acme.com|415-555-0132"
+# Content layer. Swap verticals with SCENARIO=demo/scenarios/<name>.sh.
+# Provides: PROMPT, HL_SENSITIVE, RECUR_PROMPT_A, RECUR_PROMPT_B, SCENARIO_LABEL.
+SCENARIO="${SCENARIO:-demo/scenarios/healthcare.sh}"
+# shellcheck source=demo/scenarios/healthcare.sh
+. "$SCENARIO"
 
 demo() {
   # echo: calling OpenAI via Kong with echo back
@@ -36,4 +37,11 @@ demo() {
       "curl -s $HOST/ai/chat -H 'content-type: application/json' -d '$PROMPT' | jq -r '.choices[0].message.content'" \
       "$c_purple" "Response (re-identified)" "e2e: calling OpenAI via Kong + Skyflow with real re-identified response"
   fi
+
+  # Two SEPARATE requests, same patient. VAULT_TOKEN is deterministic per value, so
+  # "Maria Gonzalez" tokenizes to the IDENTICAL [NAME_...] in both — the stable
+  # mapping that lets a multi-turn conversation stay coherent (see demo/act2).
+  step "4 · Same patient → same token (referential integrity)" \
+    "for p in \"\$RECUR_PROMPT_A\" \"\$RECUR_PROMPT_B\"; do curl -s $HOST/demo/deid -H 'content-type: application/json' -d \"\$p\" | jq -r '.json.messages[-1].content'; done" \
+    "$c_purple" "De-identified — note the matching token" "deterministic vault tokens across requests"
 }

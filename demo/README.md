@@ -1,21 +1,36 @@
 # Demo recording
 
-`steps.sh` is the on-camera script for this project's demo. One PII prompt runs
-through the Konnect data plane (`:8000`, real Skyflow vault) in two groups:
+The demo is in two acts:
 
-**What the LLM sees** — before vs after, both via an echo upstream that reflects
-the request the model would receive:
+- **Act 1 — `steps.sh`** (the curls below): the mechanism, on camera.
+- **Act 2 — [`act2/`](act2/)**: the use case — a real coding-agent CLI (opencode)
+  working through the gateway. See [act2/README.md](act2/README.md).
 
-1. **Raw: prompts with PII hit AI** — `/demo/raw` (no de-identify plugin) echoes
-   the request unchanged: the raw PII an unprotected upstream would get.
-2. **De-identified: what the LLM receives** — `/demo/deid` de-identifies first,
-   so the echo shows the tokenized prompt (`[NAME_…]`, `[EMAIL_ADDRESS_…]`,
-   `[PHONE_NUMBER_…]`) — same prompt, no raw PII.
+## Act 1 — `steps.sh`
 
-**Using the gateway — de-identify + re-identify:**
+One healthcare prompt (a patient follow-up note, dense with PHI) runs through the
+Konnect data plane (`:8000`, real Skyflow vault). The prompt, highlight list, and
+recurring-patient pair come from a **swappable scenario file**
+([scenarios/healthcare.sh](scenarios/healthcare.sh)) — re-skin for another vertical
+with `SCENARIO=demo/scenarios/<name>.sh` and nothing in `steps.sh` changes.
 
-- **Re-identified response** — `/ai/chat`: prompt de-identified → real OpenAI →
-  response re-identified by Skyflow. A useful answer, PII never exposed to the model.
+The one note lights up ~12 entity types — `NAME`, `NAME_MEDICAL_PROFESSIONAL`,
+`HEALTHCARE_NUMBER`, `ORGANIZATION_MEDICAL_FACILITY`, `CONDITION`, `DRUG`, `DOSE`,
+`EMAIL_ADDRESS`, `PHONE_NUMBER` … — several with multiple instances of the same
+type (two patients, two drugs, two conditions), so breadth and referential
+integrity are both visible in one frame.
+
+1. **What the LLM sees without Skyflow** — `/demo/raw` (no plugin) echoes the
+   request unchanged: the raw PHI an unprotected upstream would get.
+2. **What the LLM sees with Skyflow** — `/demo/deid` de-identifies first, so the
+   echo shows the tokenized prompt (`[NAME_xjv74g]`, `[HEALTHCARE_NUMBER_…]`,
+   `[DRUG_…]` …) — same prompt, no raw PHI.
+3. **What the caller gets back** — `/ai/chat`: prompt de-identified → real OpenAI →
+   response re-identified by Skyflow. A useful answer, PHI never exposed to the model.
+4. **Same patient → same token** — two *separate* requests both mentioning the
+   patient. With `VAULT_TOKEN` the mapping is deterministic per value, so the
+   `[NAME_…]` token is **identical** in both — the referential integrity that lets
+   a multi-turn conversation (Act 2) stay coherent.
 
 It's driven by **`record-demo.sh`** from the personal `demo-media` skill, which
 screen-records, runs these steps, and emits a timestamped MP4 (for a talk track)
@@ -36,10 +51,10 @@ plus a GIF (for inline sharing). The recorder lives with the skill, not here:
    INCLUDE_LIVE=0 record-demo --steps demo/steps.sh   # skip the real-OpenAI step
    ```
 
-Outputs land in `demo-out/` (git-ignored). The **Re-identified response** step
+Outputs land in `demo-out/` (git-ignored). Step 3 (**re-identified response**)
 hits real OpenAI — redact anything sensitive before sharing, or record with
-`INCLUDE_LIVE=0` (which skips it, leaving the two echo-based steps that only use
-the vault).
+`INCLUDE_LIVE=0` (which skips it, leaving steps 1, 2, and 4, which only use the
+vault via the echo routes).
 
 ## The `/demo/raw` and `/demo/deid` echo routes
 
@@ -56,8 +71,9 @@ deck gateway sync --konnect-token "$KONNECT_PAT" \
 ```
 
 `real-vault.yaml` is the **canonical / default** config for this demo — it holds
-all three routes the steps use (`/demo/deid`, `/vault/chat`, `/ai/chat`) and is
-the file kept synced to the `skyflow-hybrid` control plane.
+every route the demo uses (`/demo/raw`, `/demo/deid`, `/ai/chat`, and the
+OpenAI-compatible `/ai/v1/chat/completions` that Act 2's opencode hits) and is the
+file kept synced to the `skyflow-hybrid` control plane.
 
 > ⚠️ **The control plane is shared and `deck gateway sync` is destructive** — it
 > makes the CP match the synced file exactly and deletes anything not in it. If a

@@ -53,5 +53,32 @@ local g = T.effective_paths({ profile = "generic", request_json_paths = { "$.x" 
 eq(g[1], "$.x", "generic uses override")
 eq(#g, 1, "generic override count")
 
+-- 6. sse_chunk: a content response becomes one chunk carrying the whole answer
+local c1 = T.sse_chunk({ id = "x", created = 7, model = "m",
+  choices = { { message = { role = "assistant", content = "Hi Jane" }, finish_reason = "stop" } } })
+eq(c1.object, "chat.completion.chunk", "sse_chunk object type")
+eq(c1.id, "x", "sse_chunk preserves id")
+eq(c1.choices[1].index, 0, "sse_chunk choice index 0")
+eq(c1.choices[1].delta.content, "Hi Jane", "sse_chunk carries content in delta")
+eq(c1.choices[1].delta.role, "assistant", "sse_chunk carries role")
+eq(c1.choices[1].finish_reason, "stop", "sse_chunk preserves finish_reason")
+
+-- 7. sse_chunk: a tool_call response gets a streaming `index` on each tool_call
+local c2 = T.sse_chunk({ id = "y", choices = { { message = {
+  role = "assistant", content = nil,
+  tool_calls = { { id = "call_1", type = "function", ["function"] = { name = "read", arguments = "{}" } },
+                 { id = "call_2", type = "function", ["function"] = { name = "edit", arguments = "{}" } } },
+}, finish_reason = "tool_calls" } } })
+eq(c2.choices[1].delta.tool_calls[1].index, 0, "sse_chunk tool_call[1].index=0")
+eq(c2.choices[1].delta.tool_calls[2].index, 1, "sse_chunk tool_call[2].index=1")
+eq(c2.choices[1].delta.tool_calls[1]["function"].name, "read", "sse_chunk preserves tool name")
+eq(c2.choices[1].finish_reason, "tool_calls", "sse_chunk preserves tool_calls finish_reason")
+
+-- 8. sse_chunk: an absent message falls back to a valid empty assistant delta
+local c3 = T.sse_chunk({ choices = {} })
+eq(c3.choices[1].delta.role, "assistant", "sse_chunk default role")
+eq(c3.choices[1].delta.content, "", "sse_chunk default empty content")
+eq(c3.choices[1].finish_reason, "stop", "sse_chunk default finish_reason")
+
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)
