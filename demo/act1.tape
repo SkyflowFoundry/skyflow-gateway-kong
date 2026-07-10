@@ -41,10 +41,13 @@ Enter                              # blank line separates this beat from the one
 Type "# with Skyflow × Kong: same prompt, de-identified to tokens" Enter
 Type@30ms `curl -s $DEMO_HOST/demo/deid -H 'content-type: application/json' -d "$PROMPT" | jq -r '.json.messages[-1].content'` Enter
 Wait
-Sleep 1500ms
+Sleep 2500ms                       # hold the raw-vs-token contrast on screen before clearing
 
-# ── beat 3: the answer the caller gets back, re-identified (OpenAI only saw tokens) ──
-Enter
+# ── beat 3: its OWN clean screen — the answer the caller gets back, re-identified ──
+Hide
+Type "clear" Enter
+Show
+Sleep 500ms
 Type "# the caller's answer, re-identified — OpenAI only ever saw tokens" Enter
 Type@30ms `curl -s $DEMO_HOST/ai/chat -H 'content-type: application/json' -d "$PROMPT" | jq -r '.choices[0].message.content'` Enter
 Wait
