@@ -21,7 +21,8 @@
 #     with real-vault.yaml synced; rehearsal needs local-dbless (:8010).
 set -euo pipefail
 
-cd "$(dirname "$0")"                      # so opencode operates on ./patient_intake.py
+cd "$(dirname "${BASH_SOURCE[0]}")"       # so opencode operates on ./patient_intake.py
+                                          # (BASH_SOURCE, not $0 — robust if sourced)
 
 # :8000 = Konnect DP (real vault + real OpenAI). REHEARSE -> :8010 local mocks.
 if [ "${REHEARSE:-0}" = "1" ]; then

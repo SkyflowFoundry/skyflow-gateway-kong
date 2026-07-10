@@ -46,9 +46,18 @@ patient_intake.py
 `run.sh` sets `OPENCODE_CONFIG` to [opencode.json](opencode.json), a dummy
 `OPENAI_API_KEY`, and `KONG_AI_BASE_URL`, then runs two turns of `opencode run`.
 
-To **record** Act 2, screen-record while running it — `record-demo --steps
-demo/act2/run.sh` captures the screen and runs the script (it's a plain script,
-not a `step`-based curl file like Act 1's `steps.sh`).
+To **record** Act 2 with `record-demo`, use the dedicated steps file — **not**
+`run.sh`:
+
+```bash
+record-demo --steps demo/act2/steps.sh
+```
+
+`demo/act2/steps.sh` is a proper `record-demo` steps file (defines `demo()` with
+one `step`). Do **not** pass `run.sh` to `--steps`: `record-demo` *sources* the
+file, so `run.sh` (a standalone script) runs with the wrong `$0`/cwd and opencode
+gets no config → `Unexpected server error`. `run.sh` is for running Act 2
+directly (or screen-recording it yourself).
 
 ## Prove OpenAI only saw tokens
 
