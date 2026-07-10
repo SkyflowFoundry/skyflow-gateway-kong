@@ -1,5 +1,13 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "tools": {
+    "write": false,
+    "edit": false,
+    "patch": false,
+    "bash": false,
+    "webfetch": false,
+    "task": false
+  },
   "provider": {
     "kong": {
       "npm": "@ai-sdk/openai-compatible",

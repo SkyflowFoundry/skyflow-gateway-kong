@@ -53,7 +53,7 @@ def find_patient(mrn):
     return None
 
 
-# TODO(agent): implement flag_interactions(patients) -> list of
-# (patient_name, drug_a, drug_b, note) for any risky drug-drug interactions
-# across each patient's medication list. This is the task the coding agent is
-# asked to do in demo/act2/run.sh — it must read the PHI above to do it.
+# NOTE: a reviewer would scan each patient's `medications` for risky drug-drug
+# interactions. The Act 2 demo (demo/act2/run.sh) asks the agent to do exactly
+# that by READING this file — it reasons over the PHI above, while the gateway
+# ensures OpenAI only ever sees Skyflow tokens for it.
