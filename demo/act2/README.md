@@ -46,18 +46,36 @@ patient_intake.py
 `run.sh` sets `OPENCODE_CONFIG` to [opencode.json](opencode.json), a dummy
 `OPENAI_API_KEY`, and `KONG_AI_BASE_URL`, then runs two turns of `opencode run`.
 
-To **record** Act 2 with `record-demo`, use the dedicated steps file — **not**
-`run.sh`:
+## Record it (VHS)
+
+The canonical recording is a **VHS** tape — [`act2.tape`](act2.tape) — that drives the
+**real** `opencode` CLI (not a simulation) and re-renders on demand:
 
 ```bash
-record-demo --steps demo/act2/steps.sh
+cd demo/act2 && vhs act2.tape      # -> ../../demo-out/act2.{gif,mp4}
 ```
 
-`demo/act2/steps.sh` is a proper `record-demo` steps file (defines `demo()` with
-one `step`). Do **not** pass `run.sh` to `--steps`: `record-demo` *sources* the
-file, so `run.sh` (a standalone script) runs with the wrong `$0`/cwd and opencode
-gets no config → `Unexpected server error`. `run.sh` is for running Act 2
-directly (or screen-recording it yourself).
+Prereqs: `brew install vhs` (pulls in `ttyd` + `ffmpeg`), the JetBrains Mono font,
+`opencode` installed, and the `:8000` DP up (real vault + real OpenAI). The tape sets
+opencode's env in a hidden setup block, so no wrapper is needed;
+[`config.tape`](config.tape) holds the shared look.
+
+It's deliberately minimal: one `opencode run` reasoning over `patient_intake.py`, and
+the answer — with **real** re-identified names — while OpenAI only ever saw tokens (see
+[Prove OpenAI only saw tokens](#prove-openai-only-saw-tokens) below to show that half).
+
+Two things that bite:
+
+- **`CI=1 NO_COLOR=1` is load-bearing.** Without it, VHS's terminal answers opencode's
+  capability probes, opencode switches to its rich TUI renderer, then blocks on a
+  terminal query VHS never answers and the turn **stalls mid-stream**. Those env vars
+  force opencode's plain, non-interactive output (streams clean, finishes in ~15s).
+- **Not byte-identical.** The render hits real OpenAI, so the agent's wording varies per
+  run. The mechanism reproduces; keep the render you like.
+
+The older `record-demo` path (screen-capturing `run.sh`-style steps via
+[`steps.sh`](steps.sh)) still works, but VHS is now the recommended way. `run.sh`
+remains for running Act 2 directly.
 
 ## Prove OpenAI only saw tokens
 
@@ -81,9 +99,12 @@ curl -s localhost:8000/demo/deid -H 'content-type: application/json' \
 
 | File | Purpose |
 | --- | --- |
+| [`act2.tape`](act2.tape) | **VHS recording script** — drives the real `opencode` CLI, emits `../../demo-out/act2.{gif,mp4}`. |
+| [`config.tape`](config.tape) | Shared VHS look (theme, size, font, prompt `WaitPattern`) — `Source`d by `act2.tape`. |
 | [`opencode.json`](opencode.json) | Registers a `kong` provider → the OpenAI-compatible gateway route. |
 | [`patient_intake.py`](patient_intake.py) | The PHI-laden file the agent reads and reasons over. |
-| [`run.sh`](run.sh) | Headless two-turn driver for recording. |
+| [`run.sh`](run.sh) | Headless two-turn driver for running Act 2 directly. |
+| [`steps.sh`](steps.sh) | Legacy `record-demo` steps file (superseded by `act2.tape`). |
 
 ## What it took to run a real agent (the non-obvious part)
 
