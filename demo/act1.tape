@@ -26,20 +26,22 @@ Type "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH" Enter    # VHS's shell
 Type "cd /Users/joe/Code/skyflow-kong-poc/demo" Enter
 Type "export DEMO_HOST=localhost:8000" Enter
 Type ". scenarios/healthcare.sh" Enter
+Type "export HL_SENSITIVE" Enter    # expose the raw-PII list to the highlighter
+Type ". ./highlight.sh" Enter       # defines `hi`: Skyflow tokens -> green, raw PII -> red
 Type "clear" Enter
 Show
 
 # ── beat 1: what the model would see WITHOUT Skyflow — the raw PHI ───────────────────
 Sleep 800ms
 Type "# without Skyflow × Kong: the raw PHI the model would receive" Enter
-Type@30ms `curl -s $DEMO_HOST/demo/raw -H 'content-type: application/json' -d "$PROMPT" | jq -r '.json.messages[-1].content'` Enter
+Type@30ms `curl -s $DEMO_HOST/demo/raw -H 'content-type: application/json' -d "$PROMPT" | jq -r '.json.messages[-1].content' | hi` Enter
 Wait
 Sleep 1500ms
 
 # ── beat 2: what the model sees WITH Skyflow — same prompt, de-identified to tokens ──
 Enter                              # blank line separates this beat from the one above
 Type "# with Skyflow × Kong: same prompt, de-identified to tokens" Enter
-Type@30ms `curl -s $DEMO_HOST/demo/deid -H 'content-type: application/json' -d "$PROMPT" | jq -r '.json.messages[-1].content'` Enter
+Type@30ms `curl -s $DEMO_HOST/demo/deid -H 'content-type: application/json' -d "$PROMPT" | jq -r '.json.messages[-1].content' | hi` Enter
 Wait
 Sleep 2500ms                       # hold the raw-vs-token contrast on screen before clearing
 
@@ -49,6 +51,6 @@ Type "clear" Enter
 Show
 Sleep 500ms
 Type "# the caller's answer, re-identified — OpenAI only ever saw tokens" Enter
-Type@30ms `curl -s $DEMO_HOST/ai/chat -H 'content-type: application/json' -d "$PROMPT" | jq -r '.choices[0].message.content'` Enter
+Type@30ms `curl -s $DEMO_HOST/ai/chat -H 'content-type: application/json' -d "$PROMPT" | jq -r '.choices[0].message.content' | hi` Enter
 Wait
 Sleep 3s

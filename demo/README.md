@@ -44,9 +44,14 @@ cd demo && vhs act1.tape           # -> ../demo-out/act1.{gif,mp4}
 
 It's deliberately minimal: the three-beat core — **raw PHI → de-identified tokens →
 re-identified answer**. Beats 1 and 2 land adjacent so the contrast (real names vs
-`[NAME_…]`) reads in a single frame; beat 3 shows the real re-identified answer while
-OpenAI only ever saw the tokens. (Step 4, the same-token referential-integrity proof,
-is left to `steps.sh` to keep the tape lean.)
+`[NAME_…]`) reads in a single frame; beat 3 clears to its own screen for the real
+re-identified answer while OpenAI only ever saw the tokens. (Step 4, the same-token
+referential-integrity proof, is left to `steps.sh` to keep the tape lean.)
+
+Each beat pipes through `hi` (from [`highlight.sh`](highlight.sh), sourced in the hidden
+setup) so **raw PII shows red and Skyflow tokens show green** — the same colour cue as
+the original `record-demo` recording. The red-PII list comes from the scenario's
+`$HL_SENSITIVE`, so re-skinning the scenario re-skins the highlighting for free.
 
 A hidden setup block sets `$DEMO_HOST` and sources
 [`scenarios/healthcare.sh`](scenarios/healthcare.sh) — so the visible commands stay short
