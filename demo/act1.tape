@@ -31,15 +31,14 @@ Show
 
 # ── beat 1: what the model would see WITHOUT Skyflow — the raw PHI ───────────────────
 Sleep 800ms
-Enter                              # blank line to separate the beats visually
-Type "# without Skyflow: the raw PHI the model would receive" Enter
+Type "# without Skyflow × Kong: the raw PHI the model would receive" Enter
 Type@30ms `curl -s $DEMO_HOST/demo/raw -H 'content-type: application/json' -d "$PROMPT" | jq -r '.json.messages[-1].content'` Enter
 Wait
 Sleep 1500ms
 
 # ── beat 2: what the model sees WITH Skyflow — same prompt, de-identified to tokens ──
-Enter
-Type "# with Skyflow: same prompt, de-identified to tokens" Enter
+Enter                              # blank line separates this beat from the one above
+Type "# with Skyflow × Kong: same prompt, de-identified to tokens" Enter
 Type@30ms `curl -s $DEMO_HOST/demo/deid -H 'content-type: application/json' -d "$PROMPT" | jq -r '.json.messages[-1].content'` Enter
 Wait
 Sleep 1500ms
