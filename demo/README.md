@@ -32,10 +32,46 @@ integrity are both visible in one frame.
    `[NAME_…]` token is **identical** in both — the referential integrity that lets
    a multi-turn conversation (Act 2) stay coherent.
 
-It's driven by **`record-demo.sh`** from the personal `demo-media` skill, which
-screen-records, runs these steps, and emits a timestamped MP4 (for a talk track)
-plus a GIF (for inline sharing). The recorder lives with the skill, not here:
-<https://github.com/jstjoe/claude-sample> (`skills/demo-media/`).
+### Record it (VHS)
+
+The canonical recording is a **VHS** tape — [`act1.tape`](act1.tape) — that runs the
+**real** curls and re-renders on demand (same approach as
+[Act 2](act2/README.md#record-it-vhs)):
+
+```bash
+cd demo && vhs act1.tape           # -> ../demo-out/act1.{gif,mp4}
+```
+
+It's deliberately minimal: the three-beat core — **raw PHI → de-identified tokens →
+re-identified answer**. Beats 1 and 2 land adjacent so the contrast (real names vs
+`[NAME_…]`) reads in a single frame; beat 3 clears to its own screen for the real
+re-identified answer while OpenAI only ever saw the tokens. (Step 4, the same-token
+referential-integrity proof, is left to `steps.sh` to keep the tape lean.)
+
+Each beat pipes through `hi` (from [`highlight.sh`](highlight.sh), sourced in the hidden
+setup) so **raw PII shows red and Skyflow tokens show green** — the same colour cue as
+the original `record-demo` recording. The red-PII list comes from the scenario's
+`$HL_SENSITIVE`, so re-skinning the scenario re-skins the highlighting for free.
+
+A hidden setup block sets `$DEMO_HOST` and sources
+[`scenarios/healthcare.sh`](scenarios/healthcare.sh) — so the visible commands stay short
+(`-d "$PROMPT"`) instead of a screenful of inline JSON. It `Source`s Act 2's
+[`config.tape`](act2/config.tape) for a matched look.
+
+Two things that bite:
+
+- **The tape runs under `bash`, not `zsh`.** The scenario sets a `$PROMPT` variable, and
+  in **zsh `PROMPT` is a synonym for `$PS1`** — sourcing the scenario would overwrite the
+  prompt with the JSON blob (and the bare `Wait` never re-matches the `$` prompt). bash treats
+  `PROMPT` as an ordinary variable. `Set Shell bash` overrides the zsh in `config.tape`.
+- **`jq` must be on PATH.** VHS's shell skips `~/.zshrc`/`~/.bashrc`, so the tape exports
+  `/opt/homebrew/bin` (Homebrew `jq`) explicitly. `curl` is `/usr/bin`, always present.
+- **Not byte-identical.** Beat 3 hits real OpenAI, so the answer's wording varies per
+  run. The mechanism reproduces; keep the render you like.
+
+The older **`record-demo.sh`** path (from the personal `demo-media` skill —
+<https://github.com/jstjoe/claude-sample>, `skills/demo-media/`) still works and drives
+the same [`steps.sh`](steps.sh) (which also does step 4); VHS is now the recommended way.
 
 ## Use
 
