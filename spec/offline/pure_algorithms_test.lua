@@ -52,6 +52,24 @@ eq(doc.messages[1].content, "X", "replace string content")
 eq(doc.messages[2].content[1].text, "X", "replace array-form text")
 eq(doc.prompt, "X", "replace prompt")
 
+-- 2b. anthropic profile covers tool_result blocks (string + text-block forms)
+local adoc = { messages = {
+  { role = "user", content = "check the patient file" },
+  { role = "assistant", content = { { type = "tool_use", id = "t1", name = "read", input = {} } } },
+  { role = "user", content = { {
+      type = "tool_result", tool_use_id = "t1",
+      content = { { type = "text", text = "name: David Okafor" } },
+  } } },
+  { role = "user", content = { { type = "tool_result", tool_use_id = "t2", content = "plain string result" } } },
+} }
+local aconf = { profile = "anthropic", request_json_paths = {}, response_json_paths = {} }
+local aspans = T.collect_spans(adoc, T.effective_paths(aconf, "request"))
+local found = {}
+for _, s in ipairs(aspans) do found[s.text] = true end
+eq(found["name: David Okafor"], true, "anthropic profile reaches tool_result text blocks")
+eq(found["plain string result"], true, "anthropic profile reaches string tool_results")
+eq(found["check the patient file"], true, "anthropic profile still covers plain content")
+
 -- 3. mask
 eq(T.mask("4111111111111111"), "************1111", "mask keeps last 4")
 eq(T.mask("abc"), "***", "mask short")
@@ -120,21 +138,33 @@ eq(T.jwt_exp("mock-access-token"), 0, "jwt_exp 0 for non-JWT")
 eq(T.jwt_exp(nil), 0, "jwt_exp 0 for nil")
 eq(T.jwt_exp("a.!!!.c"), 0, "jwt_exp 0 for undecodable payload")
 
--- 11. build_ctx: static + header merge, header wins, canonical cache key sorted
-local hdrs = { ["X-Consumer-Username"] = "alice", ["X-Team"] = "sales" }
-local get = function(name) return hdrs[name] end
-local ctx, key = T.build_ctx({ tenant = "acme", user = "static-user" },
-                             { user = "X-Consumer-Username", team = "X-Team", missing = "X-Nope" }, get)
-eq(ctx.tenant, "acme", "build_ctx keeps static attr")
-eq(ctx.user, "alice", "build_ctx header overrides static")
-eq(ctx.team, "sales", "build_ctx adds header attr")
-eq(ctx.missing, nil, "build_ctx skips absent header")
-eq(key, "team=sales&tenant=acme&user=alice", "build_ctx canonical key sorted")
-local nctx, nkey = T.build_ctx(nil, nil, get)
+-- 11. layered ctx assembly: nested JSON base + flat layers, later layers win
+local base = { tenant = "acme", org = { id = "org_1", unit = "eng" }, pci = true, risk = 2 }
+local ctx, key = T.build_ctx(base, {
+  { ["org.unit"] = "payments", purpose = "agent-egress" },   -- static (dot-path nests)
+  { ["caller.user"] = "alice", tenant = "spoofed" },          -- client headers
+  { tenant = "acme", ["caller.route"] = "claude" },           -- trusted kong facts (last, win)
+})
+eq(ctx.org.id, "org_1", "build_ctx keeps nested base attr")
+eq(ctx.org.unit, "payments", "build_ctx dot-path overrides nested base")
+eq(ctx.caller.user, "alice", "build_ctx dot-path creates nested attrs")
+eq(ctx.caller.route, "claude", "build_ctx merges multiple layers")
+eq(ctx.tenant, "acme", "build_ctx later (trusted) layer wins over client layer")
+eq(ctx.pci, true, "build_ctx preserves boolean base values")
+eq(ctx.risk, 2, "build_ctx preserves numeric base values")
+eq(base.org.unit, "eng", "build_ctx never mutates the shared base (deep copy)")
+local _, key2 = T.build_ctx({ org = { unit = "payments", id = "org_1" }, tenant = "acme",
+                              pci = true, risk = 2, purpose = "agent-egress",
+                              caller = { user = "alice", route = "claude" } }, {})
+eq(key, key2, "canonical key is insertion-order independent")
+local _, key3 = T.build_ctx({ risk = "2" }, {})
+local _, key4 = T.build_ctx({ risk = 2 }, {})
+eq(key3 ~= key4, true, "canonical key distinguishes string vs number")
+local nctx, nkey = T.build_ctx(nil, { nil, nil })
 eq(nctx, nil, "build_ctx nil when no context configured")
 eq(nkey, "", "build_ctx empty key when no context")
-local sctx = T.build_ctx({ tenant = "acme" }, nil, nil)
-eq(sctx.tenant, "acme", "build_ctx static-only works without header getter")
+local ectx = T.build_ctx(nil, { { user = "" } })
+eq(ectx, nil, "build_ctx ignores empty-string values")
 
 -- 12. Anthropic-native SSE re-emit: full event sequence, text + tool_use blocks
 eq(T.is_anthropic_message({ type = "message", content = {} }), true, "is_anthropic_message true")

@@ -61,14 +61,27 @@ for a short-lived bearer (~60 min), cached per worker and re-minted
 
 - **Scoped tokens** — `credentials.role_ids` restricts the bearer to a subset of
   the SA's roles (`scope: "role:<id> ..."` on the exchange).
-- **Context-aware authorization** — `credentials.context` (static attributes) and
-  `credentials.context_headers` (attribute ← request header, e.g.
-  `user ← X-Consumer-Username`) populate the assertion's `ctx` claim. Skyflow
-  embeds it in the bearer, so vault policies can condition access per caller:
-  `ALLOW READ ON ... WHERE table.owner = $ctx.user`. Distinct resolved contexts
-  mint distinct bearers, and the context is audit-logged by Skyflow. To make
-  enforcement mandatory, set `enforceContextID: true` on the service account —
-  token exchange then fails unless `ctx` is present.
+- **Context-aware authorization** — the assertion's `ctx` claim accepts
+  arbitrary JSON (vault policies traverse it as `$ctx.a.b`) and is assembled in
+  layers, later layers winning:
+  1. `credentials.context_json` — raw JSON string, any shape (nested objects,
+     booleans, numbers); the ctx base. Referenceable like other secrets.
+  2. `credentials.context` — static `attr → string` map; dot-delimited attrs
+     nest (`org.unit → ctx.org.unit`).
+  3. `credentials.context_headers` — `attr → request header`, resolved per
+     request. **Client-supplied** — treat as untrusted unless an upstream
+     gateway strips/sets the header.
+  4. `credentials.context_kong` — `attr → gateway-derived fact`
+     (`consumer_id`/`consumer_username`/`consumer_custom_id`/`route_name`/
+     `service_name`/`client_ip`), resolved via the PDK. **Trusted and merged
+     last**, so a client header can never override these attributes.
+
+  Skyflow embeds the merged object in the bearer, so vault policies can
+  condition access per caller: `ALLOW READ ON ... WHERE table.owner =
+  $ctx.caller.user`. Distinct resolved contexts mint distinct cached bearers,
+  and the full context is audit-logged by Skyflow (the audit event's Context
+  ID). To make enforcement mandatory, set `enforceContextID: true` on the
+  service account — token exchange then fails unless `ctx` is present.
 
 ## Governance & RBAC (delegated to Skyflow)
 
