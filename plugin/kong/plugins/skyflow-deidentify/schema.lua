@@ -29,10 +29,19 @@ local PROTOCOLS     = { "http", "https", "grpc", "grpcs", "ws", "wss" }
 --     mints RS256 JWT-bearer tokens from it (cached per SA/scope/ctx).
 --   * role_ids: scoped tokens -- restrict the bearer to a subset of the SA's
 --     roles ("role:<id>" scope on the token exchange).
---   * context: static attributes for the assertion's `ctx` claim.
---   * context_headers: ctx attribute -> request header name; resolved per
---     request (e.g. user -> X-Consumer-Username), so vault policies can
---     condition on the caller via $ctx.<attr> (context-aware authorization).
+--   * ctx claim (context-aware authorization): Skyflow accepts arbitrary JSON
+--     (vault policies traverse it as $ctx.a.b). Assembled in layers, later
+--     layers winning:
+--       context_json    -- raw JSON string, any shape; the ctx base
+--       context         -- static attr(.path) -> string; dot-paths nest
+--       context_headers -- attr(.path) -> request header (client-supplied)
+--       context_kong    -- attr(.path) -> gateway-derived fact (trusted,
+--                          merged last so clients can never override it)
+local KONG_CTX_SOURCES = {
+  "consumer_id", "consumer_username", "consumer_custom_id",
+  "route_name", "service_name", "client_ip",
+}
+
 local credentials = {
   type = "record",
   required = true,
@@ -41,24 +50,38 @@ local credentials = {
     { token   = { type = "string", referenceable = true, encrypted = true } },
     { service_account_json = { type = "string", referenceable = true, encrypted = true } },
     { role_ids = { type = "array", elements = { type = "string" } } },
+    { context_json = { type = "string", referenceable = true, encrypted = true } },
     { context  = { type = "map", keys = { type = "string" }, values = { type = "string" } } },
     { context_headers = { type = "map", keys = { type = "string" }, values = { type = "string" } } },
+    { context_kong = { type = "map", keys = { type = "string" },
+                       values = { type = "string", one_of = KONG_CTX_SOURCES } } },
   },
   entity_checks = {
     { only_one_of = { "api_key", "token", "service_account_json" } },
-    -- role_ids/context/context_headers shape the minted bearer; with a static
-    -- api_key/token they would be silently ignored -- reject that config.
+    -- role_ids/context* shape the minted bearer; with a static api_key/token
+    -- they would be silently ignored -- reject that config.
     { custom_entity_check = {
-        field_sources = { "service_account_json", "role_ids", "context", "context_headers" },
+        field_sources = { "service_account_json", "role_ids", "context_json",
+                          "context", "context_headers", "context_kong" },
         fn = function(entity)
           local has_sa = type(entity.service_account_json) == "string"
                          and entity.service_account_json ~= ""
+          local function nonempty(t) return type(t) == "table" and next(t) ~= nil end
           local uses_sa_opts =
             (type(entity.role_ids) == "table" and #entity.role_ids > 0)
-            or (type(entity.context) == "table" and next(entity.context) ~= nil)
-            or (type(entity.context_headers) == "table" and next(entity.context_headers) ~= nil)
+            or (type(entity.context_json) == "string" and entity.context_json ~= "")
+            or nonempty(entity.context)
+            or nonempty(entity.context_headers)
+            or nonempty(entity.context_kong)
           if uses_sa_opts and not has_sa then
-            return nil, "role_ids/context/context_headers require credentials.service_account_json"
+            return nil, "role_ids/context_json/context/context_headers/context_kong "
+                        .. "require credentials.service_account_json"
+          end
+          -- Cheap shape check; full JSON validation happens at runtime (and
+          -- fails closed). Skip when the value is a {vault://...} reference.
+          if type(entity.context_json) == "string" and entity.context_json ~= ""
+             and not entity.context_json:match("^%s*{") then
+            return nil, "context_json must be a JSON object (or a secret reference)"
           end
           return true
         end,
