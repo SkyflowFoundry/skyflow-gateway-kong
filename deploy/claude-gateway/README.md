@@ -20,7 +20,8 @@ Claude Code ──► Kong :8000/claude ── de-identify ──► ai-proxy �
 - A Skyflow vault with Detect, and a **service account** whose role has the
   de-identify **and** re-identify permissions (its credentials JSON, plus the
   vault ID, cluster ID, and account ID)
-- An OpenAI API key
+- Each caller needs their own OpenAI API key (bring-your-own-key — the
+  gateway stores and injects no LLM credential)
 
 ## 1. Configure
 
@@ -31,7 +32,6 @@ export SKYFLOW_VAULT_ID=...
 export SKYFLOW_CLUSTER_ID=...          # https://<cluster_id>.vault.skyflowapis.com
 export SKYFLOW_ACCOUNT_ID=...
 export SKYFLOW_SA_JSON='{"clientID":"...","keyID":"...","tokenURI":"...","privateKey":"..."}'
-export OPENAI_API_KEY=sk-...
 
 ./setup.sh                              # writes kong.yaml (gitignored)
 ```
@@ -39,14 +39,14 @@ export OPENAI_API_KEY=sk-...
 ## 2. Start the gateway
 
 ```bash
-OPENAI_AUTH_HEADER="Bearer $OPENAI_API_KEY" docker compose up -d
+docker compose up -d
 ```
 
 ## 3. Run Claude Code through it
 
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:8000/claude \
-ANTHROPIC_API_KEY=dummy-kong-injects-the-real-one \
+ANTHROPIC_AUTH_TOKEN=$OPENAI_API_KEY \
 ANTHROPIC_MODEL=gpt-4o-mini \
 ANTHROPIC_SMALL_FAST_MODEL=gpt-4o-mini \
 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 \
@@ -59,8 +59,9 @@ Notes:
   on the machine keep talking to Anthropic directly.
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192` is required: Claude Code asks for 32k
   completion tokens; gpt-4o-mini caps at 16384.
-- The dummy API key is intentional — `ai-proxy` injects the real OpenAI key
-  at the gateway, so no LLM credential lives on the client.
+- `ANTHROPIC_AUTH_TOKEN` carries **your own OpenAI key** through the gateway
+  to the provider (`Authorization: Bearer`). The gateway stores no LLM
+  credential; a request without a key is rejected by the provider.
 
 Chat normally and mention some PII ("draft a note to Jane Doe at
 `jane@acme.com`").

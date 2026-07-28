@@ -1,8 +1,9 @@
 # Declarative config template for the Claude Code -> Kong -> Skyflow -> OpenAI
 # gateway. `setup.sh` substitutes the __PLACEHOLDER__ values from your
 # environment into kong.yaml (gitignored). Secrets never land in this file:
-# the service-account JSON and OpenAI key resolve at runtime through Kong's
-# env vault ({vault://env/...}) from variables docker-compose passes in.
+# the service-account JSON resolves at runtime through Kong's env vault
+# ({vault://env/...}); the OpenAI key is supplied by each caller per request
+# (bring-your-own-key), never stored in the gateway.
 _format_version: "3.0"
 
 services:
@@ -64,9 +65,10 @@ services:
           llm_format: anthropic
           route_type: llm/v1/chat
           logging: { log_statistics: true, log_payloads: false }
-          auth:
-            header_name: Authorization
-            header_value: "{vault://env/OPENAI_AUTH_HEADER}"
+          # Bring-your-own-key: no auth block, so the gateway injects NOTHING.
+          # Each caller supplies their own OpenAI key via the Authorization
+          # header (Claude Code: ANTHROPIC_AUTH_TOKEN=<their key>). No key ->
+          # the provider rejects the request, which doubles as access control.
           model:
             provider: openai
             name: __OPENAI_MODEL__
