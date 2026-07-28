@@ -14,9 +14,11 @@
 --                via Kong-bundled resty.openssl): mints and caches Skyflow
 --                bearers per (SA, scope, ctx); supports scoped tokens
 --                (credentials.role_ids) and context-aware authorization via a
---                `ctx` claim built from credentials.context (static) plus
---                credentials.context_headers (per-request), so vault policies
---                can condition access on $ctx.<attr>.
+--                `ctx` claim assembled in layers -- context_json (arbitrary
+--                nested JSON base), context (static attrs), context_headers
+--                (per-request, client-supplied), context_kong (gateway-derived
+--                facts, trusted, merged last) -- so vault policies can
+--                condition access on $ctx.<attr> of any shape.
 -- Documented follow-ups (degrade safely until added):
 --   * reidentify strategy `detokenize` (vault /detokenize API)
 --   * per-span concurrency, streaming `reassemble`
@@ -229,33 +231,76 @@ local function jwt_exp(token)
   return tonumber(raw:match('"exp"%s*:%s*(%d+)')) or 0
 end
 
--- Merge static context attributes (credentials.context) with per-request
--- values pulled from headers (credentials.context_headers: attr -> header
--- name). Returns (ctx_table|nil, canonical_key) -- the canonical form (sorted
--- attr=value pairs) keys the token cache so a different caller context always
--- mints a distinct bearer. The ctx table becomes the assertion's `ctx` claim,
--- which Skyflow embeds in the bearer for $ctx.<attr> policy conditions.
-local function build_ctx(static_map, header_map, get_header)
-  local ctx, n = {}, 0
-  if type(static_map) == "table" then
-    for k, v in pairs(static_map) do ctx[k] = v; n = n + 1 end
+-- Deep-copy a JSON-derived table (no cycles by construction).
+local function deep_copy(v)
+  if type(v) ~= "table" then return v end
+  local out = {}
+  for k, x in pairs(v) do out[k] = deep_copy(x) end
+  return out
+end
+
+-- Set a dot-delimited path into a nested table: ctx_set(t, "org.unit", "x")
+-- -> t.org.unit = "x". Intermediate non-tables are replaced.
+local function ctx_set(tbl, path, value)
+  local parts = {}
+  for p in tostring(path):gmatch("[^%.]+") do parts[#parts + 1] = p end
+  if #parts == 0 then return end
+  local cur = tbl
+  for i = 1, #parts - 1 do
+    if type(cur[parts[i]]) ~= "table" then cur[parts[i]] = {} end
+    cur = cur[parts[i]]
   end
-  if type(header_map) == "table" and get_header then
-    for attr, header in pairs(header_map) do
-      local v = get_header(header)
-      if v and v ~= "" then
-        if ctx[attr] == nil then n = n + 1 end
-        ctx[attr] = v
+  cur[parts[#parts]] = value
+end
+
+-- Deterministic serialization of an arbitrary JSON-shaped value: sorted keys,
+-- type-tagged scalars (so "1" and 1 stay distinct). NOT valid JSON -- it only
+-- keys the token cache, where any shape change must mint a fresh bearer.
+local function canonical_ctx_key(v, out)
+  out = out or {}
+  local t = type(v)
+  if t == "table" then
+    if #v > 0 then
+      out[#out + 1] = "["
+      for i = 1, #v do canonical_ctx_key(v[i], out); out[#out + 1] = "," end
+      out[#out + 1] = "]"
+    else
+      local keys = {}
+      for k in pairs(v) do keys[#keys + 1] = tostring(k) end
+      table.sort(keys)
+      out[#out + 1] = "{"
+      for _, k in ipairs(keys) do
+        out[#out + 1] = k .. "="
+        canonical_ctx_key(v[k], out)
+        out[#out + 1] = ","
+      end
+      out[#out + 1] = "}"
+    end
+  else
+    out[#out + 1] = t:sub(1, 1) .. ":" .. tostring(v)
+  end
+  return out
+end
+
+-- Assemble the assertion's `ctx` claim. Skyflow accepts arbitrary JSON here
+-- (policies traverse it as $ctx.a.b), so the claim is built in layers:
+--   base   -- decoded credentials.context_json (any shape), deep-copied
+--   layers -- flat attr(.path) -> value maps applied in order; LATER LAYERS
+--             WIN, so callers must pass trusted (gateway-derived) maps after
+--             client-supplied ones. Dot-delimited attrs nest.
+-- Returns (ctx|nil, canonical_key); the key changes whenever the resolved
+-- context does, so every distinct context mints a distinct bearer.
+local function build_ctx(base, layers)
+  local ctx = (type(base) == "table") and deep_copy(base) or {}
+  for _, layer in ipairs(layers or {}) do
+    if type(layer) == "table" then
+      for attr, v in pairs(layer) do
+        if v ~= nil and v ~= "" then ctx_set(ctx, attr, v) end
       end
     end
   end
-  if n == 0 then return nil, "" end
-  local keys = {}
-  for k in pairs(ctx) do keys[#keys + 1] = k end
-  table.sort(keys)
-  local parts = {}
-  for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. tostring(ctx[k]) end
-  return ctx, table.concat(parts, "&")
+  if next(ctx) == nil then return nil, "" end
+  return ctx, table.concat(canonical_ctx_key(ctx))
 end
 
 -- Scoped-token role restriction: goes in the token-exchange BODY as `scope`
@@ -293,9 +338,65 @@ end
 -- change, so config updates and per-caller contexts mint naturally. Bounded by
 -- wholesale reset -- simple, and a re-mint is cheap relative to eviction logic.
 local PKEY_CACHE = {}                    -- privateKey PEM -> parsed pkey
+local CTX_JSON_CACHE = {}                -- context_json string -> {ok=} | {err=}
 local TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 -- cache_key -> { token, exp }
 local TOKEN_CACHE_MAX = 256
 local JWT_HEADER_B64                     -- b64url of the fixed RS256 header
+
+-- Parse credentials.context_json (arbitrary-shape ctx base), cached per
+-- distinct config string. A non-object is a config error, surfaced as an auth
+-- failure (fail closed) rather than silently minting context-less bearers.
+local function ctx_base(context_json)
+  if not context_json or context_json == "" then return nil end
+  local hit = CTX_JSON_CACHE[context_json]
+  if not hit then
+    local decoded = cjson.decode(context_json)
+    if type(decoded) == "table" then
+      hit = { ok = decoded }
+    else
+      hit = { err = "credentials.context_json is not a JSON object" }
+    end
+    CTX_JSON_CACHE[context_json] = hit
+  end
+  return hit.ok, hit.err
+end
+
+-- Trusted, gateway-derived ctx sources (credentials.context_kong values).
+-- These resolve via the PDK -- a client cannot spoof them -- so they are
+-- merged LAST and win over header-supplied attributes.
+local KONG_CTX_SOURCES = {
+  consumer_id        = function() local c = kong.client.get_consumer(); return c and c.id end,
+  consumer_username  = function() local c = kong.client.get_consumer(); return c and c.username end,
+  consumer_custom_id = function() local c = kong.client.get_consumer(); return c and c.custom_id end,
+  route_name         = function() local r = kong.router.get_route(); return r and r.name end,
+  service_name       = function() local s = kong.router.get_service(); return s and s.name end,
+  client_ip          = function() return kong.client.get_forwarded_ip() end,
+}
+
+-- Resolve an attr(.path) -> source-name map through KONG_CTX_SOURCES.
+local function resolve_kong_ctx(kong_map)
+  if type(kong_map) ~= "table" then return nil end
+  local out = {}
+  for attr, source in pairs(kong_map) do
+    local fn = KONG_CTX_SOURCES[source]
+    local ok, v = pcall(fn or function() end)
+    if ok and v ~= nil and v ~= "" then out[attr] = v end
+  end
+  return out
+end
+
+-- Resolve an attr(.path) -> header-name map against the client request.
+local function resolve_header_ctx(header_map)
+  if type(header_map) ~= "table" then return nil end
+  local get_header = kong and kong.request and kong.request.get_header
+  if not get_header then return nil end
+  local out = {}
+  for attr, header in pairs(header_map) do
+    local v = get_header(header)
+    if v ~= nil and v ~= "" then out[attr] = v end
+  end
+  return out
+end
 
 local function sign_assertion(sa, claims)
   if not (ok_pkey and ok_digest) then
@@ -328,8 +429,15 @@ local function sa_bearer(conf, deadline)
     return nil, "service_account_json must be JSON with clientID, keyID, tokenURI, privateKey"
   end
 
-  local get_header = kong and kong.request and kong.request.get_header
-  local ctx, ctx_key = build_ctx(c.context, c.context_headers, get_header)
+  local base, berr = ctx_base(c.context_json)
+  if berr then return nil, berr end
+  -- Layer order matters: static config, then client headers, then trusted
+  -- gateway-derived facts last so a header can never override them.
+  local ctx, ctx_key = build_ctx(base, {
+    c.context,
+    resolve_header_ctx(c.context_headers),
+    resolve_kong_ctx(c.context_kong),
+  })
   local scope = scope_from_roles(c.role_ids)
   local cache_key = table.concat({ sa.clientID, sa.keyID, scope or "", ctx_key }, "\n")
 
@@ -979,6 +1087,9 @@ SkyflowDeidentify._test = {
   b64url_decode     = b64url_decode,
   jwt_exp           = jwt_exp,
   build_ctx         = build_ctx,
+  ctx_set           = ctx_set,
+  deep_copy         = deep_copy,
+  canonical_ctx_key = canonical_ctx_key,
   scope_from_roles  = scope_from_roles,
 }
 

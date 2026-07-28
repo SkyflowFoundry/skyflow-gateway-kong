@@ -58,10 +58,35 @@ describe(PLUGIN_NAME .. ": schema", function()
       c.credentials = {
         service_account_json = '{"clientID":"x"}',
         role_ids = { "role-a", "role-b" },
-        context  = { tenant = "acme" },
-        context_headers = { user = "X-Consumer-Username" },
+        context_json = '{"org":{"id":"org_1"},"pci":true}',
+        context  = { tenant = "acme", ["org.unit"] = "payments" },
+        context_headers = { ["caller.user"] = "X-Consumer-Username" },
+        context_kong = { ["caller.route"] = "route_name", ip = "client_ip" },
       }
       assert.is_truthy(validate(c))
+    end)
+
+    it("rejects a non-object context_json", function()
+      local c = base()
+      c.credentials = { service_account_json = '{"clientID":"x"}', context_json = "[1,2]" }
+      assert.is_falsy(validate(c))
+    end)
+
+    it("rejects unknown context_kong sources", function()
+      local c = base()
+      c.credentials = { service_account_json = '{"clientID":"x"}',
+                        context_kong = { user = "not_a_source" } }
+      assert.is_falsy(validate(c))
+    end)
+
+    it("rejects context_json/context_kong without service_account_json", function()
+      local c = base()
+      c.credentials = { api_key = "k", context_json = '{"a":1}' }
+      assert.is_falsy(validate(c))
+
+      c = base()
+      c.credentials = { api_key = "k", context_kong = { r = "route_name" } }
+      assert.is_falsy(validate(c))
     end)
 
     it("rejects role_ids without service_account_json", function()
