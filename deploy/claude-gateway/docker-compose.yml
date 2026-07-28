@@ -1,0 +1,33 @@
+name: skyflow-claude-gateway
+services:
+  kong:
+    image: ${KONG_GATEWAY_IMAGE:-kong/kong-gateway:3.14}
+    container_name: skyflow-claude-gateway
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /conf/kong.yaml
+      KONG_PLUGINS: bundled,skyflow-deidentify
+      KONG_LUA_PACKAGE_PATH: /kong-plugins/?.lua;;
+      KONG_PROXY_LISTEN: 0.0.0.0:8000
+      KONG_LOG_LEVEL: info
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_LUA_SSL_TRUSTED_CERTIFICATE: system
+      KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE: 16m
+      KONG_NGINX_HTTP_CLIENT_MAX_BODY_SIZE: 16m
+      # Secrets resolve inside the container via Kong's env vault
+      # ({vault://env/...} references in kong.yaml). Set these in your shell
+      # (or a .env file next to this compose file) before `up`.
+      SKYFLOW_SA_JSON: ${SKYFLOW_SA_JSON}
+      OPENAI_AUTH_HEADER: ${OPENAI_AUTH_HEADER}
+    ports:
+      - "${PROXY_PORT:-8000}:8000"
+    volumes:
+      - ../../plugin:/kong-plugins:ro
+      - ./kong.yaml:/conf/kong.yaml:ro
+    depends_on:
+      - echo
+  echo:
+    image: mendhak/http-https-echo:31
+    container_name: skyflow-claude-gateway-echo
+    environment:
+      HTTP_PORT: 8080
