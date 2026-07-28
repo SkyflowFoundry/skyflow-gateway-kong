@@ -52,6 +52,33 @@ describe(PLUGIN_NAME .. ": schema", function()
       c.credentials = { service_account_json = '{"clientID":"x"}' }
       assert.is_truthy(validate(c))
     end)
+
+    it("accepts SA-JWT options alongside service_account_json", function()
+      local c = base()
+      c.credentials = {
+        service_account_json = '{"clientID":"x"}',
+        role_ids = { "role-a", "role-b" },
+        context  = { tenant = "acme" },
+        context_headers = { user = "X-Consumer-Username" },
+      }
+      assert.is_truthy(validate(c))
+    end)
+
+    it("rejects role_ids without service_account_json", function()
+      local c = base()
+      c.credentials = { api_key = "k", role_ids = { "role-a" } }
+      assert.is_falsy(validate(c))
+    end)
+
+    it("rejects context/context_headers without service_account_json", function()
+      local c = base()
+      c.credentials = { token = "t", context = { tenant = "acme" } }
+      assert.is_falsy(validate(c))
+
+      c = base()
+      c.credentials = { api_key = "k", context_headers = { user = "X-U" } }
+      assert.is_falsy(validate(c))
+    end)
   end)
 
   it("rejects mapping_only with one-way ENTITY_ONLY tokens", function()

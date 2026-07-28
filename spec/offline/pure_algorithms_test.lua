@@ -80,5 +80,48 @@ eq(c3.choices[1].delta.role, "assistant", "sse_chunk default role")
 eq(c3.choices[1].delta.content, "", "sse_chunk default empty content")
 eq(c3.choices[1].finish_reason, "stop", "sse_chunk default finish_reason")
 
+-- 9. base64url round-trip (RFC 4648 §5, unpadded) incl. binary + URL-unsafe bytes
+eq(T.b64url_encode("any carnal pleasure."), "YW55IGNhcm5hbCBwbGVhc3VyZS4", "b64url known vector")
+eq(T.b64url_encode("f"), "Zg", "b64url 1-byte (no padding)")
+eq(T.b64url_encode("fo"), "Zm8", "b64url 2-byte")
+eq(T.b64url_encode(string.char(0xfb, 0xff, 0xfe)), "-__-", "b64url uses -_ alphabet")
+for _, s in ipairs({ "", "a", "ab", "abc", "abcd", '{"alg":"RS256","typ":"JWT"}',
+                     string.char(0, 1, 2, 253, 254, 255) }) do
+  eq(T.b64url_decode(T.b64url_encode(s)), s, "b64url round-trip len=" .. #s)
+end
+eq(T.b64url_decode("Zm8="), "fo", "b64url_decode tolerates padding")
+eq(T.b64url_decode("+/"), string.char(0xfb), "b64url_decode accepts standard alphabet")
+eq(T.b64url_decode("a"), nil, "b64url_decode rejects impossible length")
+eq(T.b64url_decode("a!bc"), nil, "b64url_decode rejects bad chars")
+
+-- 10. jwt_exp: reads exp straight out of a JWT payload; 0 on garbage
+local payload = T.b64url_encode('{"iss":"x","exp":1785300000,"sub":"x"}')
+eq(T.jwt_exp("eyJhbGciOiJSUzI1NiJ9." .. payload .. ".sig"), 1785300000, "jwt_exp extracts exp")
+eq(T.jwt_exp("mock-access-token"), 0, "jwt_exp 0 for non-JWT")
+eq(T.jwt_exp(nil), 0, "jwt_exp 0 for nil")
+eq(T.jwt_exp("a.!!!.c"), 0, "jwt_exp 0 for undecodable payload")
+
+-- 11. build_ctx: static + header merge, header wins, canonical cache key sorted
+local hdrs = { ["X-Consumer-Username"] = "alice", ["X-Team"] = "sales" }
+local get = function(name) return hdrs[name] end
+local ctx, key = T.build_ctx({ tenant = "acme", user = "static-user" },
+                             { user = "X-Consumer-Username", team = "X-Team", missing = "X-Nope" }, get)
+eq(ctx.tenant, "acme", "build_ctx keeps static attr")
+eq(ctx.user, "alice", "build_ctx header overrides static")
+eq(ctx.team, "sales", "build_ctx adds header attr")
+eq(ctx.missing, nil, "build_ctx skips absent header")
+eq(key, "team=sales&tenant=acme&user=alice", "build_ctx canonical key sorted")
+local nctx, nkey = T.build_ctx(nil, nil, get)
+eq(nctx, nil, "build_ctx nil when no context configured")
+eq(nkey, "", "build_ctx empty key when no context")
+local sctx = T.build_ctx({ tenant = "acme" }, nil, nil)
+eq(sctx.tenant, "acme", "build_ctx static-only works without header getter")
+
+-- 12. scope_from_roles: token-exchange body scope string
+eq(T.scope_from_roles({ "r1", "r2" }), "role:r1 role:r2", "scope_from_roles two roles")
+eq(T.scope_from_roles({ "only" }), "role:only", "scope_from_roles one role")
+eq(T.scope_from_roles({}), nil, "scope_from_roles empty -> nil")
+eq(T.scope_from_roles(nil), nil, "scope_from_roles nil -> nil")
+
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)
