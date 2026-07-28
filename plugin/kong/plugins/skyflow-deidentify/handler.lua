@@ -113,7 +113,11 @@ local PROFILE_PATHS = {
     response = { "$.choices[*].message.content", "$.choices[*].text" },
   },
   anthropic = {
-    request  = { "$.system", "$.messages[*].content[*].text", "$.messages[*].content" },
+    -- The two trailing paths cover tool_result blocks (string form and
+    -- text-block form) -- agent traffic surfaces most sensitive data THERE
+    -- (file contents, command output), not in the user's typed message.
+    request  = { "$.system", "$.messages[*].content[*].text", "$.messages[*].content",
+                 "$.messages[*].content[*].content", "$.messages[*].content[*].content[*].text" },
     response = { "$.content[*].text" },
   },
   mcp = {

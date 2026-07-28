@@ -52,6 +52,24 @@ eq(doc.messages[1].content, "X", "replace string content")
 eq(doc.messages[2].content[1].text, "X", "replace array-form text")
 eq(doc.prompt, "X", "replace prompt")
 
+-- 2b. anthropic profile covers tool_result blocks (string + text-block forms)
+local adoc = { messages = {
+  { role = "user", content = "check the patient file" },
+  { role = "assistant", content = { { type = "tool_use", id = "t1", name = "read", input = {} } } },
+  { role = "user", content = { {
+      type = "tool_result", tool_use_id = "t1",
+      content = { { type = "text", text = "name: David Okafor" } },
+  } } },
+  { role = "user", content = { { type = "tool_result", tool_use_id = "t2", content = "plain string result" } } },
+} }
+local aconf = { profile = "anthropic", request_json_paths = {}, response_json_paths = {} }
+local aspans = T.collect_spans(adoc, T.effective_paths(aconf, "request"))
+local found = {}
+for _, s in ipairs(aspans) do found[s.text] = true end
+eq(found["name: David Okafor"], true, "anthropic profile reaches tool_result text blocks")
+eq(found["plain string result"], true, "anthropic profile reaches string tool_results")
+eq(found["check the patient file"], true, "anthropic profile still covers plain content")
+
 -- 3. mask
 eq(T.mask("4111111111111111"), "************1111", "mask keeps last 4")
 eq(T.mask("abc"), "***", "mask short")
