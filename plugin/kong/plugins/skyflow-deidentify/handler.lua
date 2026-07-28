@@ -980,12 +980,19 @@ function SkyflowDeidentify:response(conf)
       if doc == nil then
         call_err = "response body not decodable JSON"; return
       end
-      -- Restore tokens the model echoed back inside tool_call arguments (e.g. a
-      -- username tokenized as a NAME inside a file path). The agent acts on these
-      -- values, so they must be real, not tokens -- and collect_spans only covers
-      -- message content, not tool_calls.
+      -- Tool inputs (OpenAI tool_calls / Anthropic tool_use): treatment is a
+      -- policy choice (reidentify.tool_inputs).
+      --   tokenized  (default) -- leave the model's tokens in place. The
+      --     gateway is the trust boundary: tools fan data out to arbitrary
+      --     external services (web search, APIs, files), so real values must
+      --     only materialize at the gateway on authorized egress, never
+      --     inside agent-land. A tool acting on a token simply no-ops.
+      --   plain_text -- restore real values before the agent executes the
+      --     tool (trust-the-client deployments; collect_spans only covers
+      --     message content, so this needs its own pass).
+      local restore_tools = conf.reidentify.tool_inputs == "plain_text"
       local tool_changed = false
-      if doc.choices then
+      if restore_tools and doc.choices then
         for _, ch in ipairs(doc.choices) do
           local tcs = ch.message and ch.message.tool_calls
           if type(tcs) == "table" then
@@ -1002,10 +1009,8 @@ function SkyflowDeidentify:response(conf)
         end
       end
 
-      -- Anthropic-native messages: restore tokens inside tool_use inputs (the
-      -- mirror of the OpenAI tool_calls handling above -- an agent acts on
-      -- these values, so they must be real, not tokens).
-      if is_anthropic_message(doc) then
+      -- Anthropic-native messages: same policy, tool_use.input form.
+      if restore_tools and is_anthropic_message(doc) then
         for _, block in ipairs(doc.content) do
           if block.type == "tool_use" and block.input ~= nil then
             local enc = cjson.encode(block.input)

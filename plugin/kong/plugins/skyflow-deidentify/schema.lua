@@ -116,6 +116,12 @@ local reidentify = {
   fields = {
     { enabled  = { type = "boolean", default = false } },
     { strategy = { type = "string", one_of = STRATEGIES, default = "mapping_only" } },
+    -- Tool inputs (tool_calls/tool_use) the model sends back to the agent:
+    -- 'tokenized' (default) leaves tokens in place -- the gateway is the trust
+    -- boundary and tools egress to arbitrary services; 'plain_text' restores
+    -- real values first (trust-the-client deployments).
+    { tool_inputs = { type = "string", one_of = { "tokenized", "plain_text" },
+                      default = "tokenized" } },
     { entity_treatment = { type = "map", keys = { type = "string" },
                            values = { type = "string", one_of = TREATMENTS }, default = {} } },
     { default_treatment = { type = "string", one_of = TREATMENTS, default = "plain_text" } },
