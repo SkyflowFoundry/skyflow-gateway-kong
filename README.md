@@ -48,10 +48,15 @@ the model provider only ever sees tokens.
   date-shifting), and multiple token formats.
 - **Caller-conditional access (context-aware auth)** — with service-account JWT
   auth the gateway mints short-lived Skyflow bearers in-process and stamps them
-  with a `ctx` claim built from config and/or request headers (e.g.
-  `user ← X-Consumer-Username`), so vault policies can grant or mask
-  re-identification per caller (`$ctx.<attr>`); `role_ids` further scope the
-  bearer to a subset of the service account's roles.
+  with a `ctx` claim of arbitrary JSON shape, layered from config
+  (`context_json`/`context`), request headers, and trusted gateway-derived
+  facts (`context_kong`), so vault policies can grant or mask re-identification
+  per caller (`$ctx.<attr>`); `role_ids` further scope the bearer.
+- **Agent tool containment** — real agent traffic (Claude Code verified live)
+  works end-to-end: Anthropic-native streaming, tool calls, tool results. Tool
+  inputs stay **tokenized by default** (`reidentify.tool_inputs`), so files an
+  agent writes and searches it runs carry vault tokens, never raw PII — real
+  values only materialize at the gateway on authorized paths.
 - **Fail-closed by default** — if Skyflow is unreachable or a response can't be
   re-identified, the configured posture (`deny`) blocks rather than leaks. Also
   supports `dry_run` (log detections, don't alter traffic) and body/span limits.
@@ -151,7 +156,28 @@ The harness also includes a `/broken/chat` route that reproduces the #14380 500,
 so you can see the failure the nested pattern fixes. Details:
 [`deploy/local-dbless/README.md`](deploy/local-dbless/README.md).
 
-### Option 2 — Konnect hybrid: real vault + real LLM
+### Option 2 — Claude Code through the gateway: real agent + real vault
+
+Run the **actual Claude Code CLI** through Kong, with every LLM-bound byte
+de-identified against a live Skyflow vault (the model provider sees only
+tokens) and responses re-identified on the way back. One machine, no Konnect
+account needed.
+
+```bash
+cd deploy/claude-gateway
+export SKYFLOW_VAULT_ID=... SKYFLOW_CLUSTER_ID=... SKYFLOW_ACCOUNT_ID=...
+export SKYFLOW_SA_JSON='{"clientID":...}'   # service-account credentials JSON
+export OPENAI_API_KEY=sk-...
+./setup.sh && OPENAI_AUTH_HEADER="Bearer $OPENAI_API_KEY" docker compose up -d
+
+ANTHROPIC_BASE_URL=http://localhost:8000/claude ANTHROPIC_API_KEY=dummy \
+ANTHROPIC_MODEL=gpt-4o-mini CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 claude
+```
+
+Full walkthrough (verification probes, audit log, per-caller context):
+[`deploy/claude-gateway/README.md`](deploy/claude-gateway/README.md).
+
+### Option 3 — Konnect hybrid: real vault + real LLM
 
 Run a Kong **data plane on your machine**, managed from **Konnect**, calling a
 **real Skyflow vault** and a **real LLM through `ai-proxy`**. This is the
@@ -203,7 +229,8 @@ plugin/kong/plugins/skyflow-deidentify/
 
 deploy/
 ├── local-dbless/       # Option 1: offline harness (Kong + mock Skyflow + mock LLM)
-└── konnect-hybrid/     # Option 2: self-managed DP on Konnect + deck configs
+├── claude-gateway/     # Option 2: Claude Code -> Kong -> Skyflow -> OpenAI (real vault)
+└── konnect-hybrid/     # Option 3: self-managed DP on Konnect + deck configs
     └── deck/           # real-vault.yaml, ai-gateway.yaml, kong.yaml, VERIFY-DETECT.md
 
 demo/                   # on-camera steps for recording the walkthrough (see demo/README.md)

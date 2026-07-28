@@ -96,6 +96,14 @@ and audited:
 - **Gateway-side guardrail** — `entity_treatment` (`plain_text`/`masked`/
   `redacted`) can down-grade even an authorized re-identify per entity class,
   Route, or Consumer.
+- **Tool-input containment** — `reidentify.tool_inputs` controls what agents'
+  tools receive in `tool_calls`/`tool_use` inputs. Default `tokenized`: the
+  gateway is the trust boundary, tools egress to arbitrary services (web
+  search, APIs, files), so tokens stay tokens inside agent-land and real
+  values only materialize at the gateway on authorized paths. `plain_text`
+  restores values before tool execution for trust-the-client deployments.
+  Chat text returned to the caller is unaffected (governed by
+  `strategy`/`entity_treatment` as before).
 
 > Per-caller policy context (scoped tokens carrying consumer/department `ctx` for
 > attribute-based re-identification decisions) is available via service-account

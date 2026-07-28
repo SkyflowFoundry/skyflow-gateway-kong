@@ -140,4 +140,14 @@ describe(PLUGIN_NAME .. ": schema", function()
     c.deidentify = { token_format = "NOT_A_FORMAT" }
     assert.is_falsy(validate(c))
   end)
+
+  it("accepts tool_inputs treatments and rejects unknown values", function()
+    local c = base()
+    c.reidentify = { enabled = true, tool_inputs = "plain_text" }
+    assert.is_truthy(validate(c))
+
+    c = base()
+    c.reidentify = { enabled = true, tool_inputs = "masked" }
+    assert.is_falsy(validate(c))
+  end)
 end)
