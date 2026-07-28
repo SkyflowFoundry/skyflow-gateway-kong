@@ -46,6 +46,12 @@ the model provider only ever sees tokens.
   detokenized later under Skyflow's fine-grained governance, not one-way
   placeholders. Backed by 300+ entity detectors, transformations (e.g.
   date-shifting), and multiple token formats.
+- **Caller-conditional access (context-aware auth)** — with service-account JWT
+  auth the gateway mints short-lived Skyflow bearers in-process and stamps them
+  with a `ctx` claim built from config and/or request headers (e.g.
+  `user ← X-Consumer-Username`), so vault policies can grant or mask
+  re-identification per caller (`$ctx.<attr>`); `role_ids` further scope the
+  bearer to a subset of the service account's roles.
 - **Fail-closed by default** — if Skyflow is unreachable or a response can't be
   re-identified, the configured posture (`deny`) blocks rather than leaks. Also
   supports `dry_run` (log detections, don't alter traffic) and body/span limits.
@@ -116,9 +122,10 @@ The only parties that ever see raw values are the client, Kong worker memory
 - **Docker** + Docker Compose — for every path below.
 - For the Konnect path, additionally: a **Konnect account**
   ([free sign-up](https://konghq.com/products/kong-konnect/register)),
-  the [`deck`](https://docs.konghq.com/deck/) CLI, a **Skyflow vault** + API key
-  with the Detect de-identify/re-identify permission, and (for a real LLM) an
-  **OpenAI API key**.
+  the [`deck`](https://docs.konghq.com/deck/) CLI, a **Skyflow vault** + a
+  credential with the Detect de-identify/re-identify permissions (an API key, or
+  service-account credentials JSON for JWT auth + context-aware policies), and
+  (for a real LLM) an **OpenAI API key**.
 
 ### Option 1 — 60-second local demo (no accounts, no keys)
 
@@ -190,8 +197,8 @@ data plane for you). See [`deployment`](docs/using/deployment.md).
 ```text
 plugin/kong/plugins/skyflow-deidentify/
 ├── schema.lua      # config contract — require-free (Konnect upload constraint)
-├── handler.lua     # self-contained: auth + Skyflow Detect client + JSONPath-lite
-│                   #   body targeting + de-identify + re-identify (both strategies)
+├── handler.lua     # self-contained: auth (API key / SA-JWT + ctx) + Skyflow Detect
+│                   #   client + JSONPath-lite body targeting + de-id + re-id
 └── *.rockspec      # self-managed / local installs only
 
 deploy/
@@ -211,12 +218,12 @@ docs/                    # design spec (see Documentation map below)
 ## Roadmap
 
 The core de-identify → LLM → re-identify flow — including vault-backed
-re-identify — is implemented and verified live (see [What it does](#what-it-does)).
-Planned next:
+re-identify and, as of v0.3.0, service-account JWT auth (RS256) with scoped
+tokens and context-aware `ctx` claims — is implemented and verified live (see
+[What it does](#what-it-does)). Planned next:
 
 | Planned | Notes |
 | --- | --- |
-| ~~Service-account JWT auth (RS256)~~ | **Implemented (v0.3.0)**: `credentials.service_account_json` mints cached bearers in-gateway; `role_ids` scope the token, `context`/`context_headers` set the `ctx` claim for context-aware vault policies (`$ctx.<attr>`) |
 | Streaming re-identification | Reassemble streamed responses; today `buffer` / `passthrough` |
 | File-attachment de-identification | De-identify uploaded files, not just JSON request bodies |
 
