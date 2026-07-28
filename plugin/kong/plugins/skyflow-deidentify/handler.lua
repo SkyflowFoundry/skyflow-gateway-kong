@@ -718,6 +718,59 @@ local function completion_to_sse(doc)
   return "data: " .. cjson.encode(sse_chunk(doc)) .. "\n\ndata: [DONE]\n\n"
 end
 
+-- True when the buffered upstream body is an Anthropic-native message (e.g.
+-- ai-proxy with `llm_format: anthropic`, or a direct Anthropic upstream).
+local function is_anthropic_message(doc)
+  return doc.type == "message" and type(doc.content) == "table"
+end
+
+-- Anthropic Messages counterpart of completion_to_sse: re-emit a buffered
+-- (re-identified) message as the event sequence Anthropic streaming clients
+-- (e.g. Claude Code) require -- message_start, one start/delta/stop triplet
+-- per content block (text and tool_use both supported, so agent tool loops
+-- keep working), message_delta with the stop_reason, message_stop.
+local function anthropic_message_to_sse(doc)
+  -- cjson niceties guarded for non-Kong runtimes (offline tests stub cjson):
+  -- array_mt makes the empty content encode as [], null keeps explicit nulls.
+  local empty_array = cjson.array_mt and setmetatable({}, cjson.array_mt) or {}
+  local null = cjson.null
+  local function ev(name, data)
+    return "event: " .. name .. "\ndata: " .. cjson.encode(data) .. "\n\n"
+  end
+  local out = { ev("message_start", { type = "message_start", message = {
+    id = doc.id, type = "message", role = doc.role or "assistant",
+    model = doc.model, content = empty_array,
+    stop_reason = null, stop_sequence = null,
+    usage = doc.usage or { input_tokens = 0, output_tokens = 0 },
+  } }) }
+  for i, block in ipairs(doc.content) do
+    local idx = i - 1
+    if block.type == "tool_use" then
+      out[#out + 1] = ev("content_block_start", { type = "content_block_start", index = idx,
+        content_block = { type = "tool_use", id = block.id, name = block.name, input = {} } })
+      out[#out + 1] = ev("content_block_delta", { type = "content_block_delta", index = idx,
+        delta = { type = "input_json_delta", partial_json = cjson.encode(block.input or {}) } })
+    else
+      out[#out + 1] = ev("content_block_start", { type = "content_block_start", index = idx,
+        content_block = { type = "text", text = "" } })
+      out[#out + 1] = ev("content_block_delta", { type = "content_block_delta", index = idx,
+        delta = { type = "text_delta", text = block.text or "" } })
+    end
+    out[#out + 1] = ev("content_block_stop", { type = "content_block_stop", index = idx })
+  end
+  out[#out + 1] = ev("message_delta", { type = "message_delta",
+    delta = { stop_reason = doc.stop_reason or "end_turn", stop_sequence = null },
+    usage = { output_tokens = (doc.usage and doc.usage.output_tokens) or 0 } })
+  out[#out + 1] = ev("message_stop", { type = "message_stop" })
+  return table.concat(out)
+end
+
+-- Shape-appropriate SSE re-emit for a buffered doc.
+local function doc_to_sse(doc)
+  if is_anthropic_message(doc) then return anthropic_message_to_sse(doc) end
+  return completion_to_sse(doc)
+end
+
 function SkyflowDeidentify:response(conf)
   if not conf.reidentify.enabled then return end
 
@@ -837,13 +890,30 @@ function SkyflowDeidentify:response(conf)
         end
       end
 
+      -- Anthropic-native messages: restore tokens inside tool_use inputs (the
+      -- mirror of the OpenAI tool_calls handling above -- an agent acts on
+      -- these values, so they must be real, not tokens).
+      if is_anthropic_message(doc) then
+        for _, block in ipairs(doc.content) do
+          if block.type == "tool_use" and block.input ~= nil then
+            local enc = cjson.encode(block.input)
+            if enc and enc ~= "" then
+              local restored, rerr = restore(enc)
+              if not restored then call_err = rerr; return end
+              block.input = cjson.decode(restored) or block.input
+              tool_changed = true
+            end
+          end
+        end
+      end
+
       local spans = collect_spans(doc, effective_paths(conf, "response"))
       if #spans == 0 and not tool_changed then
         -- Nothing to re-identify (e.g. an empty response). If the client is
         -- streaming we STILL must hand back SSE, not the raw JSON completion, or
         -- the client stalls waiting for event-stream frames.
         if not ctx.client_stream then return end
-        newbody = completion_to_sse(doc)
+        newbody = doc_to_sse(doc)
         streamed = true
       else
         for _, span in ipairs(spans) do
@@ -854,9 +924,11 @@ function SkyflowDeidentify:response(conf)
           end
         end
         newbody = cjson.encode(doc)
-        -- Client asked to stream; re-emit the re-identified completion as SSE.
+        -- Client asked to stream; re-emit the re-identified doc as SSE in the
+        -- format the client's protocol expects (OpenAI chunk or Anthropic
+        -- message events).
         if ctx.client_stream then
-          newbody = completion_to_sse(doc)
+          newbody = doc_to_sse(doc)
           streamed = true
         end
       end
@@ -901,6 +973,8 @@ SkyflowDeidentify._test = {
   plain_replace     = plain_replace,
   reidentify_string = reidentify_string,
   sse_chunk         = sse_chunk,
+  is_anthropic_message     = is_anthropic_message,
+  anthropic_message_to_sse = anthropic_message_to_sse,
   b64url_encode     = b64url_encode,
   b64url_decode     = b64url_decode,
   jwt_exp           = jwt_exp,
