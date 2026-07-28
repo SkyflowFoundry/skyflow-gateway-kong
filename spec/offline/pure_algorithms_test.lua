@@ -2,7 +2,26 @@
 package.loaded["resty.http"] = { new = function()
   return setmetatable({}, { __index = function() return function() end end })
 end }
-package.loaded["cjson.safe"] = { encode = function() return "" end, decode = function() return nil end }
+-- minimal deterministic JSON encoder (sorted keys) so SSE-emitter tests can
+-- assert on real output; decode stays a stub (nothing under test needs it)
+local function jenc(v)
+  local t = type(v)
+  if t == "string" then return '"' .. v:gsub('[\\"]', "\\%0"):gsub("\n", "\\n") .. '"' end
+  if t == "number" or t == "boolean" then return tostring(v) end
+  if t ~= "table" then return "null" end
+  if #v > 0 then
+    local parts = {}
+    for _, x in ipairs(v) do parts[#parts + 1] = jenc(x) end
+    return "[" .. table.concat(parts, ",") .. "]"
+  end
+  local keys = {}
+  for k in pairs(v) do keys[#keys + 1] = k end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  local parts = {}
+  for _, k in ipairs(keys) do parts[#parts + 1] = '"' .. tostring(k) .. '":' .. jenc(v[k]) end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+package.loaded["cjson.safe"] = { encode = jenc, decode = function() return nil end }
 _G.kong = { log = { err=function() end, warn=function() end, set_serialize_value=function() end },
   request = {}, response = {}, service = { request = {}, response = {} }, ctx = { plugin = {} } }
 _G.ngx = { now = function() return 0 end }
@@ -117,7 +136,31 @@ eq(nkey, "", "build_ctx empty key when no context")
 local sctx = T.build_ctx({ tenant = "acme" }, nil, nil)
 eq(sctx.tenant, "acme", "build_ctx static-only works without header getter")
 
--- 12. scope_from_roles: token-exchange body scope string
+-- 12. Anthropic-native SSE re-emit: full event sequence, text + tool_use blocks
+eq(T.is_anthropic_message({ type = "message", content = {} }), true, "is_anthropic_message true")
+eq(T.is_anthropic_message({ choices = {} }), false, "is_anthropic_message false for openai shape")
+local sse = T.anthropic_message_to_sse({
+  id = "msg_1", type = "message", role = "assistant", model = "m",
+  content = {
+    { type = "text", text = "Hi Jane" },
+    { type = "tool_use", id = "tu_1", name = "write", input = { path = "/tmp/x" } },
+  },
+  stop_reason = "tool_use", usage = { input_tokens = 5, output_tokens = 7 },
+})
+local n_events = select(2, sse:gsub("event: ", ""))
+eq(n_events, 9, "anthropic sse: 9 events (start + 2x3 blocks + delta + stop)")
+eq(sse:find("event: message_start\ndata: ", 1, true) ~= nil, true, "anthropic sse: message_start first")
+eq(sse:find('"type":"text_delta"', 1, true) ~= nil, true, "anthropic sse: text_delta present")
+eq(sse:find('"text":"Hi Jane"', 1, true) ~= nil, true, "anthropic sse: text carried")
+eq(sse:find('"type":"input_json_delta"', 1, true) ~= nil, true, "anthropic sse: tool_use as input_json_delta")
+eq(sse:find('\\"path\\":\\"/tmp/x\\"', 1, true) ~= nil, true, "anthropic sse: tool input serialized")
+eq(sse:find('"name":"write"', 1, true) ~= nil, true, "anthropic sse: tool name in block_start")
+eq(sse:find('"stop_reason":"tool_use"', 1, true) ~= nil, true, "anthropic sse: stop_reason in message_delta")
+eq(sse:find("event: message_stop", 1, true) ~= nil, true, "anthropic sse: message_stop last")
+eq(sse:find('"index":0', 1, true) ~= nil and sse:find('"index":1', 1, true) ~= nil, true,
+   "anthropic sse: 0-based block indexes")
+
+-- 13. scope_from_roles: token-exchange body scope string
 eq(T.scope_from_roles({ "r1", "r2" }), "role:r1 role:r2", "scope_from_roles two roles")
 eq(T.scope_from_roles({ "only" }), "role:only", "scope_from_roles one role")
 eq(T.scope_from_roles({}), nil, "scope_from_roles empty -> nil")
