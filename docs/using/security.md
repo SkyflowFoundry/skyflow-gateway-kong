@@ -45,14 +45,30 @@ threat model, data handling, secrets, governance, and compliance.
 
 - Credentials are schema-typed `encrypted` + `referenceable`, so they're never
   stored in plaintext and never returned by the Admin API.
-- Provide `credentials.api_key` as a secret reference — Kong **Secrets
-  Management** (`{vault://env/...}`, HashiCorp Vault, AWS/GCP SM) or a Konnect
-  control-plane secret.
+- Provide `credentials.api_key` / `credentials.service_account_json` as a secret
+  reference — Kong **Secrets Management** (`{vault://env/...}`, HashiCorp Vault,
+  AWS/GCP SM) or a Konnect control-plane secret.
 - Rotate the API key out-of-band and swap the referenced secret; no plugin change
   needed.
 
-> Service-account JWT auth (short-lived, role-scoped tokens signed in-gateway) is
-> a planned addition; today, use an API key with a least-privilege Skyflow role.
+### Service-account JWT auth (recommended)
+
+`credentials.service_account_json` holds the Skyflow service-account credentials
+JSON. The gateway signs an RS256 JWT assertion in-process (Kong-bundled
+`resty.openssl`; the private key never leaves the data plane) and exchanges it
+for a short-lived bearer (~60 min), cached per worker and re-minted
+`token_skew_seconds` before expiry. Two levers shape each bearer:
+
+- **Scoped tokens** — `credentials.role_ids` restricts the bearer to a subset of
+  the SA's roles (`scope: "role:<id> ..."` on the exchange).
+- **Context-aware authorization** — `credentials.context` (static attributes) and
+  `credentials.context_headers` (attribute ← request header, e.g.
+  `user ← X-Consumer-Username`) populate the assertion's `ctx` claim. Skyflow
+  embeds it in the bearer, so vault policies can condition access per caller:
+  `ALLOW READ ON ... WHERE table.owner = $ctx.user`. Distinct resolved contexts
+  mint distinct bearers, and the context is audit-logged by Skyflow. To make
+  enforcement mandatory, set `enforceContextID: true` on the service account —
+  token exchange then fails unless `ctx` is present.
 
 ## Governance & RBAC (delegated to Skyflow)
 
@@ -69,8 +85,8 @@ and audited:
   Route, or Consumer.
 
 > Per-caller policy context (scoped tokens carrying consumer/department `ctx` for
-> attribute-based re-identification decisions) arrives with service-account JWT
-> auth — see the planned-addition note above.
+> attribute-based re-identification decisions) is available via service-account
+> JWT auth — see [Service-account JWT auth](#service-account-jwt-auth-recommended).
 
 ## Compliance posture
 

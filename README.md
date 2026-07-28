@@ -26,7 +26,8 @@ the model provider only ever sees tokens.
 > OpenAI, with Kong `ai-proxy` in the path**. Packaged as the two self-contained
 > files Konnect requires ([`schema.lua`](plugin/kong/plugins/skyflow-deidentify/schema.lua)
 > and [`handler.lua`](plugin/kong/plugins/skyflow-deidentify/handler.lua)).
-> Service-account JWT auth, streaming re-identify, and file-attachment
+> Service-account JWT auth (RS256, scoped tokens, context-aware `ctx`) is
+> implemented and verified live. Streaming re-identify and file-attachment
 > de-identify are documented follow-ups. See the [roadmap](#roadmap).
 
 ---
@@ -215,7 +216,7 @@ Planned next:
 
 | Planned | Notes |
 | --- | --- |
-| Service-account JWT auth (RS256) | Today: API key / static bearer token |
+| ~~Service-account JWT auth (RS256)~~ | **Implemented (v0.3.0)**: `credentials.service_account_json` mints cached bearers in-gateway; `role_ids` scope the token, `context`/`context_headers` set the `ctx` claim for context-aware vault policies (`$ctx.<attr>`) |
 | Streaming re-identification | Reassemble streamed responses; today `buffer` / `passthrough` |
 | File-attachment de-identification | De-identify uploaded files, not just JSON request bodies |
 

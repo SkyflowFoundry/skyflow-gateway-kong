@@ -10,10 +10,15 @@
 --   * response-> re-identify via `mapping_only` (pure, request-scoped map) OR
 --                `reidentify_text` (resolves real VAULT_TOKENs through Skyflow
 --                /v1/detect/reidentify/string -- works regardless of our map)
---   * auth    -> API key / static bearer token
+--   * auth    -> API key / static bearer token / service-account JWT (RS256
+--                via Kong-bundled resty.openssl): mints and caches Skyflow
+--                bearers per (SA, scope, ctx); supports scoped tokens
+--                (credentials.role_ids) and context-aware authorization via a
+--                `ctx` claim built from credentials.context (static) plus
+--                credentials.context_headers (per-request), so vault policies
+--                can condition access on $ctx.<attr>.
 -- Documented follow-ups (degrade safely until added):
 --   * reidentify strategy `detokenize` (vault /detokenize API)
---   * service-account JWT auth (RS256 via resty.openssl)
 --   * per-span concurrency, streaming `reassemble`
 -- See docs/contributing/skyflow-integration.md and docs/contributing/development.md.
 
@@ -26,10 +31,16 @@ local cjson = require "cjson.safe"
 local ok_gzip, kgzip = pcall(require, "kong.tools.gzip")
 local inflate_gzip = ok_gzip and kgzip and kgzip.inflate_gzip or nil
 
+-- lua-resty-openssl ships with Kong Gateway (the core uses it). Load guarded so
+-- the plugin still loads on a build without it -- SA-JWT auth then errors
+-- cleanly at use time while api_key/token auth keeps working.
+local ok_pkey, openssl_pkey     = pcall(require, "resty.openssl.pkey")
+local ok_digest, openssl_digest = pcall(require, "resty.openssl.digest")
+
 local kong = kong
 local ngx  = ngx
 
-local SkyflowDeidentify = { PRIORITY = 775, VERSION = "0.2.0" }
+local SkyflowDeidentify = { PRIORITY = 775, VERSION = "0.3.0" }
 
 --==========================================================================--
 -- Pure helpers (no Kong/ngx deps) — exercised offline via SkyflowDeidentify._test
@@ -164,6 +175,98 @@ local function reidentify_string(s, by_token, treatment_fn)
   return s
 end
 
+-- Base64url (RFC 4648 §5, unpadded) in pure Lua: used for JWT assembly. Pure
+-- (no ngx dep) so the offline unit test can exercise it.
+local B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+local B64_REVERSE   -- lazily built decode table
+
+local function b64url_encode(s)
+  local out = {}
+  for i = 1, #s, 3 do
+    local a, b, c = s:byte(i), s:byte(i + 1), s:byte(i + 2)
+    local n = a * 65536 + (b or 0) * 256 + (c or 0)
+    local quad = {
+      math.floor(n / 262144) % 64, math.floor(n / 4096) % 64,
+      math.floor(n / 64) % 64,     n % 64,
+    }
+    for j = 1, (c and 4) or (b and 3) or 2 do
+      local d = quad[j]
+      out[#out + 1] = B64_ALPHABET:sub(d + 1, d + 1)
+    end
+  end
+  return table.concat(out)
+end
+
+local function b64url_decode(s)
+  if type(s) ~= "string" then return nil end
+  if not B64_REVERSE then
+    B64_REVERSE = { ["+"] = 62, ["/"] = 63 }   -- accept the standard alphabet too
+    for i = 1, 64 do B64_REVERSE[B64_ALPHABET:sub(i, i)] = i - 1 end
+  end
+  s = s:gsub("=+$", "")
+  if #s % 4 == 1 then return nil end
+  local out, n, bits = {}, 0, 0
+  for i = 1, #s do
+    local v = B64_REVERSE[s:sub(i, i)]
+    if not v then return nil end
+    n, bits = n * 64 + v, bits + 6
+    if bits >= 8 then
+      bits = bits - 8
+      out[#out + 1] = string.char(math.floor(n / 2 ^ bits) % 256)
+      n = n % 2 ^ bits
+    end
+  end
+  return table.concat(out)
+end
+
+-- Extract the `exp` claim (unix seconds) from a JWT without full JSON parsing;
+-- 0 when absent/unparseable. The token endpoint returns no expiresIn field, so
+-- the bearer's own exp drives cache refresh.
+local function jwt_exp(token)
+  local payload = type(token) == "string" and token:match("^[^%.]+%.([^%.]+)")
+  local raw = payload and b64url_decode(payload)
+  if not raw then return 0 end
+  return tonumber(raw:match('"exp"%s*:%s*(%d+)')) or 0
+end
+
+-- Merge static context attributes (credentials.context) with per-request
+-- values pulled from headers (credentials.context_headers: attr -> header
+-- name). Returns (ctx_table|nil, canonical_key) -- the canonical form (sorted
+-- attr=value pairs) keys the token cache so a different caller context always
+-- mints a distinct bearer. The ctx table becomes the assertion's `ctx` claim,
+-- which Skyflow embeds in the bearer for $ctx.<attr> policy conditions.
+local function build_ctx(static_map, header_map, get_header)
+  local ctx, n = {}, 0
+  if type(static_map) == "table" then
+    for k, v in pairs(static_map) do ctx[k] = v; n = n + 1 end
+  end
+  if type(header_map) == "table" and get_header then
+    for attr, header in pairs(header_map) do
+      local v = get_header(header)
+      if v and v ~= "" then
+        if ctx[attr] == nil then n = n + 1 end
+        ctx[attr] = v
+      end
+    end
+  end
+  if n == 0 then return nil, "" end
+  local keys = {}
+  for k in pairs(ctx) do keys[#keys + 1] = k end
+  table.sort(keys)
+  local parts = {}
+  for _, k in ipairs(keys) do parts[#parts + 1] = k .. "=" .. tostring(ctx[k]) end
+  return ctx, table.concat(parts, "&")
+end
+
+-- Scoped-token role restriction: goes in the token-exchange BODY as `scope`
+-- ("role:<id> role:<id>"), NOT in the signed assertion.
+local function scope_from_roles(role_ids)
+  if type(role_ids) ~= "table" or #role_ids == 0 then return nil end
+  local parts = {}
+  for _, r in ipairs(role_ids) do parts[#parts + 1] = "role:" .. r end
+  return table.concat(parts, " ")
+end
+
 --==========================================================================--
 -- Kong-coupled helpers
 --==========================================================================--
@@ -175,14 +278,130 @@ local function base_url(conf)
   return "https://" .. conf.cluster_id .. ".vault.skyflowapis.com"
 end
 
+--==========================================================================--
+-- Service-account JWT auth (RS256 via Kong-bundled resty.openssl)
+--
+-- Assertion claims per the Skyflow contract: { iss=clientID, key=keyID,
+-- aud=tokenURI, sub=clientID, exp=now+3600 } plus an optional `ctx` claim
+-- (string or JSON object). Exchange: POST tokenURI with
+-- { grant_type="urn:ietf:params:oauth:grant-type:jwt-bearer", assertion,
+--   scope? } -> { accessToken, tokenType }. Bearers live ~60 min; the response
+-- carries no expiry, so we decode the bearer's own exp claim.
+--==========================================================================--
+
+-- Per-worker caches. Keys change whenever the SA / roles / resolved ctx
+-- change, so config updates and per-caller contexts mint naturally. Bounded by
+-- wholesale reset -- simple, and a re-mint is cheap relative to eviction logic.
+local PKEY_CACHE = {}                    -- privateKey PEM -> parsed pkey
+local TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 -- cache_key -> { token, exp }
+local TOKEN_CACHE_MAX = 256
+local JWT_HEADER_B64                     -- b64url of the fixed RS256 header
+
+local function sign_assertion(sa, claims)
+  if not (ok_pkey and ok_digest) then
+    return nil, "resty.openssl unavailable: cannot sign service-account JWT"
+  end
+  local pkey = PKEY_CACHE[sa.privateKey]
+  if not pkey then
+    local err
+    pkey, err = openssl_pkey.new(sa.privateKey)
+    if not pkey then return nil, "invalid service-account privateKey: " .. tostring(err) end
+    PKEY_CACHE[sa.privateKey] = pkey
+  end
+  JWT_HEADER_B64 = JWT_HEADER_B64 or b64url_encode('{"alg":"RS256","typ":"JWT"}')
+  local unsigned = JWT_HEADER_B64 .. "." .. b64url_encode(cjson.encode(claims))
+  local d, derr = openssl_digest.new("sha256")
+  if not d then return nil, "digest init failed: " .. tostring(derr) end
+  d:update(unsigned)
+  local sig, serr = pkey:sign(d)
+  if not sig then return nil, "RS256 sign failed: " .. tostring(serr) end
+  return unsigned .. "." .. b64url_encode(sig)
+end
+
+-- Mint (or reuse) a Skyflow bearer for the configured service account.
+-- Returns "Bearer <token>" or nil, err. The network hop happens at most once
+-- per (SA, scope, ctx) per bearer lifetime per worker.
+local function sa_bearer(conf, deadline)
+  local c = conf.credentials
+  local sa = cjson.decode(c.service_account_json)
+  if type(sa) ~= "table" or not (sa.clientID and sa.keyID and sa.tokenURI and sa.privateKey) then
+    return nil, "service_account_json must be JSON with clientID, keyID, tokenURI, privateKey"
+  end
+
+  local get_header = kong and kong.request and kong.request.get_header
+  local ctx, ctx_key = build_ctx(c.context, c.context_headers, get_header)
+  local scope = scope_from_roles(c.role_ids)
+  local cache_key = table.concat({ sa.clientID, sa.keyID, scope or "", ctx_key }, "\n")
+
+  local now = ngx.now()
+  local hit = TOKEN_CACHE[cache_key]
+  if hit and (hit.exp - (conf.token_skew_seconds or 300)) > now then
+    return "Bearer " .. hit.token
+  end
+
+  local claims = {
+    iss = sa.clientID, key = sa.keyID, aud = sa.tokenURI,
+    sub = sa.clientID, exp = math.floor(now) + 3600,
+  }
+  claims.ctx = ctx   -- omitted entirely when no context is configured
+
+  local assertion, aerr = sign_assertion(sa, claims)
+  if not assertion then return nil, aerr end
+
+  local body = cjson.encode({
+    grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    assertion  = assertion,
+    scope      = scope,
+  })
+
+  local attempts, last_err = (conf.retries or 0) + 1, nil
+  for i = 1, attempts do
+    if deadline and ngx.now() >= deadline then return nil, "deadline exceeded minting SA bearer" end
+    local httpc = http.new()
+    httpc:set_timeout(conf.timeout_ms)
+    local res, err = httpc:request_uri(sa.tokenURI, {
+      method = "POST", body = body,
+      headers = { ["Content-Type"] = "application/json" },
+      ssl_verify = true,
+      keepalive_timeout = conf.keepalive_idle_ms, keepalive_pool = conf.keepalive_pool_size,
+    })
+    if res and res.status == 200 then
+      local data = cjson.decode(res.body)
+      local token = data and data.accessToken
+      if not token or token == "" then return nil, "token endpoint returned no accessToken" end
+      local exp = jwt_exp(token)
+      if exp == 0 then exp = math.floor(now) + 3600 end   -- documented default: 60 min
+      if TOKEN_CACHE_N >= TOKEN_CACHE_MAX then TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 end
+      if not TOKEN_CACHE[cache_key] then TOKEN_CACHE_N = TOKEN_CACHE_N + 1 end
+      TOKEN_CACHE[cache_key] = { token = token, exp = exp }
+      local nctx = 0
+      if ctx then for _ in pairs(ctx) do nctx = nctx + 1 end end
+      kong.log.info("skyflow: minted SA bearer for ", sa.clientName or sa.clientID,
+                    " (ctx attrs=", nctx, scope and ", scoped" or "",
+                    ", ttl=", math.floor(exp - now), "s)")
+      return "Bearer " .. token
+    elseif res and res.status >= 400 and res.status < 500 and res.status ~= 429 then
+      -- 4xx (bad assertion / enforceContextID unmet / malformed scope): the
+      -- endpoint's message pinpoints the cause; retrying can't help.
+      local detail = res.body and tostring(res.body):sub(1, 200) or ""
+      return nil, "token endpoint status " .. res.status .. " (not retried): " .. detail
+    else
+      last_err = res and ("token endpoint status " .. res.status) or ("transport: " .. tostring(err))
+      if i < attempts and (not deadline or ngx.now() < deadline) then ngx.sleep(0.1) end
+    end
+  end
+  return nil, last_err or "SA token exchange failed"
+end
+
 -- Resolve the Authorization header value for the configured credential.
-local function auth_value(conf)
+-- Precedence: api_key > token > service_account_json (schema enforces
+-- only_one_of, so precedence only matters defensively).
+local function auth_value(conf, deadline)
   local c = conf.credentials
   if c.api_key and c.api_key ~= "" then return "Bearer " .. c.api_key end
   if c.token and c.token ~= "" then return "Bearer " .. c.token end
   if c.service_account_json and c.service_account_json ~= "" then
-    return nil, "service-account JWT auth is not implemented in the Konnect "
-             .. "single-file build; use credentials.api_key or credentials.token"
+    return sa_bearer(conf, deadline)
   end
   return nil, "no Skyflow credential configured"
 end
@@ -334,14 +553,16 @@ local function run_access(conf, ctx)
     return { ok = true }
   end
 
-  local authz, aerr = auth_value(conf)
+  -- The deadline covers SA bearer minting too, so a hung token endpoint can't
+  -- stall the request beyond deadline_ms.
+  local deadline = ngx.now() + (conf.deadline_ms / 1000)
+  local authz, aerr = auth_value(conf, deadline)
   if not authz then
     kong.log.err("skyflow auth error: ", aerr)
     -- auth failures ALWAYS fail closed (never forward raw PII), regardless of posture
     return { deny = true, status = 502, body = { message = "request blocked: auth unavailable" } }
   end
 
-  local deadline = ngx.now() + (conf.deadline_ms / 1000)
   local json_mode = wants_json(conf, kong.request.get_header("Content-Type"))
 
   -- Build the list of text spans to process.
@@ -526,11 +747,13 @@ function SkyflowDeidentify:response(conf)
   local status = kong.service.response.get_status()
   if not status or status < 200 or status >= 300 then return end
 
-  -- reidentify_text calls the vault; resolve auth + a fresh deadline up front.
+  -- reidentify_text calls the vault; resolve auth + a fresh deadline up front
+  -- (deadline first: SA bearer minting is itself deadline-bounded).
   local authz, deadline
   if strat == "reidentify_text" then
+    deadline = ngx.now() + (conf.deadline_ms / 1000)
     local aerr
-    authz, aerr = auth_value(conf)
+    authz, aerr = auth_value(conf, deadline)
     if not authz then
       kong.log.err("skyflow re-identify auth error: ", aerr)
       if conf.reidentify.on_error == "deny" then
@@ -538,7 +761,6 @@ function SkyflowDeidentify:response(conf)
       end
       return
     end
-    deadline = ngx.now() + (conf.deadline_ms / 1000)
     if next(conf.reidentify.entity_treatment) or conf.reidentify.default_treatment ~= "plain_text" then
       kong.log.warn("skyflow: reidentify_text restores plaintext from the vault; ",
                     "entity_treatment/masking is not applied (use mapping_only for treatments)")
@@ -679,6 +901,11 @@ SkyflowDeidentify._test = {
   plain_replace     = plain_replace,
   reidentify_string = reidentify_string,
   sse_chunk         = sse_chunk,
+  b64url_encode     = b64url_encode,
+  b64url_decode     = b64url_decode,
+  jwt_exp           = jwt_exp,
+  build_ctx         = build_ctx,
+  scope_from_roles  = scope_from_roles,
 }
 
 return SkyflowDeidentify

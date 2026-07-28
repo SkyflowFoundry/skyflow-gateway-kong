@@ -24,6 +24,15 @@ local STRATEGIES    = { "mapping_only", "reidentify_text", "detokenize" }
 local STREAMING     = { "buffer", "passthrough" }
 local PROTOCOLS     = { "http", "https", "grpc", "grpcs", "ws", "wss" }
 
+-- Exactly one of api_key | token | service_account_json.
+--   * service_account_json: full Skyflow SA credentials JSON; the handler
+--     mints RS256 JWT-bearer tokens from it (cached per SA/scope/ctx).
+--   * role_ids: scoped tokens -- restrict the bearer to a subset of the SA's
+--     roles ("role:<id>" scope on the token exchange).
+--   * context: static attributes for the assertion's `ctx` claim.
+--   * context_headers: ctx attribute -> request header name; resolved per
+--     request (e.g. user -> X-Consumer-Username), so vault policies can
+--     condition on the caller via $ctx.<attr> (context-aware authorization).
 local credentials = {
   type = "record",
   required = true,
@@ -33,9 +42,27 @@ local credentials = {
     { service_account_json = { type = "string", referenceable = true, encrypted = true } },
     { role_ids = { type = "array", elements = { type = "string" } } },
     { context  = { type = "map", keys = { type = "string" }, values = { type = "string" } } },
+    { context_headers = { type = "map", keys = { type = "string" }, values = { type = "string" } } },
   },
   entity_checks = {
     { only_one_of = { "api_key", "token", "service_account_json" } },
+    -- role_ids/context/context_headers shape the minted bearer; with a static
+    -- api_key/token they would be silently ignored -- reject that config.
+    { custom_entity_check = {
+        field_sources = { "service_account_json", "role_ids", "context", "context_headers" },
+        fn = function(entity)
+          local has_sa = type(entity.service_account_json) == "string"
+                         and entity.service_account_json ~= ""
+          local uses_sa_opts =
+            (type(entity.role_ids) == "table" and #entity.role_ids > 0)
+            or (type(entity.context) == "table" and next(entity.context) ~= nil)
+            or (type(entity.context_headers) == "table" and next(entity.context_headers) ~= nil)
+          if uses_sa_opts and not has_sa then
+            return nil, "role_ids/context/context_headers require credentials.service_account_json"
+          end
+          return true
+        end,
+    } },
   },
 }
 
@@ -93,6 +120,7 @@ return {
           { env = { type = "string", one_of = ENVS, default = "PROD" } },
           { skyflow_base_url_override = { type = "string" } },
           { credentials = credentials },
+          -- SA-JWT bearers are re-minted this many seconds before their exp.
           { token_skew_seconds = { type = "integer", default = 300, between = { 0, 3600 } } },
 
           ----------------------------------------------------------------- targeting
