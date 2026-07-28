@@ -167,12 +167,16 @@ account needed.
 cd deploy/claude-gateway
 export SKYFLOW_VAULT_ID=... SKYFLOW_CLUSTER_ID=... SKYFLOW_ACCOUNT_ID=...
 export SKYFLOW_SA_JSON='{"clientID":...}'   # service-account credentials JSON
-export OPENAI_API_KEY=sk-...
-./setup.sh && OPENAI_AUTH_HEADER="Bearer $OPENAI_API_KEY" docker compose up -d
+./setup.sh && docker compose up -d
 
-ANTHROPIC_BASE_URL=http://localhost:8000/claude ANTHROPIC_API_KEY=dummy \
+ANTHROPIC_BASE_URL=http://localhost:8000/claude \
+ANTHROPIC_AUTH_TOKEN=$OPENAI_API_KEY \
 ANTHROPIC_MODEL=gpt-4o-mini CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 claude
 ```
+
+The gateway stores no LLM credential — each caller brings their own OpenAI
+key (`ANTHROPIC_AUTH_TOKEN`), which the gateway passes through to the
+provider.
 
 Full walkthrough (verification probes, audit log, per-caller context):
 [`deploy/claude-gateway/README.md`](deploy/claude-gateway/README.md).
