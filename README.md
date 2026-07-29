@@ -183,12 +183,36 @@ pattern. `/claude` routes `"model": "claude-*"` to Anthropic (native) and
 anything else to OpenAI (translated), with identical Skyflow protection either
 way. Switch providers with `--model gpt-4o-mini`; no URL change.
 
-Kong's free `ai-proxy` pins one provider per plugin instance, and
+Any model either provider offers works — the upstreams deliberately set no
+`model.name`, so `ai-proxy` forwards the caller's model. Verified live:
+`claude-sonnet-4-5`, `claude-haiku-4-5`, `claude-opus-4-5`, `gpt-4o-mini`,
+and `gpt-4o` all served from the one path.
+
+Kong's free `ai-proxy` pins one *provider* per plugin instance, and
 `ai-proxy-advanced` (multi-target routing + `model_alias`) is **enterprise-only**
 — it refuses to load in free mode (`'ai-proxy-advanced' is an enterprise only
 plugin`). So a bundled `pre-function` reads the request's model and rewrites the
 internal loopback path. `/claude-anthropic` and `/claude-openai` remain for
 pinning a provider regardless of the requested model.
+
+### Client setup
+
+**Claude Code** — see the quickstart above.
+
+**Claude Desktop** (Settings → third-party inference → Gateway):
+
+| Field | Value |
+| --- | --- |
+| Gateway base URL | `https://<host>/claude` |
+| Gateway API key | your gateway key |
+| Gateway auth scheme | **`x-api-key`** (Kong's key-auth ignores `Authorization`) |
+| Model discovery | **off** — Kong exposes no `/v1/models` |
+| Model list | `claude-sonnet-4-5`, `claude-haiku-4-5`, `claude-opus-4-5` |
+
+> **Claude Desktop only accepts Anthropic model IDs.** Listing `gpt-4o-mini`
+> fails config validation (`configured model "gpt-4o-mini" is not an Anthropic
+> model`) — a Desktop constraint, not a gateway one. The OpenAI side of the
+> toggle is reachable from Claude Code, the SDKs, and curl.
 
 **Credential model**: the gateway holds the provider key *and* the Skyflow
 service account; a client holds only a gateway key, accepted as either

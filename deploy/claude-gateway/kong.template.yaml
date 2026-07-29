@@ -131,8 +131,10 @@ services:
             header_value: "{vault://env/OPENAI_AUTH_HEADER}"
             allow_override: false
           model:
+            # No `name`: ai-proxy then forwards the CALLER's model, so every
+            # model this provider offers works through the one endpoint. Pinning
+            # a name here would reject anything else ("cannot use own model").
             provider: openai
-            name: __OPENAI_MODEL__
           max_request_body_size: 16777216
 
   - name: claude-front-anthropic
@@ -212,8 +214,8 @@ services:
             header_value: "{vault://env/ANTHROPIC_API_KEY}"
             allow_override: false
           model:
+            # No `name` -- the caller's model passes through (see above)
             provider: anthropic
-            name: __ANTHROPIC_MODEL__
             options:
               # required by ai-proxy for the anthropic provider
               anthropic_version: "2023-06-01"
