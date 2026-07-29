@@ -22,12 +22,28 @@ services:
     url: http://127.0.0.1:8000/_claude_upstream
     routes:
       - name: claude
-        paths: ["/claude"]
+        paths: ["/claude", "/claude-openai"]
         strip_path: true
         protocols: ["http", "https"]
     plugins:
       - name: key-auth
         config: { key_names: ["apikey", "x-api-key"], hide_credentials: false }
+      # Provider selected by the request body's `model` -- the standard
+      # AI-gateway pattern. Kong's free ai-proxy pins one provider per plugin
+      # instance, and ai-proxy-advanced (multi-target + model_alias) is
+      # enterprise-only, so this bundled pre-function rewrites the internal
+      # loopback path instead.
+      - name: pre-function
+        config:
+          access:
+            - |
+              local body = kong.request.get_body()
+              local model = (body and body.model) or ""
+              local tail = kong.request.get_path():gsub("^/claude[a-z-]*", "")
+              local upstream = model:find("^claude") and "/_claude_upstream_anthropic"
+                                                     or "/_claude_upstream"
+              kong.service.request.set_path(upstream .. tail)
+              kong.log.info("skyflow-gateway: model=", model, " -> ", upstream)
       # Flow log to stdout -> CloudWatch: consumer, route, status, latency,
       # and the skyflow entity counts. No request/response bodies -- the
       # gateway's own logs stay PII-free.
@@ -42,7 +58,7 @@ services:
             service_account_json: "{vault://env/SKYFLOW_SA_JSON}"
             context:
               tenant: __CTX_TENANT__
-              provider: openai
+              provider: by-model
             context_headers:
               caller.user: X-Demo-User
             context_kong:

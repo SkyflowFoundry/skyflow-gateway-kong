@@ -1,12 +1,21 @@
 # Declarative config template for the Claude Code -> Kong -> Skyflow -> LLM
-# gateway, with a provider toggle:
+# gateway.
 #
-#   /claude            -> ai-proxy -> OpenAI     (Anthropic protocol in,
-#                                                 translated to OpenAI)
-#   /claude-anthropic  -> ai-proxy -> Anthropic  (native, no translation)
+# ONE client-facing endpoint, /claude. The provider is selected the standard
+# way -- by the `model` field in the request body:
 #
-# Identical Skyflow protection on both; switch providers by changing one path
-# in ANTHROPIC_BASE_URL.
+#   "model": "claude-*"  -> Anthropic (native protocol both ways)
+#   anything else        -> OpenAI    (Anthropic protocol in, translated out)
+#
+# Kong's free `ai-proxy` pins one provider per plugin instance, and
+# `ai-proxy-advanced` (which has multi-target routing + model_alias) is
+# enterprise-only -- it refuses to load in free mode. So a small `pre-function`
+# (Apache-licensed, bundled) reads the model and rewrites the internal loopback
+# path. Identical Skyflow protection either way, since the skyflow plugin runs
+# on the single front route before any of this.
+#
+# The dedicated /claude-anthropic and /claude-openai paths remain for pinning a
+# provider regardless of the requested model.
 #
 # Credential model: the GATEWAY holds the provider key and the Skyflow service
 # account; a CLIENT holds only a gateway key (sent as `apikey` or `x-api-key`,
@@ -28,7 +37,7 @@ services:
     url: http://127.0.0.1:8000/_claude_upstream
     routes:
       - name: claude
-        paths: ["/claude"]
+        paths: ["/claude", "/claude-openai"]
         strip_path: true
         protocols: ["http", "https"]
     plugins:
@@ -40,6 +49,20 @@ services:
         config:
           key_names: ["apikey", "x-api-key"]
           hide_credentials: false
+      # Provider selection from the request body -- the standard AI-gateway
+      # pattern. Runs at priority 0 (after key-auth 1250 and the skyflow
+      # plugin 775), so an unauthenticated request never reaches it.
+      - name: pre-function
+        config:
+          access:
+            - |
+              local body = kong.request.get_body()
+              local model = (body and body.model) or ""
+              local tail = kong.request.get_path():gsub("^/claude[a-z-]*", "")
+              local upstream = model:find("^claude") and "/_claude_upstream_anthropic"
+                                                     or "/_claude_upstream"
+              kong.service.request.set_path(upstream .. tail)
+              kong.log.info("skyflow-gateway: model=", model, " -> ", upstream)
       - name: skyflow-deidentify
         config:
           vault_id: __SKYFLOW_VAULT_ID__
@@ -49,8 +72,8 @@ services:
             service_account_json: "{vault://env/SKYFLOW_SA_JSON}"
             context:
               tenant: __CTX_TENANT__
-              # tags the Skyflow audit event with which provider served it
-              provider: openai
+              # which provider served the call, for the Skyflow audit event
+              provider: by-model
             context_headers:
               caller.user: X-Demo-User
             context_kong:

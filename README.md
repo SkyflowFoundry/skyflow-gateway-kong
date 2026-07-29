@@ -172,15 +172,23 @@ export ANTHROPIC_API_KEY=sk-ant-...            # provider key, gateway-held
 export OPENAI_AUTH_HEADER="Bearer $OPENAI_API_KEY"  # provider key, gateway-held
 ./setup.sh && docker compose up -d
 
-ANTHROPIC_BASE_URL=http://localhost:8000/claude-anthropic \
+ANTHROPIC_BASE_URL=http://localhost:8000/claude \
 ANTHROPIC_CUSTOM_HEADERS="apikey: $GATEWAY_API_KEY" \
 ANTHROPIC_AUTH_TOKEN=unused \
 ANTHROPIC_MODEL=claude-sonnet-4-5 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 claude
 ```
 
-**Provider toggle**: `/claude-anthropic` serves Anthropic natively;
-`/claude` serves OpenAI (Anthropic protocol in, translated out). Identical
-Skyflow protection on both — swap one path segment.
+**One endpoint, provider chosen by the model** — the standard AI-gateway
+pattern. `/claude` routes `"model": "claude-*"` to Anthropic (native) and
+anything else to OpenAI (translated), with identical Skyflow protection either
+way. Switch providers with `--model gpt-4o-mini`; no URL change.
+
+Kong's free `ai-proxy` pins one provider per plugin instance, and
+`ai-proxy-advanced` (multi-target routing + `model_alias`) is **enterprise-only**
+— it refuses to load in free mode (`'ai-proxy-advanced' is an enterprise only
+plugin`). So a bundled `pre-function` reads the request's model and rewrites the
+internal loopback path. `/claude-anthropic` and `/claude-openai` remain for
+pinning a provider regardless of the requested model.
 
 **Credential model**: the gateway holds the provider key *and* the Skyflow
 service account; a client holds only a gateway key, accepted as either
