@@ -166,17 +166,28 @@ account needed.
 ```bash
 cd deploy/claude-gateway
 export SKYFLOW_VAULT_ID=... SKYFLOW_CLUSTER_ID=... SKYFLOW_ACCOUNT_ID=...
-export SKYFLOW_SA_JSON='{"clientID":...}'   # service-account credentials JSON
+export SKYFLOW_SA_JSON='{"clientID":...}'      # service-account credentials JSON
+export GATEWAY_API_KEY=gw-$(openssl rand -hex 16)   # what clients will send
+export ANTHROPIC_API_KEY=sk-ant-...            # provider key, gateway-held
+export OPENAI_AUTH_HEADER="Bearer $OPENAI_API_KEY"  # provider key, gateway-held
 ./setup.sh && docker compose up -d
 
-ANTHROPIC_BASE_URL=http://localhost:8000/claude \
-ANTHROPIC_AUTH_TOKEN=$OPENAI_API_KEY \
-ANTHROPIC_MODEL=gpt-4o-mini CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 claude
+ANTHROPIC_BASE_URL=http://localhost:8000/claude-anthropic \
+ANTHROPIC_CUSTOM_HEADERS="apikey: $GATEWAY_API_KEY" \
+ANTHROPIC_AUTH_TOKEN=unused \
+ANTHROPIC_MODEL=claude-sonnet-4-5 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 claude
 ```
 
-The gateway stores no LLM credential — each caller brings their own OpenAI
-key (`ANTHROPIC_AUTH_TOKEN`), which the gateway passes through to the
-provider.
+**Provider toggle**: `/claude-anthropic` serves Anthropic natively;
+`/claude` serves OpenAI (Anthropic protocol in, translated out). Identical
+Skyflow protection on both — swap one path segment.
+
+**Credential model**: the gateway holds the provider key *and* the Skyflow
+service account; a client holds only a gateway key, accepted as either
+`apikey` or `x-api-key` so single-credential clients (Claude Desktop) work.
+Unauthenticated requests are rejected before any Skyflow call. Set
+`allow_override: true` on an `ai-proxy` auth block if you'd rather callers
+bring their own provider key.
 
 Full walkthrough (verification probes, audit log, per-caller context):
 [`deploy/claude-gateway/README.md`](deploy/claude-gateway/README.md).

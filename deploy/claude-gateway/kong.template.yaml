@@ -1,10 +1,24 @@
-# Declarative config template for the Claude Code -> Kong -> Skyflow -> OpenAI
-# gateway. `setup.sh` substitutes the __PLACEHOLDER__ values from your
-# environment into kong.yaml (gitignored). Secrets never land in this file:
-# the service-account JSON resolves at runtime through Kong's env vault
-# ({vault://env/...}); the OpenAI key is supplied by each caller per request
-# (bring-your-own-key), never stored in the gateway.
+# Declarative config template for the Claude Code -> Kong -> Skyflow -> LLM
+# gateway, with a provider toggle:
+#
+#   /claude            -> ai-proxy -> OpenAI     (Anthropic protocol in,
+#                                                 translated to OpenAI)
+#   /claude-anthropic  -> ai-proxy -> Anthropic  (native, no translation)
+#
+# Identical Skyflow protection on both; switch providers by changing one path
+# in ANTHROPIC_BASE_URL.
+#
+# Credential model: the GATEWAY holds the provider key and the Skyflow service
+# account; a CLIENT holds only a gateway key (sent as `apikey` or `x-api-key`,
+# so single-credential clients like Claude Desktop work). `setup.sh` writes
+# kong.yaml (gitignored) from this template; every secret stays out of it,
+# resolved at runtime through Kong's env vault ({vault://env/...}).
 _format_version: "3.0"
+
+consumers:
+  - username: gateway-client
+    keyauth_credentials:
+      - key: __GATEWAY_API_KEY__
 
 services:
   # Front door: point Claude Code's ANTHROPIC_BASE_URL here. De-identifies the
@@ -18,6 +32,14 @@ services:
         strip_path: true
         protocols: ["http", "https"]
     plugins:
+      # Client credential: the only secret a caller needs. Accepts either
+      # header name so Claude Desktop's `x-api-key` scheme and Claude Code's
+      # `apikey` header both work. Priority 1250 > skyflow-deidentify (775),
+      # so an unauthenticated request is rejected BEFORE any Skyflow call.
+      - name: key-auth
+        config:
+          key_names: ["apikey", "x-api-key"]
+          hide_credentials: false
       - name: skyflow-deidentify
         config:
           vault_id: __SKYFLOW_VAULT_ID__
@@ -27,6 +49,8 @@ services:
             service_account_json: "{vault://env/SKYFLOW_SA_JSON}"
             context:
               tenant: __CTX_TENANT__
+              # tags the Skyflow audit event with which provider served it
+              provider: openai
             context_headers:
               caller.user: X-Demo-User
             context_kong:
@@ -60,18 +84,117 @@ services:
         strip_path: true
         protocols: ["http", "https"]
     plugins:
+      # the loopback carries the caller's key forward, so a direct external hit
+      # on this internal path is rejected too — no de-identification bypass
+      - name: key-auth
+        config:
+          key_names: ["apikey", "x-api-key"]
+          hide_credentials: false
       - name: ai-proxy
         config:
           llm_format: anthropic
           route_type: llm/v1/chat
           logging: { log_statistics: true, log_payloads: false }
-          # Bring-your-own-key: no auth block, so the gateway injects NOTHING.
-          # Each caller supplies their own OpenAI key via the Authorization
-          # header (Claude Code: ANTHROPIC_AUTH_TOKEN=<their key>). No key ->
-          # the provider rejects the request, which doubles as access control.
+          # The GATEWAY holds the provider credential; clients only ever hold
+          # a gateway key. Resolved at runtime from the env vault, so the key
+          # is never in this file or the image.
+          #   allow_override: true would let a caller supply their own key
+          #   instead (bring-your-own-key) — see README.
+          auth:
+            header_name: Authorization
+            # NOTE: a vault reference must be the whole value — Kong does not
+            # interpolate "Bearer {vault://...}", it forwards it literally. So
+            # the env var carries the complete header value.
+            header_value: "{vault://env/OPENAI_AUTH_HEADER}"
+            allow_override: false
           model:
             provider: openai
             name: __OPENAI_MODEL__
+          max_request_body_size: 16777216
+
+  - name: claude-front-anthropic
+    url: http://127.0.0.1:8000/_claude_upstream_anthropic
+    routes:
+      - name: claude-anthropic
+        paths: ["/claude-anthropic"]
+        strip_path: true
+        protocols: ["http", "https"]
+    plugins:
+      # Client credential: the only secret a caller needs. Accepts either
+      # header name so Claude Desktop's `x-api-key` scheme and Claude Code's
+      # `apikey` header both work. Priority 1250 > skyflow-deidentify (775),
+      # so an unauthenticated request is rejected BEFORE any Skyflow call.
+      - name: key-auth
+        config:
+          key_names: ["apikey", "x-api-key"]
+          hide_credentials: false
+      - name: skyflow-deidentify
+        config:
+          vault_id: __SKYFLOW_VAULT_ID__
+          cluster_id: __SKYFLOW_CLUSTER_ID__
+          account_id: __SKYFLOW_ACCOUNT_ID__
+          credentials:
+            service_account_json: "{vault://env/SKYFLOW_SA_JSON}"
+            context:
+              tenant: __CTX_TENANT__
+              provider: anthropic
+            context_headers:
+              caller.user: X-Demo-User
+            context_kong:
+              caller.route: route_name
+          profile: anthropic
+          response_json_paths: ["$.content[*].text"]
+          deidentify:
+            entities: [NAME, NAME_GIVEN, NAME_FAMILY, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB]
+            token_format: VAULT_TOKEN
+          reidentify:
+            enabled: true
+            strategy: reidentify_text
+            on_error: deny
+            # tool_inputs defaults to `tokenized`: agents' tools receive vault
+            # tokens, never raw PII. Set to plain_text only if you trust every
+            # tool's egress path.
+          on_skyflow_error: deny
+          timeout_ms: 15000
+          deadline_ms: 30000
+      - name: file-log
+        config:
+          path: /tmp/skyflow-gateway.json
+
+  # Internal: ai-proxy alone, Anthropic provider — the native path.
+  - name: claude-upstream-anthropic
+    url: http://localhost:32000
+    routes:
+      - name: claude-upstream-anthropic
+        paths: ["/_claude_upstream_anthropic"]
+        strip_path: true
+        protocols: ["http", "https"]
+    plugins:
+      # the loopback carries the caller's key forward, so a direct external hit
+      # on this internal path is rejected too — no de-identification bypass
+      - name: key-auth
+        config:
+          key_names: ["apikey", "x-api-key"]
+          hide_credentials: false
+      - name: ai-proxy
+        config:
+          llm_format: anthropic
+          route_type: llm/v1/chat
+          logging: { log_statistics: true, log_payloads: false }
+          # Anthropic authenticates with x-api-key, NOT Authorization: Bearer
+          # (a Bearer token here returns authentication_error), so the gateway
+          # must hold and inject this credential.
+          auth:
+            header_name: x-api-key
+            header_value: "{vault://env/ANTHROPIC_API_KEY}"
+            allow_override: false
+          model:
+            provider: anthropic
+            name: __ANTHROPIC_MODEL__
+            options:
+              # required by ai-proxy for the anthropic provider
+              anthropic_version: "2023-06-01"
+              max_tokens: 8192
           max_request_body_size: 16777216
 
   # Probe: same de-identification, echo upstream, re-identify off -- so you
@@ -84,6 +207,14 @@ services:
         strip_path: true
         protocols: ["http", "https"]
     plugins:
+      # Client credential: the only secret a caller needs. Accepts either
+      # header name so Claude Desktop's `x-api-key` scheme and Claude Code's
+      # `apikey` header both work. Priority 1250 > skyflow-deidentify (775),
+      # so an unauthenticated request is rejected BEFORE any Skyflow call.
+      - name: key-auth
+        config:
+          key_names: ["apikey", "x-api-key"]
+          hide_credentials: false
       - name: skyflow-deidentify
         config:
           vault_id: __SKYFLOW_VAULT_ID__
