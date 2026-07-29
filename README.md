@@ -166,17 +166,60 @@ account needed.
 ```bash
 cd deploy/claude-gateway
 export SKYFLOW_VAULT_ID=... SKYFLOW_CLUSTER_ID=... SKYFLOW_ACCOUNT_ID=...
-export SKYFLOW_SA_JSON='{"clientID":...}'   # service-account credentials JSON
+export SKYFLOW_SA_JSON='{"clientID":...}'      # service-account credentials JSON
+export GATEWAY_API_KEY=gw-$(openssl rand -hex 16)   # what clients will send
+export ANTHROPIC_API_KEY=sk-ant-...            # provider key, gateway-held
+export OPENAI_AUTH_HEADER="Bearer $OPENAI_API_KEY"  # provider key, gateway-held
 ./setup.sh && docker compose up -d
 
 ANTHROPIC_BASE_URL=http://localhost:8000/claude \
-ANTHROPIC_AUTH_TOKEN=$OPENAI_API_KEY \
-ANTHROPIC_MODEL=gpt-4o-mini CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 claude
+ANTHROPIC_CUSTOM_HEADERS="apikey: $GATEWAY_API_KEY" \
+ANTHROPIC_AUTH_TOKEN=unused \
+ANTHROPIC_MODEL=claude-sonnet-4-5 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 claude
 ```
 
-The gateway stores no LLM credential — each caller brings their own OpenAI
-key (`ANTHROPIC_AUTH_TOKEN`), which the gateway passes through to the
-provider.
+**One endpoint, provider chosen by the model** — the standard AI-gateway
+pattern. `/claude` routes `"model": "claude-*"` to Anthropic (native) and
+anything else to OpenAI (translated), with identical Skyflow protection either
+way. Switch providers with `--model gpt-4o-mini`; no URL change.
+
+Any model either provider offers works — the upstreams deliberately set no
+`model.name`, so `ai-proxy` forwards the caller's model. Verified live:
+`claude-sonnet-4-5`, `claude-haiku-4-5`, `claude-opus-4-5`, `gpt-4o-mini`,
+and `gpt-4o` all served from the one path.
+
+Kong's free `ai-proxy` pins one *provider* per plugin instance, and
+`ai-proxy-advanced` (multi-target routing + `model_alias`) is **enterprise-only**
+— it refuses to load in free mode (`'ai-proxy-advanced' is an enterprise only
+plugin`). So a bundled `pre-function` reads the request's model and rewrites the
+internal loopback path. `/claude-anthropic` and `/claude-openai` remain for
+pinning a provider regardless of the requested model.
+
+### Client setup
+
+**Claude Code** — see the quickstart above.
+
+**Claude Desktop** (Settings → third-party inference → Gateway):
+
+| Field | Value |
+| --- | --- |
+| Gateway base URL | `https://<host>/claude` |
+| Gateway API key | your gateway key |
+| Gateway auth scheme | **`x-api-key`** (Kong's key-auth ignores `Authorization`) |
+| Model discovery | **off** — Kong exposes no `/v1/models` |
+| Model list | `claude-sonnet-4-5`, `claude-haiku-4-5`, `claude-opus-4-5` |
+
+> **Claude Desktop only accepts Anthropic model IDs.** Listing `gpt-4o-mini`
+> fails config validation (`configured model "gpt-4o-mini" is not an Anthropic
+> model`) — a Desktop constraint, not a gateway one. The OpenAI side of the
+> toggle is reachable from Claude Code, the SDKs, and curl.
+
+**Credential model**: the gateway holds the provider key *and* the Skyflow
+service account; a client holds only a gateway key, accepted as either
+`apikey` or `x-api-key` so single-credential clients (Claude Desktop) work.
+Unauthenticated requests are rejected before any Skyflow call. Set
+`allow_override: true` on an `ai-proxy` auth block if you'd rather callers
+bring their own provider key.
 
 Full walkthrough (verification probes, audit log, per-caller context):
 [`deploy/claude-gateway/README.md`](deploy/claude-gateway/README.md).
