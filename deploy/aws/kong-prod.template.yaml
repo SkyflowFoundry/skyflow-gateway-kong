@@ -1,0 +1,190 @@
+# Production declarative config for the team Claude gateway on App Runner.
+# Substituted at CONTAINER BOOT by docker-entrypoint-prod.sh from env vars
+# (which App Runner injects from Secrets Manager) -- the image itself carries
+# no IDs, no keys, no secrets.
+#
+# Access model:
+#   * /claude and /_claude_upstream require the gateway apikey (key-auth,
+#     priority 1250) BEFORE the skyflow plugin (775) can run -- without the
+#     key there is no way to reach or consume the Skyflow service account.
+#   * Callers bring their own OpenAI key (Authorization: Bearer) -- the
+#     gateway stores no LLM credential.
+#   * /healthz is the only unauthenticated route (App Runner health checks).
+_format_version: "3.0"
+
+consumers:
+  - username: team
+    keyauth_credentials:
+      - key: __GATEWAY_API_KEY__
+
+services:
+  - name: claude-front
+    url: http://127.0.0.1:8000/_claude_upstream
+    routes:
+      - name: claude
+        paths: ["/claude"]
+        strip_path: true
+        protocols: ["http", "https"]
+    plugins:
+      - name: key-auth
+        config: { key_names: ["apikey", "x-api-key"], hide_credentials: false }
+      # Flow log to stdout -> CloudWatch: consumer, route, status, latency,
+      # and the skyflow entity counts. No request/response bodies -- the
+      # gateway's own logs stay PII-free.
+      - name: file-log
+        config: { path: /dev/stdout }
+      - name: skyflow-deidentify
+        config:
+          vault_id: __SKYFLOW_VAULT_ID__
+          cluster_id: __SKYFLOW_CLUSTER_ID__
+          account_id: __SKYFLOW_ACCOUNT_ID__
+          credentials:
+            service_account_json: "{vault://env/SKYFLOW_SA_JSON}"
+            context:
+              tenant: __CTX_TENANT__
+              provider: openai
+            context_headers:
+              caller.user: X-Demo-User
+            context_kong:
+              caller.consumer: consumer_username
+              caller.route: route_name
+          profile: anthropic
+          response_json_paths: ["$.content[*].text"]
+          deidentify:
+            entities: [NAME, NAME_GIVEN, NAME_FAMILY, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB]
+            token_format: VAULT_TOKEN
+          reidentify:
+            enabled: true
+            strategy: reidentify_text
+            on_error: deny
+          on_skyflow_error: deny
+          timeout_ms: 15000
+          deadline_ms: 30000
+
+  - name: claude-upstream
+    url: http://localhost:32000
+    routes:
+      - name: claude-upstream
+        paths: ["/_claude_upstream"]
+        strip_path: true
+        protocols: ["http", "https"]
+    plugins:
+      # Same key gates the internal route: the loopback hop forwards the
+      # caller's apikey header (hide_credentials=false above), and a direct
+      # external hit without the key is rejected -- no de-identification
+      # bypass.
+      - name: key-auth
+        config: { key_names: ["apikey", "x-api-key"], hide_credentials: false }
+      # log_payloads on THIS route logs the TOKENIZED LLM payloads -- the
+      # exact bytes that egress to the provider and what it answers. Safe to
+      # log precisely because de-identification already happened upstream.
+      - name: file-log
+        config: { path: /dev/stdout }
+      - name: ai-proxy
+        config:
+          llm_format: anthropic
+          route_type: llm/v1/chat
+          logging: { log_statistics: true, log_payloads: true }
+          # gateway-held provider credential; the whole header value must be
+          # one vault reference (Kong does not interpolate mid-string)
+          auth:
+            header_name: Authorization
+            header_value: "{vault://env/OPENAI_AUTH_HEADER}"
+            allow_override: false
+          model:
+            provider: openai
+            name: __OPENAI_MODEL__
+          max_request_body_size: 16777216
+
+  - name: claude-front-anthropic
+    url: http://127.0.0.1:8000/_claude_upstream_anthropic
+    routes:
+      - name: claude-anthropic
+        paths: ["/claude-anthropic"]
+        strip_path: true
+        protocols: ["http", "https"]
+    plugins:
+      - name: key-auth
+        config: { key_names: ["apikey", "x-api-key"], hide_credentials: false }
+      # Flow log to stdout -> CloudWatch: consumer, route, status, latency,
+      # and the skyflow entity counts. No request/response bodies -- the
+      # gateway's own logs stay PII-free.
+      - name: file-log
+        config: { path: /dev/stdout }
+      - name: skyflow-deidentify
+        config:
+          vault_id: __SKYFLOW_VAULT_ID__
+          cluster_id: __SKYFLOW_CLUSTER_ID__
+          account_id: __SKYFLOW_ACCOUNT_ID__
+          credentials:
+            service_account_json: "{vault://env/SKYFLOW_SA_JSON}"
+            context:
+              tenant: __CTX_TENANT__
+              provider: anthropic
+            context_headers:
+              caller.user: X-Demo-User
+            context_kong:
+              caller.consumer: consumer_username
+              caller.route: route_name
+          profile: anthropic
+          response_json_paths: ["$.content[*].text"]
+          deidentify:
+            entities: [NAME, NAME_GIVEN, NAME_FAMILY, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB]
+            token_format: VAULT_TOKEN
+          reidentify:
+            enabled: true
+            strategy: reidentify_text
+            on_error: deny
+          on_skyflow_error: deny
+          timeout_ms: 15000
+          deadline_ms: 30000
+
+  - name: claude-upstream-anthropic
+    url: http://localhost:32000
+    routes:
+      - name: claude-upstream-anthropic
+        paths: ["/_claude_upstream_anthropic"]
+        strip_path: true
+        protocols: ["http", "https"]
+    plugins:
+      # Same key gates the internal route: the loopback hop forwards the
+      # caller's apikey header (hide_credentials=false above), and a direct
+      # external hit without the key is rejected -- no de-identification
+      # bypass.
+      - name: key-auth
+        config: { key_names: ["apikey", "x-api-key"], hide_credentials: false }
+      # log_payloads on THIS route logs the TOKENIZED LLM payloads -- the
+      # exact bytes that egress to the provider and what it answers. Safe to
+      # log precisely because de-identification already happened upstream.
+      - name: file-log
+        config: { path: /dev/stdout }
+      - name: ai-proxy
+        config:
+          llm_format: anthropic
+          route_type: llm/v1/chat
+          logging: { log_statistics: true, log_payloads: true }
+          # gateway-held provider credential; the whole header value must be
+          # one vault reference (Kong does not interpolate mid-string)
+          auth:
+            # Anthropic authenticates with x-api-key, never Bearer
+            header_name: x-api-key
+            header_value: "{vault://env/ANTHROPIC_API_KEY}"
+            allow_override: false
+          model:
+            provider: anthropic
+            name: __ANTHROPIC_MODEL__
+            options:
+              anthropic_version: "2023-06-01"
+              max_tokens: 8192
+          max_request_body_size: 16777216
+
+  - name: healthz
+    url: http://localhost:32001
+    routes:
+      - name: healthz
+        paths: ["/healthz"]
+        strip_path: true
+        protocols: ["http", "https"]
+    plugins:
+      - name: request-termination
+        config: { status_code: 200, message: "ok" }
