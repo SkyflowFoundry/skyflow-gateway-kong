@@ -1,4 +1,4 @@
-FROM kong/kong-gateway:3.14
+FROM kong/kong-gateway:3.15.0.2
 USER root
 COPY plugin /kong-plugins
 COPY kong-prod.template.yaml /kong-prod.template.yaml

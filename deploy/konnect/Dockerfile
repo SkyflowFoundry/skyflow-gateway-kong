@@ -18,7 +18,7 @@
 #
 # Cluster credentials, provider keys, and the control-plane endpoints all arrive
 # as environment variables at boot. This image carries no secrets and no IDs.
-FROM kong/kong-gateway:3.14
+FROM kong/kong-gateway:3.15.0.2
 
 USER root
 COPY plugin /kong-plugins
