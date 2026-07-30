@@ -4,8 +4,14 @@
 --
 -- Konnect custom-plugin upload constraints honored here:
 --   * NO `require()` statements (typedefs are inlined below).
---   * Self-contained: custom_entity_check fns use only the entity table + basic
---     Lua (no os.*, no globals, no requires).
+--   * NO custom validation functions -- neither of Kong's two per-entity
+--     escape hatches appears here. Konnect's plugin-streaming upload rejects a
+--     schema containing them, and streaming is what lets the control plane
+--     distribute this plugin's CODE rather than us baking it into every
+--     data-plane image. Note the check is a SUBSTRING match on the schema text,
+--     not a parse: even a comment naming those functions fails the upload, which
+--     is why this note describes them instead. Rules that Kong's built-in entity
+--     checkers cannot express live in handler.lua -- see entity_checks below.
 --   * Pairs with a self-contained handler.lua; no extra modules/DAOs/migrations.
 --
 -- See docs/contributing/plugin-spec.md §4.3 for the field reference and docs/using/operations.md for the
@@ -24,127 +30,42 @@ local STRATEGIES    = { "mapping_only", "reidentify_text", "detokenize" }
 local STREAMING     = { "buffer", "passthrough" }
 local PROTOCOLS     = { "http", "https", "grpc", "grpcs", "ws", "wss" }
 
--- Exactly one of api_key | token | service_account_json.
---   * service_account_json: full Skyflow SA credentials JSON; the handler
---     mints RS256 JWT-bearer tokens from it (cached per SA/scope/ctx).
---   * role_ids: scoped tokens -- restrict the bearer to a subset of the SA's
---     roles ("role:<id>" scope on the token exchange).
---   * ctx claim (context-aware authorization): Skyflow accepts arbitrary JSON
---     (vault policies traverse it as $ctx.a.b). Assembled in layers, later
---     layers winning:
---       context_json    -- raw JSON string, any shape; the ctx base
---       context         -- static attr(.path) -> string; dot-paths nest
---       context_headers -- attr(.path) -> request header (client-supplied)
---       context_kong    -- attr(.path) -> gateway-derived fact (trusted,
---                          merged last so clients can never override it)
-local KONG_CTX_SOURCES = {
-  "consumer_id", "consumer_username", "consumer_custom_id",
-  "route_name", "service_name", "client_ip",
-}
-
+-- Credentials: STS delegation (RFC 8693) and nothing else. See the record
+-- below for why there is no api_key / service_account_json / ctx machinery.
 local credentials = {
   type = "record",
   required = true,
   fields = {
-    { api_key = { type = "string", referenceable = true, encrypted = true } },
-    { token   = { type = "string", referenceable = true, encrypted = true } },
-    { service_account_json = { type = "string", referenceable = true, encrypted = true } },
-    { role_ids = { type = "array", elements = { type = "string" } } },
-    { context_json = { type = "string", referenceable = true, encrypted = true } },
-    { context  = { type = "map", keys = { type = "string" }, values = { type = "string" } } },
-    { context_headers = { type = "map", keys = { type = "string" }, values = { type = "string" } } },
-    { context_kong = { type = "map", keys = { type = "string" },
-                       values = { type = "string", one_of = KONG_CTX_SOURCES } } },
-    -- Profile B: exchange the CALLER's IdP token for a Skyflow bearer
-    -- (RFC 8693 delegation). The gateway holds no Skyflow private key in this
-    -- mode, and `ctx` comes entirely from the IdP's claims -- the
-    -- context/context_headers/context_kong settings above do NOT apply,
-    -- because Skyflow ignores context supplied in the exchange body. Put
-    -- gateway-ish attributes (tenant, role, purpose) in the IdP token instead
-    -- (e.g. Entra app roles or a claims-mapping policy); they then arrive
-    -- IdP-signed rather than gateway-asserted.
+    -- STS delegation (RFC 8693) is the ONLY credential path. There is
+    -- deliberately no api_key, no static bearer token, and no
+    -- service_account_json: a gateway holding a Skyflow credential is a gateway
+    -- worth attacking, and gateway-asserted identity is a weaker claim than a
+    -- signed one. The caller's IdP token is the credential.
+    --
+    -- There is also no context/context_headers/context_kong/role_ids here.
+    -- Skyflow SILENTLY IGNORES context supplied by the caller of an exchange, so
+    -- `ctx` is exclusively the IdP's claims. Attributes like tenant, role, and
+    -- purpose belong in the IdP token -- Entra app roles and claims-mapping
+    -- policies put them there, IdP-signed, which is strictly better than this
+    -- gateway asserting them.
     { sts = {
         type = "record",
+        required = true,
         fields = {
-          { enabled = { type = "boolean", default = false } },
-          -- the Skyflow service account the caller is delegating through;
-          -- must be listed in the account's STS configuration for the issuer
-          { service_account_id = { type = "string" } },
-          -- where the caller's token arrives (Claude Desktop's gateway OIDC
-          -- mode sends it as `Authorization: Bearer <id_token>`)
+          -- the Skyflow service account the caller delegates through; it must be
+          -- listed in the account's STS configuration for this issuer
+          { service_account_id = { type = "string", required = true } },
+          -- where the caller's token arrives (Claude Desktop's gateway OIDC mode
+          -- sends it as `Authorization: Bearer <id_token>`)
           { token_header = { type = "string", default = "authorization" } },
           { token_uri = { type = "string",
                           default = "https://manage.skyflowapis.com/v1/auth/sts/token" } },
-          -- local fail-fast checks; Skyflow still verifies the signature
-          -- against the issuer's JWKS, so these are defense in depth
+          -- local fail-fast checks; Skyflow still verifies the signature against
+          -- the issuer's JWKS, so these are defense in depth and cost no network
+          -- hop when a token is obviously for somewhere else
           { expected_issuer = { type = "string" } },
           { expected_audience = { type = "string" } },
         },
-    } },
-  },
-  entity_checks = {
-    -- NOT only_one_of: that requires *exactly* one, which would reject STS mode
-    -- (Profile B carries no static credential -- the caller's IdP token is the
-    -- credential). This check enforces "exactly one credential source" across
-    -- all four options instead.
-    { custom_entity_check = {
-        field_sources = { "api_key", "token", "service_account_json", "sts" },
-        fn = function(entity)
-          local function set(v) return type(v) == "string" and v ~= "" end
-          local n = 0
-          if set(entity.api_key) then n = n + 1 end
-          if set(entity.token) then n = n + 1 end
-          if set(entity.service_account_json) then n = n + 1 end
-          if entity.sts and entity.sts.enabled then n = n + 1 end
-          if n == 0 then
-            return nil, "exactly one credential is required: api_key, token, "
-                        .. "service_account_json, or sts.enabled"
-          end
-          if n > 1 then
-            return nil, "only one credential may be set: api_key, token, "
-                        .. "service_account_json, or sts.enabled"
-          end
-          return true
-        end,
-    } },
-    -- role_ids/context* shape the minted bearer; with a static api_key/token
-    -- they would be silently ignored -- reject that config.
-    { custom_entity_check = {
-        field_sources = { "service_account_json", "role_ids", "context_json",
-                          "context", "context_headers", "context_kong", "sts",
-                          "api_key", "token" },
-        fn = function(entity)
-          local has_sa = type(entity.service_account_json) == "string"
-                         and entity.service_account_json ~= ""
-          local function nonempty(t) return type(t) == "table" and next(t) ~= nil end
-          local uses_sa_opts =
-            (type(entity.role_ids) == "table" and #entity.role_ids > 0)
-            or (type(entity.context_json) == "string" and entity.context_json ~= "")
-            or nonempty(entity.context)
-            or nonempty(entity.context_headers)
-            or nonempty(entity.context_kong)
-          local sts = entity.sts
-          if sts and sts.enabled then
-            if not (type(sts.service_account_id) == "string" and sts.service_account_id ~= "") then
-              return nil, "credentials.sts.enabled requires sts.service_account_id"
-            end
-            if (type(entity.api_key) == "string" and entity.api_key ~= "")
-               or (type(entity.token) == "string" and entity.token ~= "") then
-              return nil, "credentials.sts.enabled cannot be combined with api_key/token"
-            end
-          end
-          if uses_sa_opts and not has_sa then
-            return nil, "role_ids/context_json/context/context_headers/context_kong "
-                        .. "require credentials.service_account_json"
-          end
-          -- Cheap shape check; full JSON validation happens at runtime (and
-          -- fails closed). Skip when the value is a {vault://...} reference.
-          if type(entity.context_json) == "string" and entity.context_json ~= ""
-             and not entity.context_json:match("^%s*{") then
-            return nil, "context_json must be a JSON object (or a secret reference)"
-          end
-          return true
-        end,
     } },
   },
 }
@@ -293,18 +214,18 @@ return {
           } } },
         },
 
+        -- Only Kong's built-in entity checkers below -- no per-entity custom
+        -- validation function, because the plugin-streaming upload refuses a
+        -- schema that contains one. Two rules that used to live here needed
+        -- arbitrary Lua and so moved into handler.lua:
+        --   * deadline_ms >= timeout_ms is now CLAMPED at request time rather
+        --     than rejected, which is strictly better -- a deadline shorter
+        --     than one attempt's timeout is a typo, not an intent, and
+        --     self-correcting beats refusing to boot.
+        --   * profile 'generic' needing request_json_paths (or content_type
+        --     text) is checked once per request and fails closed with the same
+        --     message.
         entity_checks = {
-          { custom_entity_check = {
-              field_sources = { "timeout_ms", "deadline_ms" },
-              fn = function(entity)
-                if entity.deadline_ms and entity.timeout_ms
-                   and entity.deadline_ms < entity.timeout_ms then
-                  return nil, "deadline_ms must be >= timeout_ms"
-                end
-                return true
-              end,
-          } },
-
           { conditional = {
               if_field = "reidentify.strategy", if_match = { eq = "mapping_only" },
               then_field = "deidentify.token_format", then_match = { ne = "ENTITY_ONLY" },
@@ -315,18 +236,6 @@ return {
           { conditional = {
               if_field = "reidentify.strategy", if_match = { eq = "reidentify_text" },
               then_field = "deidentify.token_format", then_match = { eq = "VAULT_TOKEN" },
-          } },
-
-          { custom_entity_check = {
-              field_sources = { "profile", "request_json_paths", "content_type" },
-              fn = function(entity)
-                if entity.profile == "generic"
-                   and entity.content_type ~= "text"
-                   and (not entity.request_json_paths or #entity.request_json_paths == 0) then
-                  return nil, "profile 'generic' requires request_json_paths or content_type=text"
-                end
-                return true
-              end,
           } },
         },
     } },

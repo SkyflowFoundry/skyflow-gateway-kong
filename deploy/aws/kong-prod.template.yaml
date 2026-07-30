@@ -71,7 +71,6 @@ services:
           account_id: __SKYFLOW_ACCOUNT_ID__
           credentials:
             sts:
-              enabled: true
               service_account_id: __STS_SERVICE_ACCOUNT_ID__
               token_header: authorization
               expected_issuer: "__ENTRA_ISSUER__"
@@ -118,7 +117,6 @@ services:
           account_id: __SKYFLOW_ACCOUNT_ID__
           credentials:
             sts:
-              enabled: true
               service_account_id: __STS_SERVICE_ACCOUNT_ID__
               token_header: authorization
               expected_issuer: "__ENTRA_ISSUER__"

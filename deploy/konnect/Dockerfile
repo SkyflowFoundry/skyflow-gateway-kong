@@ -5,16 +5,32 @@
 # truth and streams config over the cluster connection, so a data plane that also
 # had KONG_DECLARATIVE_CONFIG set would refuse to start.
 #
-# What still has to be baked in: the plugin itself. Konnect distributes plugin
-# *configuration*, never plugin *code* -- "All plugin files must also be deployed
-# to each Kong Gateway Data Plane node." The schema is uploaded separately to the
-# control plane so Konnect can validate config for `skyflow-deidentify`:
+# The plugin is NOT baked in. Kong 3.15 can stream custom plugin CODE from the
+# control plane, so handler.lua and schema.lua are uploaded once and every data
+# plane receives them over the cluster connection:
 #
-#   POST /v2/control-planes/{cp}/core-entities/plugin-schemas
+#   POST /v2/control-planes/{cp}/core-entities/custom-plugins
+#     { "name": ..., "schema": <schema.lua>, "handler": <handler.lua> }
 #
-# The plugin is two self-contained files with no require() in schema.lua, which
-# is exactly what Konnect's custom-plugin constraints demand -- see
-# plugin/kong/plugins/skyflow-deidentify/schema.lua.
+# That replaces the old plugin-schemas endpoint, which carried only the schema
+# and required the code in the image. The two are mutually exclusive: uploading
+# custom-plugins fails while a plugin-schemas entry of the same name exists.
+#
+# `custom_plugin_streaming_enabled` is REQUIRED and defaults to off. Without it
+# the control plane reports issue P309 -- "streaming custom plugins have been
+# removed from the config and the data plane may be inoperable" -- and the node
+# silently serves its last good config, which for a privacy gateway means
+# proxying with no de-identification at all. Learned the hard way.
+#
+# KONG_PLUGINS must NOT name the streamed plugin. Listing it makes Kong demand
+# the code be installed locally at boot -- "skyflow-deidentify plugin is enabled
+# but not installed" -- and the node dies before it can ever receive the stream.
+# Streamed plugins are discovered from the control-plane config instead.
+#
+# The plugin still has to satisfy Konnect's custom-plugin constraints: no
+# require() in schema.lua, no per-entity custom validation function (the upload
+# substring-matches for those names, so even a comment mentioning them fails),
+# and no DAOs/migrations/extra modules.
 #
 # Cluster credentials, provider keys, and the control-plane endpoints all arrive
 # as environment variables at boot. This image carries no secrets and no IDs.

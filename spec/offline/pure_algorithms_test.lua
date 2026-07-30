@@ -138,35 +138,7 @@ eq(T.jwt_exp("mock-access-token"), 0, "jwt_exp 0 for non-JWT")
 eq(T.jwt_exp(nil), 0, "jwt_exp 0 for nil")
 eq(T.jwt_exp("a.!!!.c"), 0, "jwt_exp 0 for undecodable payload")
 
--- 11. layered ctx assembly: nested JSON base + flat layers, later layers win
-local base = { tenant = "acme", org = { id = "org_1", unit = "eng" }, pci = true, risk = 2 }
-local ctx, key = T.build_ctx(base, {
-  { ["org.unit"] = "payments", purpose = "agent-egress" },   -- static (dot-path nests)
-  { ["caller.user"] = "alice", tenant = "spoofed" },          -- client headers
-  { tenant = "acme", ["caller.route"] = "claude" },           -- trusted kong facts (last, win)
-})
-eq(ctx.org.id, "org_1", "build_ctx keeps nested base attr")
-eq(ctx.org.unit, "payments", "build_ctx dot-path overrides nested base")
-eq(ctx.caller.user, "alice", "build_ctx dot-path creates nested attrs")
-eq(ctx.caller.route, "claude", "build_ctx merges multiple layers")
-eq(ctx.tenant, "acme", "build_ctx later (trusted) layer wins over client layer")
-eq(ctx.pci, true, "build_ctx preserves boolean base values")
-eq(ctx.risk, 2, "build_ctx preserves numeric base values")
-eq(base.org.unit, "eng", "build_ctx never mutates the shared base (deep copy)")
-local _, key2 = T.build_ctx({ org = { unit = "payments", id = "org_1" }, tenant = "acme",
-                              pci = true, risk = 2, purpose = "agent-egress",
-                              caller = { user = "alice", route = "claude" } }, {})
-eq(key, key2, "canonical key is insertion-order independent")
-local _, key3 = T.build_ctx({ risk = "2" }, {})
-local _, key4 = T.build_ctx({ risk = 2 }, {})
-eq(key3 ~= key4, true, "canonical key distinguishes string vs number")
-local nctx, nkey = T.build_ctx(nil, { nil, nil })
-eq(nctx, nil, "build_ctx nil when no context configured")
-eq(nkey, "", "build_ctx empty key when no context")
-local ectx = T.build_ctx(nil, { { user = "" } })
-eq(ectx, nil, "build_ctx ignores empty-string values")
-
--- 12. Anthropic-native SSE re-emit: full event sequence, text + tool_use blocks
+-- 11. Anthropic-native SSE re-emit: full event sequence, text + tool_use blocks
 eq(T.is_anthropic_message({ type = "message", content = {} }), true, "is_anthropic_message true")
 eq(T.is_anthropic_message({ choices = {} }), false, "is_anthropic_message false for openai shape")
 local sse = T.anthropic_message_to_sse({
@@ -220,13 +192,7 @@ local redacted = T.anthropic_message_to_sse({
 })
 eq(redacted:find('"redacted_thinking"', 1, true) ~= nil, true, "redacted_thinking passed through")
 
--- 13. scope_from_roles: token-exchange body scope string
-eq(T.scope_from_roles({ "r1", "r2" }), "role:r1 role:r2", "scope_from_roles two roles")
-eq(T.scope_from_roles({ "only" }), "role:only", "scope_from_roles one role")
-eq(T.scope_from_roles({}), nil, "scope_from_roles empty -> nil")
-eq(T.scope_from_roles(nil), nil, "scope_from_roles nil -> nil")
-
--- 14. precheck_caller_token: which failures are the CALLER's (401) vs ours (502)
+-- 12. precheck_caller_token: which failures are the CALLER's (401) vs ours (502)
 --
 -- The harness stubs cjson.decode, so install a decoder good enough for the flat
 -- claim sets below. handler.lua resolves cjson.decode at call time, so swapping

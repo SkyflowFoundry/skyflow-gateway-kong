@@ -71,7 +71,6 @@ services:
           account_id: j58448d299cf4e42ac433948d9c70d94
           credentials:
             sts:
-              enabled: true
               service_account_id: mab1f43f916b4ba082b500e1ab5be59f
               token_header: authorization
               expected_issuer: "https://login.microsoftonline.com/5b772553-7aad-487a-91a9-3b93382ac28b/v2.0"
@@ -118,7 +117,6 @@ services:
           account_id: j58448d299cf4e42ac433948d9c70d94
           credentials:
             sts:
-              enabled: true
               service_account_id: mab1f43f916b4ba082b500e1ab5be59f
               token_header: authorization
               expected_issuer: "https://login.microsoftonline.com/5b772553-7aad-487a-91a9-3b93382ac28b/v2.0"

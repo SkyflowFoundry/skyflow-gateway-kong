@@ -10,16 +10,9 @@
 --   * response-> re-identify via `mapping_only` (pure, request-scoped map) OR
 --                `reidentify_text` (resolves real VAULT_TOKENs through Skyflow
 --                /v1/detect/reidentify/string -- works regardless of our map)
---   * auth    -> API key / static bearer token / service-account JWT (RS256
---                via Kong-bundled resty.openssl): mints and caches Skyflow
---                bearers per (SA, scope, ctx); supports scoped tokens
---                (credentials.role_ids) and context-aware authorization via a
---                `ctx` claim assembled in layers -- context_json (arbitrary
---                nested JSON base), context (static attrs), context_headers
---                (per-request, client-supplied), context_kong (gateway-derived
---                facts, trusted, merged last) -- so vault policies can
---                condition access on $ctx.<attr> of any shape.
--- Documented follow-ups (degrade safely until added):
+--   * auth    -> STS delegation only (RFC 8693): exchange the CALLER's IdP
+--                token for a short-lived Skyflow bearer whose `ctx` is their
+--                signed claims. The gateway holds NO Skyflow credential.
 --   * reidentify strategy `detokenize` (vault /detokenize API)
 --   * per-span concurrency, streaming `reassemble`
 -- See docs/contributing/skyflow-integration.md and docs/contributing/development.md.
@@ -32,12 +25,6 @@ local cjson = require "cjson.safe"
 -- the plugin still loads if the module path differs on a given build.
 local ok_gzip, kgzip = pcall(require, "kong.tools.gzip")
 local inflate_gzip = ok_gzip and kgzip and kgzip.inflate_gzip or nil
-
--- lua-resty-openssl ships with Kong Gateway (the core uses it). Load guarded so
--- the plugin still loads on a build without it -- SA-JWT auth then errors
--- cleanly at use time while api_key/token auth keeps working.
-local ok_pkey, openssl_pkey     = pcall(require, "resty.openssl.pkey")
-local ok_digest, openssl_digest = pcall(require, "resty.openssl.digest")
 
 local kong = kong
 local ngx  = ngx
@@ -235,90 +222,28 @@ local function jwt_exp(token)
   return tonumber(raw:match('"exp"%s*:%s*(%d+)')) or 0
 end
 
--- Deep-copy a JSON-derived table (no cycles by construction).
-local function deep_copy(v)
-  if type(v) ~= "table" then return v end
-  local out = {}
-  for k, x in pairs(v) do out[k] = deep_copy(x) end
-  return out
-end
 
--- Set a dot-delimited path into a nested table: ctx_set(t, "org.unit", "x")
--- -> t.org.unit = "x". Intermediate non-tables are replaced.
-local function ctx_set(tbl, path, value)
-  local parts = {}
-  for p in tostring(path):gmatch("[^%.]+") do parts[#parts + 1] = p end
-  if #parts == 0 then return end
-  local cur = tbl
-  for i = 1, #parts - 1 do
-    if type(cur[parts[i]]) ~= "table" then cur[parts[i]] = {} end
-    cur = cur[parts[i]]
-  end
-  cur[parts[#parts]] = value
-end
 
--- Deterministic serialization of an arbitrary JSON-shaped value: sorted keys,
--- type-tagged scalars (so "1" and 1 stay distinct). NOT valid JSON -- it only
--- keys the token cache, where any shape change must mint a fresh bearer.
-local function canonical_ctx_key(v, out)
-  out = out or {}
-  local t = type(v)
-  if t == "table" then
-    if #v > 0 then
-      out[#out + 1] = "["
-      for i = 1, #v do canonical_ctx_key(v[i], out); out[#out + 1] = "," end
-      out[#out + 1] = "]"
-    else
-      local keys = {}
-      for k in pairs(v) do keys[#keys + 1] = tostring(k) end
-      table.sort(keys)
-      out[#out + 1] = "{"
-      for _, k in ipairs(keys) do
-        out[#out + 1] = k .. "="
-        canonical_ctx_key(v[k], out)
-        out[#out + 1] = ","
-      end
-      out[#out + 1] = "}"
-    end
-  else
-    out[#out + 1] = t:sub(1, 1) .. ":" .. tostring(v)
-  end
-  return out
-end
 
--- Assemble the assertion's `ctx` claim. Skyflow accepts arbitrary JSON here
--- (policies traverse it as $ctx.a.b), so the claim is built in layers:
---   base   -- decoded credentials.context_json (any shape), deep-copied
---   layers -- flat attr(.path) -> value maps applied in order; LATER LAYERS
---             WIN, so callers must pass trusted (gateway-derived) maps after
---             client-supplied ones. Dot-delimited attrs nest.
--- Returns (ctx|nil, canonical_key); the key changes whenever the resolved
--- context does, so every distinct context mints a distinct bearer.
-local function build_ctx(base, layers)
-  local ctx = (type(base) == "table") and deep_copy(base) or {}
-  for _, layer in ipairs(layers or {}) do
-    if type(layer) == "table" then
-      for attr, v in pairs(layer) do
-        if v ~= nil and v ~= "" then ctx_set(ctx, attr, v) end
-      end
-    end
-  end
-  if next(ctx) == nil then return nil, "" end
-  return ctx, table.concat(canonical_ctx_key(ctx))
-end
 
--- Scoped-token role restriction: goes in the token-exchange BODY as `scope`
--- ("role:<id> role:<id>"), NOT in the signed assertion.
-local function scope_from_roles(role_ids)
-  if type(role_ids) ~= "table" or #role_ids == 0 then return nil end
-  local parts = {}
-  for _, r in ipairs(role_ids) do parts[#parts + 1] = "role:" .. r end
-  return table.concat(parts, " ")
-end
 
 --==========================================================================--
 -- Kong-coupled helpers
 --==========================================================================--
+
+-- The request-wide deadline, clamped so it can never be shorter than a single
+-- attempt's timeout. This used to be a schema entity check that REJECTED such a
+-- config; it moved here when custom validation functions had to leave schema.lua
+-- for Konnect plugin streaming. Clamping is the better behaviour anyway: a
+-- deadline below one timeout is a typo rather than an intent, and silently
+-- honouring the larger value beats refusing to load the config.
+local function request_deadline(conf)
+  local budget_ms = conf.deadline_ms or 0
+  if conf.timeout_ms and budget_ms < conf.timeout_ms then
+    budget_ms = conf.timeout_ms
+  end
+  return ngx.now() + (budget_ms / 1000)
+end
 
 local function base_url(conf)
   if conf.skyflow_base_url_override and conf.skyflow_base_url_override ~= "" then
@@ -328,100 +253,30 @@ local function base_url(conf)
 end
 
 --==========================================================================--
--- Service-account JWT auth (RS256 via Kong-bundled resty.openssl)
+-- Skyflow auth: STS delegation (RFC 8693) -- the only mechanism
 --
--- Assertion claims per the Skyflow contract: { iss=clientID, key=keyID,
--- aud=tokenURI, sub=clientID, exp=now+3600 } plus an optional `ctx` claim
--- (string or JSON object). Exchange: POST tokenURI with
--- { grant_type="urn:ietf:params:oauth:grant-type:jwt-bearer", assertion,
---   scope? } -> { accessToken, tokenType }. Bearers live ~60 min; the response
--- carries no expiry, so we decode the bearer's own exp claim.
+-- Exchange the caller's IdP token at Skyflow's STS endpoint for a short-lived
+-- bearer whose `ctx` IS their signed claims. POST token_uri with
+-- { grant_type="urn:ietf:params:oauth:grant-type:token-exchange",
+--   subject_token, subject_token_type, service_account_id } -> { accessToken }.
+-- The response carries no expiry, so we decode the bearer's own exp claim.
+--
+-- Note what is absent: no private key, no assertion signing, no gateway-held
+-- credential of any kind. Skyflow also IGNORES context supplied by the caller
+-- of an exchange, so there is no ctx to assemble here -- tenant/role/purpose
+-- belong in the IdP token, where they arrive signed.
 --==========================================================================--
 
 -- Per-worker caches. Keys change whenever the SA / roles / resolved ctx
 -- change, so config updates and per-caller contexts mint naturally. Bounded by
 -- wholesale reset -- simple, and a re-mint is cheap relative to eviction logic.
-local PKEY_CACHE = {}                    -- privateKey PEM -> parsed pkey
-local CTX_JSON_CACHE = {}                -- context_json string -> {ok=} | {err=}
 local TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 -- cache_key -> { token, exp }
 local TOKEN_CACHE_MAX = 256
-local JWT_HEADER_B64                     -- b64url of the fixed RS256 header
 
--- Parse credentials.context_json (arbitrary-shape ctx base), cached per
--- distinct config string. A non-object is a config error, surfaced as an auth
--- failure (fail closed) rather than silently minting context-less bearers.
-local function ctx_base(context_json)
-  if not context_json or context_json == "" then return nil end
-  local hit = CTX_JSON_CACHE[context_json]
-  if not hit then
-    local decoded = cjson.decode(context_json)
-    if type(decoded) == "table" then
-      hit = { ok = decoded }
-    else
-      hit = { err = "credentials.context_json is not a JSON object" }
-    end
-    CTX_JSON_CACHE[context_json] = hit
-  end
-  return hit.ok, hit.err
-end
 
--- Trusted, gateway-derived ctx sources (credentials.context_kong values).
--- These resolve via the PDK -- a client cannot spoof them -- so they are
--- merged LAST and win over header-supplied attributes.
-local KONG_CTX_SOURCES = {
-  consumer_id        = function() local c = kong.client.get_consumer(); return c and c.id end,
-  consumer_username  = function() local c = kong.client.get_consumer(); return c and c.username end,
-  consumer_custom_id = function() local c = kong.client.get_consumer(); return c and c.custom_id end,
-  route_name         = function() local r = kong.router.get_route(); return r and r.name end,
-  service_name       = function() local s = kong.router.get_service(); return s and s.name end,
-  client_ip          = function() return kong.client.get_forwarded_ip() end,
-}
 
--- Resolve an attr(.path) -> source-name map through KONG_CTX_SOURCES.
-local function resolve_kong_ctx(kong_map)
-  if type(kong_map) ~= "table" then return nil end
-  local out = {}
-  for attr, source in pairs(kong_map) do
-    local fn = KONG_CTX_SOURCES[source]
-    local ok, v = pcall(fn or function() end)
-    if ok and v ~= nil and v ~= "" then out[attr] = v end
-  end
-  return out
-end
 
--- Resolve an attr(.path) -> header-name map against the client request.
-local function resolve_header_ctx(header_map)
-  if type(header_map) ~= "table" then return nil end
-  local get_header = kong and kong.request and kong.request.get_header
-  if not get_header then return nil end
-  local out = {}
-  for attr, header in pairs(header_map) do
-    local v = get_header(header)
-    if v ~= nil and v ~= "" then out[attr] = v end
-  end
-  return out
-end
 
-local function sign_assertion(sa, claims)
-  if not (ok_pkey and ok_digest) then
-    return nil, "resty.openssl unavailable: cannot sign service-account JWT"
-  end
-  local pkey = PKEY_CACHE[sa.privateKey]
-  if not pkey then
-    local err
-    pkey, err = openssl_pkey.new(sa.privateKey)
-    if not pkey then return nil, "invalid service-account privateKey: " .. tostring(err) end
-    PKEY_CACHE[sa.privateKey] = pkey
-  end
-  JWT_HEADER_B64 = JWT_HEADER_B64 or b64url_encode('{"alg":"RS256","typ":"JWT"}')
-  local unsigned = JWT_HEADER_B64 .. "." .. b64url_encode(cjson.encode(claims))
-  local d, derr = openssl_digest.new("sha256")
-  if not d then return nil, "digest init failed: " .. tostring(derr) end
-  d:update(unsigned)
-  local sig, serr = pkey:sign(d)
-  if not sig then return nil, "RS256 sign failed: " .. tostring(serr) end
-  return unsigned .. "." .. b64url_encode(sig)
-end
 
 -- ============================ STS (Profile B) ============================
 -- Exchange the CALLER's IdP token for a Skyflow bearer (RFC 8693 delegation).
@@ -497,12 +352,21 @@ local function sts_bearer(conf, deadline)
 
   local header = sts.token_header
   if header == nil or header == "" then header = "authorization" end
-  local raw = kong.request.get_header(header)
+  -- Prefer the copy stashed during access. The request leg CLEARS the inbound
+  -- Authorization header so the caller's IdP token cannot egress to the model
+  -- provider, and kong.service.request.clear_header mutates the SAME nginx
+  -- request table that kong.request.get_header reads -- so by the response phase
+  -- the header is gone. Re-identification needs a bearer for the same caller, so
+  -- read the stash first and fall back to the header for the access-phase call
+  -- that populates it.
+  local ctxp = kong.ctx and kong.ctx.plugin
+  local raw = (ctxp and ctxp.caller_token) or kong.request.get_header(header)
   if not raw or raw == "" then
     return nil, "no caller identity token in '" .. header
                 .. "'; this gateway cannot assert an identity on your behalf",
            "identity"
   end
+  if ctxp then ctxp.caller_token = raw end
   local token = raw:match("^[Bb]earer%s+(.+)$") or raw
 
   local claims, perr, pkind = precheck_caller_token(token, sts)
@@ -573,102 +437,20 @@ local function sts_bearer(conf, deadline)
   return nil, "sts exchange failed: " .. tostring(last_err)
 end
 
--- Mint (or reuse) a Skyflow bearer for the configured service account.
--- Returns "Bearer <token>" or nil, err. The network hop happens at most once
--- per (SA, scope, ctx) per bearer lifetime per worker.
-local function sa_bearer(conf, deadline)
-  local c = conf.credentials
-  local sa = cjson.decode(c.service_account_json)
-  if type(sa) ~= "table" or not (sa.clientID and sa.keyID and sa.tokenURI and sa.privateKey) then
-    return nil, "service_account_json must be JSON with clientID, keyID, tokenURI, privateKey"
-  end
 
-  local base, berr = ctx_base(c.context_json)
-  if berr then return nil, berr end
-  -- Layer order matters: static config, then client headers, then trusted
-  -- gateway-derived facts last so a header can never override them.
-  local ctx, ctx_key = build_ctx(base, {
-    c.context,
-    resolve_header_ctx(c.context_headers),
-    resolve_kong_ctx(c.context_kong),
-  })
-  local scope = scope_from_roles(c.role_ids)
-  local cache_key = table.concat({ sa.clientID, sa.keyID, scope or "", ctx_key }, "\n")
-
-  local now = ngx.now()
-  local hit = TOKEN_CACHE[cache_key]
-  if hit and (hit.exp - (conf.token_skew_seconds or 300)) > now then
-    return "Bearer " .. hit.token
-  end
-
-  local claims = {
-    iss = sa.clientID, key = sa.keyID, aud = sa.tokenURI,
-    sub = sa.clientID, exp = math.floor(now) + 3600,
-  }
-  claims.ctx = ctx   -- omitted entirely when no context is configured
-
-  local assertion, aerr = sign_assertion(sa, claims)
-  if not assertion then return nil, aerr end
-
-  local body = cjson.encode({
-    grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
-    assertion  = assertion,
-    scope      = scope,
-  })
-
-  local attempts, last_err = (conf.retries or 0) + 1, nil
-  for i = 1, attempts do
-    if deadline and ngx.now() >= deadline then return nil, "deadline exceeded minting SA bearer" end
-    local httpc = http.new()
-    httpc:set_timeout(conf.timeout_ms)
-    local res, err = httpc:request_uri(sa.tokenURI, {
-      method = "POST", body = body,
-      headers = { ["Content-Type"] = "application/json" },
-      ssl_verify = true,
-      keepalive_timeout = conf.keepalive_idle_ms, keepalive_pool = conf.keepalive_pool_size,
-    })
-    if res and res.status == 200 then
-      local data = cjson.decode(res.body)
-      local token = data and data.accessToken
-      if not token or token == "" then return nil, "token endpoint returned no accessToken" end
-      local exp = jwt_exp(token)
-      if exp == 0 then exp = math.floor(now) + 3600 end   -- documented default: 60 min
-      if TOKEN_CACHE_N >= TOKEN_CACHE_MAX then TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 end
-      if not TOKEN_CACHE[cache_key] then TOKEN_CACHE_N = TOKEN_CACHE_N + 1 end
-      TOKEN_CACHE[cache_key] = { token = token, exp = exp }
-      local nctx = 0
-      if ctx then for _ in pairs(ctx) do nctx = nctx + 1 end end
-      kong.log.info("skyflow: minted SA bearer for ", sa.clientName or sa.clientID,
-                    " (ctx attrs=", nctx, scope and ", scoped" or "",
-                    ", ttl=", math.floor(exp - now), "s)")
-      return "Bearer " .. token
-    elseif res and res.status >= 400 and res.status < 500 and res.status ~= 429 then
-      -- 4xx (bad assertion / enforceContextID unmet / malformed scope): the
-      -- endpoint's message pinpoints the cause; retrying can't help.
-      local detail = res.body and tostring(res.body):sub(1, 200) or ""
-      return nil, "token endpoint status " .. res.status .. " (not retried): " .. detail
-    else
-      last_err = res and ("token endpoint status " .. res.status) or ("transport: " .. tostring(err))
-      if i < attempts and (not deadline or ngx.now() < deadline) then ngx.sleep(0.1) end
-    end
-  end
-  return nil, last_err or "SA token exchange failed"
-end
-
--- Resolve the Authorization header value for the configured credential.
--- Precedence: api_key > token > service_account_json (schema enforces
--- only_one_of, so precedence only matters defensively).
+-- Resolve the Authorization header value for this request.
+--
+-- There is exactly one way to obtain it: exchange the CALLER's IdP token at
+-- Skyflow's STS endpoint. This gateway holds no Skyflow credential -- no API
+-- key, no service account, no private key -- so compromising the host yields no
+-- vault access, and the identity Skyflow audits is the human's, IdP-signed,
+-- rather than something the gateway asserted about them.
+--
+-- Kept as a one-line indirection rather than calling sts_bearer directly: every
+-- call site wants "the Authorization value, whatever the mechanism", and that is
+-- the seam a second mechanism would reappear at.
 local function auth_value(conf, deadline)
-  local c = conf.credentials
-  -- STS first when enabled: the caller's own identity is the strongest
-  -- credential available, and it means no Skyflow key is used at all.
-  if c.sts and c.sts.enabled then return sts_bearer(conf, deadline) end
-  if c.api_key and c.api_key ~= "" then return "Bearer " .. c.api_key end
-  if c.token and c.token ~= "" then return "Bearer " .. c.token end
-  if c.service_account_json and c.service_account_json ~= "" then
-    return sa_bearer(conf, deadline)
-  end
-  return nil, "no Skyflow credential configured"
+  return sts_bearer(conf, deadline)
 end
 
 -- POST JSON to Skyflow with a per-attempt timeout and deadline-bounded retries.
@@ -1035,7 +817,7 @@ local function run_access(conf, ctx)
 
   -- The deadline covers SA bearer minting too, so a hung token endpoint can't
   -- stall the request beyond deadline_ms.
-  local deadline = ngx.now() + (conf.deadline_ms / 1000)
+  local deadline = request_deadline(conf)
   local authz, aerr, akind = auth_value(conf, deadline)
   if not authz then
     -- Auth failures ALWAYS fail closed -- never forward raw PII -- regardless of
@@ -1070,6 +852,12 @@ local function run_access(conf, ctx)
   -- design.) Nothing inward needs it: internal routes are guarded by source IP,
   -- and the STS bearer we minted travels in our own request to Skyflow.
   if kong.service and kong.service.request and kong.service.request.clear_header then
+    -- keep a copy for the response leg BEFORE clearing: this call mutates the
+    -- shared nginx request headers, not just what goes upstream
+    local sts = conf.credentials.sts
+    local hdr = (sts and sts.token_header) or "authorization"
+    local raw = kong.request.get_header(hdr)
+    if raw and raw ~= "" then ctx.caller_token = raw end
     kong.service.request.clear_header("Authorization")
   end
 
@@ -1080,6 +868,18 @@ local function run_access(conf, ctx)
   -- hangs or gets JSON. The /probe route (reidentify disabled) is exactly that
   -- case, so it must keep streaming straight through -- showing the caller the
   -- tokenized SSE the provider produced, which is that route's whole purpose.
+  -- Config rule that used to be a schema entity check (see schema.lua on why it
+  -- moved). A `generic` profile with neither JSON paths nor text content type
+  -- has nothing to look at, so it would de-identify precisely nothing while
+  -- reporting success -- the exact silent-passthrough this plugin must not do.
+  if conf.profile == "generic" and conf.content_type ~= "text"
+     and (not conf.request_json_paths or #conf.request_json_paths == 0) then
+    kong.log.err("skyflow: profile 'generic' requires request_json_paths or content_type=text")
+    return { deny = true, status = 500,
+             body = { message = "request blocked: gateway misconfigured "
+                                .. "(profile 'generic' requires request_json_paths)" } }
+  end
+
   local will_reemit = conf.reidentify.enabled
                       and conf.reidentify.streaming ~= "passthrough"
 
@@ -1406,7 +1206,7 @@ function SkyflowDeidentify:response(conf)
   -- (deadline first: SA bearer minting is itself deadline-bounded).
   local authz, deadline
   if strat == "reidentify_text" then
-    deadline = ngx.now() + (conf.deadline_ms / 1000)
+    deadline = request_deadline(conf)
     local aerr, akind
     authz, aerr, akind = auth_value(conf, deadline)
     if not authz then
@@ -1596,11 +1396,6 @@ SkyflowDeidentify._test = {
   b64url_encode     = b64url_encode,
   b64url_decode     = b64url_decode,
   jwt_exp           = jwt_exp,
-  build_ctx         = build_ctx,
-  ctx_set           = ctx_set,
-  deep_copy         = deep_copy,
-  canonical_ctx_key = canonical_ctx_key,
-  scope_from_roles  = scope_from_roles,
   precheck_caller_token = precheck_caller_token,
 }
 
