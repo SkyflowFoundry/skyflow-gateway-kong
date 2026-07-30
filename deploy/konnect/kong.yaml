@@ -53,9 +53,28 @@ services:
         config:
           access:
             - |
+              -- Route to a provider by the body's `model`. Kong's router cannot
+              -- match on a body, and free ai-proxy pins one provider per plugin
+              -- instance, so the choice has to happen in Lua and the two
+              -- ai-proxy instances have to live on separate internal routes.
+              --
+              -- Strips whatever the FIRST path segment is rather than matching
+              -- "^/claude": the old pattern hard-coded one route, so this same
+              -- snippet on /probe produced /_up_anthropic/probe/v1/messages and
+              -- 404'd -- which is why /probe used to be Anthropic-only.
               local body = kong.request.get_body()
-              local model = (body and body.model) or ""
-              local tail = kong.request.get_path():gsub("^/claude[a-z-]*", "")
+              local model = body and body.model
+              if not model or model == "" then
+                -- get_body() returns nil once the body exceeds
+                -- client_body_buffer_size, and the old code then defaulted to
+                -- Anthropic. A gpt-* request silently answered by Claude is
+                -- worse than a clear error.
+                kong.log.err("kong-ai-gateway: no model in body; cannot choose a provider")
+                return kong.response.exit(400, {
+                  message = "request blocked: no `model` in the request body, "
+                            .. "so no provider could be selected" })
+              end
+              local tail = kong.request.get_path():gsub("^/[^/]+", "")
               local upstream = model:find("^gpt") and "/_up_openai" or "/_up_anthropic"
               kong.service.request.set_path(upstream .. tail)
               kong.log.info("kong-ai-gateway: model=", model, " -> ", upstream)
@@ -108,6 +127,35 @@ services:
         strip_path: true
         protocols: ["http", "https"]
     plugins:
+      - name: pre-function
+        config:
+          access:
+            - |
+              -- Route to a provider by the body's `model`. Kong's router cannot
+              -- match on a body, and free ai-proxy pins one provider per plugin
+              -- instance, so the choice has to happen in Lua and the two
+              -- ai-proxy instances have to live on separate internal routes.
+              --
+              -- Strips whatever the FIRST path segment is rather than matching
+              -- "^/claude": the old pattern hard-coded one route, so this same
+              -- snippet on /probe produced /_up_anthropic/probe/v1/messages and
+              -- 404'd -- which is why /probe used to be Anthropic-only.
+              local body = kong.request.get_body()
+              local model = body and body.model
+              if not model or model == "" then
+                -- get_body() returns nil once the body exceeds
+                -- client_body_buffer_size, and the old code then defaulted to
+                -- Anthropic. A gpt-* request silently answered by Claude is
+                -- worse than a clear error.
+                kong.log.err("kong-ai-gateway: no model in body; cannot choose a provider")
+                return kong.response.exit(400, {
+                  message = "request blocked: no `model` in the request body, "
+                            .. "so no provider could be selected" })
+              end
+              local tail = kong.request.get_path():gsub("^/[^/]+", "")
+              local upstream = model:find("^gpt") and "/_up_openai" or "/_up_anthropic"
+              kong.service.request.set_path(upstream .. tail)
+              kong.log.info("kong-ai-gateway: model=", model, " -> ", upstream)
       - name: file-log
         config: { path: /dev/stdout }
       - name: skyflow-deidentify
