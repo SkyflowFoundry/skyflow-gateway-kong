@@ -81,6 +81,11 @@ services:
           deidentify:
             entities: [NAME, NAME_GIVEN, NAME_FAMILY, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB]
             token_format: VAULT_TOKEN
+          media:
+            mode: deidentify
+            unsupported: strip
+            masking_method: BLACKBOX
+            redact_object_types: [FACE, SIGNATURE]
           reidentify:
             enabled: true
             strategy: reidentify_text
@@ -89,7 +94,7 @@ services:
             # vault tokens, never raw PII.
           on_skyflow_error: deny
           timeout_ms: 15000
-          deadline_ms: 30000
+          deadline_ms: 60000
 
   # -------------------------------------------------------------------- probe
   # Same de-identification with re-identify OFF, so the response shows the
@@ -121,10 +126,15 @@ services:
           deidentify:
             entities: [NAME, NAME_GIVEN, NAME_FAMILY, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB]
             token_format: VAULT_TOKEN
+          media:
+            mode: deidentify
+            unsupported: strip
+            masking_method: BLACKBOX
+            redact_object_types: [FACE, SIGNATURE]
           reidentify: { enabled: false }
           on_skyflow_error: deny
           timeout_ms: 15000
-          deadline_ms: 30000
+          deadline_ms: 60000
 
   # ------------------------------------------------------- internal upstreams
   # Reachable only from the nested proxy hop (127.0.0.1). An external request
