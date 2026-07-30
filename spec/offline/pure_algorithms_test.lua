@@ -250,5 +250,42 @@ eq(type(pc('{"iss":"' .. ISS .. '","aud":["x","' .. AUD .. '"],"exp":100}')), "t
 eq(type(T.precheck_caller_token(jwt('{"iss":"https://anything/","exp":100}'), {})), "table",
    "unconfigured issuer/audience checks are skipped")
 
+-- 13. inject_token_preamble: every system-prompt shape the profiles use.
+-- The model must be told what [NAME_a1b2c3] IS, or it editorialises about
+-- redaction instead of using the placeholder the gateway can resolve.
+local PRE = "PREAMBLE"
+
+local d1 = { messages = {} }
+T.inject_token_preamble(d1, PRE, "anthropic")
+eq(d1.system, PRE, "anthropic: absent system -> preamble becomes it")
+
+local d2 = { system = "you are helpful", messages = {} }
+T.inject_token_preamble(d2, PRE, "anthropic")
+eq(d2.system, PRE .. "\n\nyou are helpful", "anthropic: string system -> prepended")
+
+local d3 = { system = { { type = "text", text = "caller block" } }, messages = {} }
+T.inject_token_preamble(d3, PRE, "anthropic")
+eq(#d3.system, 2, "anthropic: block array gains one block")
+eq(d3.system[1].text, PRE, "anthropic: preamble is FIRST")
+eq(d3.system[2].text, "caller block", "anthropic: caller block preserved after it")
+
+local d4 = { messages = { { role = "user", content = "hi" } } }
+T.inject_token_preamble(d4, PRE, "openai")
+eq(d4.messages[1].role, "system", "openai: system message inserted at the front")
+eq(d4.messages[1].content, PRE, "openai: carries the preamble")
+eq(d4.messages[2].role, "user", "openai: user message still second")
+
+local d5 = { messages = { { role = "system", content = "be terse" },
+                          { role = "user", content = "hi" } } }
+T.inject_token_preamble(d5, PRE, "openai")
+eq(#d5.messages, 2, "openai: existing system message is NOT duplicated")
+eq(d5.messages[1].content, PRE .. "\n\nbe terse", "openai: prepended to the existing system")
+
+-- the instruction that keeps re-identification working
+eq(T.DEFAULT_TOKEN_PREAMBLE:find("square brackets", 1, true) ~= nil, true,
+   "default preamble tells the model to keep the brackets")
+eq(T.DEFAULT_TOKEN_PREAMBLE:find("Do not remark on the redaction", 1, true) ~= nil, true,
+   "default preamble forbids editorialising about redaction")
+
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)

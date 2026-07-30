@@ -136,6 +136,19 @@ local deidentify = {
     { restrict_regex = { type = "array", elements = { type = "string" }, default = {} } },
     { shift_dates = shift_dates },
     { batch_mode = { type = "string", one_of = { "per_span", "joined" }, default = "per_span" } },
+    -- Explain the placeholders to the model. On by default: a model that has not
+    -- been told what [NAME_a1b2c3] is tends to editorialise about redaction
+    -- ("all names have been removed, so I cannot provide those details") instead
+    -- of just using the placeholder -- which wastes a token the gateway would
+    -- happily have re-identified on the way back. Set enabled=false to send the
+    -- caller's prompt untouched, or `text` to replace the wording entirely.
+    { token_preamble = {
+        type = "record",
+        fields = {
+          { enabled = { type = "boolean", default = true } },
+          { text    = { type = "string" } },
+        },
+    } },
   },
 }
 

@@ -237,6 +237,66 @@ end
 -- for Konnect plugin streaming. Clamping is the better behaviour anyway: a
 -- deadline below one timeout is a typo rather than an intent, and silently
 -- honouring the larger value beats refusing to load the config.
+-- Tell the model what the placeholders ARE.
+--
+-- Without this, a model handed `[NAME_xFaTgtN]` frequently editorialises about
+-- it -- "all names have been redacted from this document, so I cannot provide
+-- those details" -- or apologises, or substitutes "[redacted]". That answer is
+-- useless twice over: the user wanted the content, and the gateway had a
+-- perfectly good token it could have re-identified on the way back.
+--
+-- Injected AFTER de-identification on purpose: the preamble carries no PII, so
+-- scanning it would spend a Detect call and consume the max_spans budget for
+-- nothing. It is also prepended per request rather than persisted, so it cannot
+-- accumulate across turns.
+--
+-- The "reproduce them exactly, including the brackets" line is load-bearing.
+-- Re-identification resolves a token by matching it; a model that rewrites
+-- `[NAME_xFaTgtN]` as `NAME_xFaTgtN` or `**[NAME_xFaTgtN]**` can defeat the
+-- lookup, and the caller then sees a token instead of the real value.
+local DEFAULT_TOKEN_PREAMBLE =
+  "Some values in this conversation have been replaced with privacy-preserving "
+  .. "placeholders that look like [NAME_a1b2c3], [EMAIL_ADDRESS_d4e5f6] or "
+  .. "[ACCOUNT_NUMBER_g7h8i9].\n\n"
+  .. "Treat each placeholder as the real value it stands for. They are stable: "
+  .. "the same placeholder always refers to the same person or thing, so you can "
+  .. "compare, group and reason about them normally.\n\n"
+  .. "When you refer to one, reproduce it exactly as written, including the "
+  .. "square brackets. Do not translate, shorten, reformat, emphasise or "
+  .. "pluralise a placeholder.\n\n"
+  .. "Do not remark on the redaction, apologise for it, or say information is "
+  .. "missing or unavailable -- nothing is missing. Do not guess or invent what a "
+  .. "placeholder might stand for. Simply answer the request, using the "
+  .. "placeholders where you would have used the underlying values."
+
+-- Prepend the preamble to whatever system prompt the caller already sent,
+-- handling every shape the two profiles use: absent, a plain string, or an
+-- Anthropic array of content blocks.
+local function inject_token_preamble(doc, text, profile)
+  if profile == "openai" or profile == "mcp" then
+    if type(doc.messages) ~= "table" then return end
+    local first = doc.messages[1]
+    if type(first) == "table" and first.role == "system" and type(first.content) == "string" then
+      first.content = text .. "\n\n" .. first.content
+    else
+      table.insert(doc.messages, 1, { role = "system", content = text })
+    end
+    return
+  end
+
+  -- anthropic / generic: top-level `system`
+  local sys = doc.system
+  if sys == nil then
+    doc.system = text
+  elseif type(sys) == "string" then
+    doc.system = text .. "\n\n" .. sys
+  elseif type(sys) == "table" then
+    -- array of content blocks; a leading text block keeps cache_control intact
+    -- on the caller's own blocks, which matters for prompt caching
+    table.insert(sys, 1, { type = "text", text = text })
+  end
+end
+
 local function request_deadline(conf)
   local budget_ms = conf.deadline_ms or 0
   if conf.timeout_ms and budget_ms < conf.timeout_ms then
@@ -997,6 +1057,13 @@ local function run_access(conf, ctx)
     local newbody
     if json_mode then
       for _, span in ipairs(spans) do span.parent[span.key] = span.processed end
+      -- placeholders now exist in the body, so explain them to the model
+      local pre = conf.deidentify.token_preamble
+      if pre == nil or pre.enabled ~= false then
+        local text = (pre and pre.text ~= nil and pre.text ~= "" and pre.text)
+                     or DEFAULT_TOKEN_PREAMBLE
+        inject_token_preamble(doc, text, conf.profile)
+      end
       -- Re-identification must buffer the whole response, which is impossible over
       -- a streamed (SSE) response: a vault token like [NAME_xjv74g] gets split
       -- across chunks and can't be matched. So force the upstream call
@@ -1397,6 +1464,8 @@ SkyflowDeidentify._test = {
   b64url_decode     = b64url_decode,
   jwt_exp           = jwt_exp,
   precheck_caller_token = precheck_caller_token,
+  inject_token_preamble = inject_token_preamble,
+  DEFAULT_TOKEN_PREAMBLE = DEFAULT_TOKEN_PREAMBLE,
 }
 
 return SkyflowDeidentify
