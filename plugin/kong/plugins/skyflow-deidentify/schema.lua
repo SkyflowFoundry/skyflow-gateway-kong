@@ -149,6 +149,53 @@ local credentials = {
   },
 }
 
+-- Binary attachments (image / document content blocks). The text path cannot
+-- touch base64 bytes, so without this they reach the provider unmodified.
+--
+--   mode=deidentify (default) -- send the file to Detect's V2 file API and
+--     swap in the redacted bytes. Verified for png/jpg/gif/bmp/tif/pdf.
+--   mode=strip        -- replace every attachment with a text marker
+--   mode=block        -- refuse any request carrying an attachment
+--   mode=passthrough  -- forward untouched (explicit opt-out; NOT the default,
+--                        because silently forwarding what cannot be inspected
+--                        is the one behaviour this plugin should never have)
+--
+-- `unsupported` covers formats Detect cannot process at all -- webp is the
+-- notable one, since Anthropic accepts it and Detect does not -- plus URL and
+-- file_id sources whose bytes the gateway never sees.
+local MEDIA_MODES        = { "deidentify", "strip", "block", "passthrough" }
+local UNSUPPORTED_MODES  = { "strip", "block" }
+local MASKING_METHODS    = { "BLACKBOX", "BLUR" }
+local PDF_MODES          = { "OCR", "TEXT_LAYER" }
+
+local media = {
+  type = "record",
+  fields = {
+    { mode = { type = "string", one_of = MEDIA_MODES, default = "deidentify" } },
+    { unsupported = { type = "string", one_of = UNSUPPORTED_MODES, default = "strip" } },
+    { masking_method = { type = "string", one_of = MASKING_METHODS, default = "BLACKBOX" } },
+    -- Entity scope for attachments. Empty = ALL, which is intentionally
+    -- broader than deidentify.entities: an image cannot be skimmed before it
+    -- egresses, and ALL measurably detects more (6 vs 4 on a test card image).
+    { entities = { type = "array", elements = { type = "string" }, default = {} } },
+    -- Non-text objects to redact. MUST be specific types -- `ALL` blacks out
+    -- every detected object including plain text runs, so the provider gets a
+    -- solid black rectangle. FACE+SIGNATURE keeps the image legible while
+    -- covering what entity detection cannot see.
+    { redact_object_types = { type = "array",
+                              elements = { type = "string",
+                                           one_of = { "FACE", "SIGNATURE", "LOGO", "LICENSE_PLATE" } },
+                              default = { "FACE", "SIGNATURE" } } },
+    -- OCR rasterizes (right for scans); TEXT_LAYER edits the PDF's text layer
+    -- and keeps it selectable.
+    { pdf_processing_mode = { type = "string", one_of = PDF_MODES, default = "OCR" } },
+    { poll_interval_ms = { type = "integer", default = 500, between = { 100, 5000 } } },
+    -- Guard on base64 length. A PDF takes ~10s, so a large attachment can eat
+    -- the whole request deadline; refuse early rather than time out mid-flight.
+    { max_file_bytes = { type = "integer", default = 8388608, between = { 0, 67108864 } } },
+  },
+}
+
 local shift_dates = {
   type = "record",
   fields = {
@@ -222,6 +269,7 @@ return {
 
           ----------------------------------------------------------------- behavior
           { deidentify = deidentify },
+          { media = media },
           { reidentify = reidentify },
 
           ----------------------------------------------------------------- resilience

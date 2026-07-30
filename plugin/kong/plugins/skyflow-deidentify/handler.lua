@@ -709,6 +709,221 @@ local function lower_list(t)
 end
 
 -- De-identify one text -> processed_text, entities[] (or nil, err).
+--==========================================================================--
+-- Binary attachments (images, PDFs)
+--
+-- The text path rewrites strings; an `image`/`document` content block carries
+-- base64 bytes that no string API can touch, so those attachments reached the
+-- provider unmodified. This closes that gap using Detect's **V2** file API,
+-- which takes base64 in JSON (no multipart) and returns a redacted file --
+-- exactly the shape an Anthropic block already gives us.
+--
+-- Verified against a live vault: a card image and a patient-intake PDF both
+-- came back with every entity blacked out, and re-scanning the OUTPUT found
+-- zero entities where the originals found six. Latency: images <1-3s, PDF ~10s.
+--
+-- Deliberate scoping:
+--   * V2 is used ONLY here. Text stays on V1 -- it is tested and deployed, and
+--     V2's text path would need per-entity `destination` values for
+--     VAULT_TOKEN, which is a separate migration.
+--   * Redaction is burned into pixels, so unlike text it is ONE-WAY: there is
+--     nothing to re-identify on the response leg.
+--   * ENTITY_UNIQUE_COUNTER (not VAULT_TOKEN) is used for files, which avoids
+--     V2's destination requirement. Consequence: the original is not stored in
+--     the vault, so there is no authorized-retrieval path for the unredacted
+--     file yet. Vault-backed originals are a follow-up.
+
+-- Anthropic media_type -> Detect V2 `dataFormat`. NOTE the enum is lowercase
+-- here while every other V2 enum is SCREAMING_SNAKE ("PNG" is rejected).
+-- webp is intentionally absent: Anthropic accepts it, Detect does not support
+-- it, so it can never be de-identified -- it falls to the unsupported policy.
+local MEDIA_FORMATS = {
+  ["image/png"]  = "png",
+  ["image/jpeg"] = "jpg",
+  ["image/gif"]  = "gif",
+  ["image/bmp"]  = "bmp",
+  ["image/tiff"] = "tif",
+  ["application/pdf"] = "pdf",
+}
+
+-- Collect every base64 attachment block, including ones nested in tool_result
+-- content (an agent reading a file produces exactly that).
+local function collect_media(data)
+  local out = {}
+  local function walk(blocks)
+    if type(blocks) ~= "table" then return end
+    for _, block in ipairs(blocks) do
+      if type(block) == "table" then
+        local t = block.type
+        if t == "image" or t == "document" then
+          out[#out + 1] = block
+        elseif type(block.content) == "table" then
+          walk(block.content)   -- tool_result carrying attachments
+        end
+      end
+    end
+  end
+  for _, msg in ipairs(data.messages or {}) do
+    if type(msg) == "table" and type(msg.content) == "table" then walk(msg.content) end
+  end
+  return out
+end
+
+-- Replace an attachment with a text marker so the turn still makes sense.
+local function strip_media(block, why)
+  for k in pairs(block) do block[k] = nil end
+  block.type = "text"
+  block.text = "[attachment removed before egress: " .. why .. "]"
+end
+
+-- Submit one file and poll to completion. Returns redacted base64, entity
+-- count. Bounded by the request deadline; a timeout is an error, never a pass.
+local function deidentify_file(conf, authz, b64, fmt, deadline)
+  local m = conf.media or {}
+  -- Attachment entity scope defaults to ALL, deliberately BROADER than the text
+  -- path's list. Measured: the 8-entity text list found 4 entities in a card
+  -- image where ALL found 6 (it missed CREDIT_CARD_EXPIRATION and more) -- and
+  -- unlike a text span, nobody eyeballs an image before it egresses. Set
+  -- media.entities to narrow it.
+  local entities = {}
+  for _, e in ipairs((m.entities and #m.entities > 0) and m.entities or {}) do
+    entities[#entities + 1] = { entityType = e:upper(),
+                                deidentificationType = "ENTITY_UNIQUE_COUNTER" }
+  end
+  if #entities == 0 then
+    entities[1] = { entityType = "ALL", deidentificationType = "ENTITY_UNIQUE_COUNTER" }
+  end
+
+  local media_cfg = {
+    -- BOTH fields are required once an image block exists: an absent
+    -- outputProcessedImage is treated as false (not the documented true) and
+    -- an absent maskingMethod defaults to NONE, which the API then refuses.
+    image = { outputProcessedImage = true,
+              maskingMethod = m.masking_method or "BLACKBOX" },
+  }
+  if fmt == "pdf" then
+    media_cfg.document = { pdf = { processingMode = m.pdf_processing_mode or "OCR" } }
+  end
+
+  local detect = { entities = entities, returnEntities = "ALL" }
+  -- Non-text objects. MUST be specific types, never `ALL`: measured, ALL/REDACT
+  -- blacks out every detected object including ordinary text runs, so the
+  -- provider receives a solid black rectangle -- protective but useless, and it
+  -- also collapses the reported entity count to 1. FACE+SIGNATURE gives full
+  -- PII text redaction (6/6 entities) AND face coverage, leaving labels and
+  -- non-sensitive content readable.
+  local obj_types = m.redact_object_types
+  if obj_types and #obj_types > 0 then
+    local objs = {}
+    for _, t in ipairs(obj_types) do
+      objs[#objs + 1] = { entityType = t, deidentificationType = "REDACT" }
+    end
+    detect.objectEntities = objs
+  end
+
+  local body = cjson.encode({
+    dataSource = "BASE64", value = b64, dataFormat = fmt,
+    configuration = { vaultId = conf.vault_id, detect = detect, media = media_cfg },
+  })
+
+  local httpc = http.new()
+  httpc:set_timeout(conf.timeout_ms)
+  local headers = { ["Authorization"] = authz, ["Content-Type"] = "application/json" }
+  if conf.account_id and conf.account_id ~= "" then
+    headers["X-SKYFLOW-ACCOUNT-ID"] = conf.account_id
+  end
+
+  local res, err = httpc:request_uri(base_url(conf) .. "/v2/detect/deidentify/file",
+    { method = "POST", body = body, headers = headers, ssl_verify = true })
+  if not res then return nil, nil, "submit failed: " .. tostring(err) end
+  if res.status ~= 200 then
+    return nil, nil, "submit HTTP " .. res.status .. " " .. string.sub(res.body or "", 1, 160)
+  end
+  local run_id = (cjson.decode(res.body) or {}).runId
+  if not run_id then return nil, nil, "no runId in submit response" end
+
+  local poll_url = base_url(conf) .. "/v2/detect/runs/" .. run_id
+                   .. "?vaultId=" .. conf.vault_id
+  local interval = (m.poll_interval_ms or 500) / 1000
+  while true do
+    if deadline and ngx.now() >= deadline then
+      return nil, nil, "deadline exceeded while de-identifying attachment"
+    end
+    ngx.sleep(interval)
+    local p = http.new()
+    p:set_timeout(conf.timeout_ms)
+    local pr, perr = p:request_uri(poll_url, { method = "GET", headers = headers, ssl_verify = true })
+    if not pr then return nil, nil, "poll failed: " .. tostring(perr) end
+    if pr.status ~= 200 then
+      return nil, nil, "poll HTTP " .. pr.status .. " " .. string.sub(pr.body or "", 1, 160)
+    end
+    local run = cjson.decode(pr.body) or {}
+    if run.status == "SUCCESS" then
+      local redacted, n_entities
+      for _, o in ipairs(run.output or {}) do
+        if o.processedFileType == "REDACTED_FILE" and o.processedFile then
+          redacted = o.processedFile
+        elseif o.processedFileType == "ENTITIES" and o.processedFile then
+          -- detections live in this attachment, not the top-level `entities`
+          -- array (which comes back empty for files)
+          local decoded = b64url_decode((o.processedFile:gsub("+", "-"):gsub("/", "_")))
+          local list = decoded and cjson.decode(decoded)
+          if type(list) == "table" then n_entities = #list end
+        end
+      end
+      if not redacted then return nil, nil, "run succeeded with no REDACTED_FILE output" end
+      return redacted, n_entities, nil
+    elseif run.status == "FAILED" then
+      return nil, nil, "detect run failed: " .. tostring(run.message)
+    end
+  end
+end
+
+-- Apply the media policy to every attachment in the request.
+-- Returns processed count, stripped count, or nil+err when failing closed.
+local function process_media(conf, authz, data, deadline)
+  local m = conf.media or {}
+  local mode = m.mode or "deidentify"
+  if mode == "passthrough" then return 0, 0 end
+
+  local blocks = collect_media(data)
+  if #blocks == 0 then return 0, 0 end
+
+  local processed, stripped = 0, 0
+  for _, block in ipairs(blocks) do
+    local src = block.source or {}
+    local fmt = MEDIA_FORMATS[src.media_type or ""]
+    local unsupported =
+      (src.type ~= "base64") and ("source type '" .. tostring(src.type) .. "' cannot be inspected")
+      or (not fmt) and ("format " .. tostring(src.media_type) .. " is not supported for de-identification")
+      or nil
+
+    if mode == "strip" then
+      strip_media(block, "policy: attachments stripped")
+      stripped = stripped + 1
+    elseif unsupported then
+      -- Never forward something we could not inspect.
+      if (m.unsupported or "strip") == "block" then return nil, nil, unsupported end
+      strip_media(block, unsupported)
+      stripped = stripped + 1
+    elseif mode == "block" then
+      return nil, nil, "policy: attachments are not permitted"
+    else
+      local size = #(src.data or "")
+      if m.max_file_bytes and m.max_file_bytes > 0 and size > m.max_file_bytes then
+        return nil, nil, "attachment exceeds max_file_bytes (" .. size .. " base64 bytes)"
+      end
+      local redacted, n, err = deidentify_file(conf, authz, src.data, fmt, deadline)
+      if not redacted then return nil, nil, err end
+      src.data = redacted
+      processed = processed + 1
+      kong.log.info("skyflow: de-identified ", fmt, " attachment (",
+                    n or "?", " entities redacted)")
+    end
+  end
+  return processed, stripped
+end
+
 local function deidentify_text(conf, authz, text, deadline)
   local d = conf.deidentify
   local payload = {
@@ -833,7 +1048,43 @@ local function run_access(conf, ctx)
   else
     spans = { { whole = true, text = raw } }
   end
-  if #spans == 0 then return { ok = true } end
+
+  -- Binary attachments first: they are the one payload shape the text path
+  -- cannot touch, and a redacted image changes `doc`, so this must happen
+  -- before the body is re-encoded. Runs even when there are no text spans --
+  -- an image-only turn still needs protecting.
+  local media_processed, media_stripped = 0, 0
+  if json_mode then
+    local media_err
+    media_processed, media_stripped, media_err = process_media(conf, authz, doc, deadline)
+    if not media_processed then
+      kong.log.err("skyflow: attachment policy blocked request: ", tostring(media_err))
+      return { deny = true, status = 415,
+               body = { message = "request blocked: " .. tostring(media_err) } }
+    end
+    if media_processed > 0 or media_stripped > 0 then
+      kong.log.info("skyflow: attachments -- ", media_processed, " de-identified, ",
+                    media_stripped, " stripped")
+    end
+  end
+
+  if #spans == 0 then
+    -- No text to process, but an attachment may have been rewritten above, so
+    -- the body still has to go out re-encoded. Mirrors the main rewrite path
+    -- below, including the force-non-streaming behaviour.
+    if (media_processed > 0 or media_stripped > 0) and not conf.dry_run then
+      if doc.stream == true then
+        ctx.client_stream = true
+        doc.stream = false
+        doc.stream_options = nil
+      end
+      local enc, eerr = cjson.encode(doc)
+      if not enc then return fail_action(conf, ctx, "re-encode failed: " .. tostring(eerr)) end
+      kong.service.request.set_raw_body(enc)
+      kong.service.request.set_header("Content-Length", #enc)
+    end
+    return { ok = true }
+  end
 
   -- Fail closed if the payload carries more sensitive-text fields than we will
   -- process. Never forward a partially de-identified body -- the untouched
