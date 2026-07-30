@@ -1058,6 +1058,21 @@ local function run_access(conf, ctx)
     return { deny = true, status = 502, body = { message = "request blocked: auth unavailable" } }
   end
 
+  -- Strip the credential we just consumed, so it cannot egress to the model
+  -- provider. This is NOT belt-and-braces: Kong's own ai-proxy drivers add their
+  -- provider credential with set_header and never clear an inbound
+  -- Authorization -- verified in kong/llm/drivers/anthropic.lua, whose
+  -- configure_request only ever calls set_header(auth_header_name, ...). Since
+  -- Anthropic authenticates with x-api-key rather than Authorization, nothing
+  -- downstream overwrites ours, and the caller's enterprise IdP token would ride
+  -- all the way to api.anthropic.com. (The OpenAI route happens to escape this
+  -- because its credential occupies Authorization itself -- an accident, not a
+  -- design.) Nothing inward needs it: internal routes are guarded by source IP,
+  -- and the STS bearer we minted travels in our own request to Skyflow.
+  if kong.service and kong.service.request and kong.service.request.clear_header then
+    kong.service.request.clear_header("Authorization")
+  end
+
   local json_mode = wants_json(conf, kong.request.get_header("Content-Type"))
 
   -- Build the list of text spans to process.
