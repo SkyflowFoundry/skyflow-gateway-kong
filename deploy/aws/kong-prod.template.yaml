@@ -79,7 +79,8 @@ services:
           profile: anthropic
           response_json_paths: ["$.content[*].text"]
           deidentify:
-            entities: [NAME, NAME_GIVEN, NAME_FAMILY, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB]
+            entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
+                       ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER, DRIVER_LICENSE]
             token_format: VAULT_TOKEN
           media:
             mode: deidentify
@@ -124,7 +125,8 @@ services:
               expected_audience: "__ENTRA_AUDIENCE__"
           profile: anthropic
           deidentify:
-            entities: [NAME, NAME_GIVEN, NAME_FAMILY, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB]
+            entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
+                       ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER, DRIVER_LICENSE]
             token_format: VAULT_TOKEN
           media:
             mode: deidentify

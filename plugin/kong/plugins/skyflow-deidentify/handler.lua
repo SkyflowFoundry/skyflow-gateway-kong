@@ -1073,6 +1073,16 @@ local function run_access(conf, ctx)
     kong.service.request.clear_header("Authorization")
   end
 
+  -- Will this request's response actually be re-emitted as SSE by :response()?
+  -- Downgrading the client's stream is only safe if the answer is yes; otherwise
+  -- we would strip `stream: true` and then leave nobody to turn the buffered JSON
+  -- back into an event stream, and a client that asked for text/event-stream
+  -- hangs or gets JSON. The /probe route (reidentify disabled) is exactly that
+  -- case, so it must keep streaming straight through -- showing the caller the
+  -- tokenized SSE the provider produced, which is that route's whole purpose.
+  local will_reemit = conf.reidentify.enabled
+                      and conf.reidentify.streaming ~= "passthrough"
+
   local json_mode = wants_json(conf, kong.request.get_header("Content-Type"))
 
   -- Build the list of text spans to process.
@@ -1114,7 +1124,7 @@ local function run_access(conf, ctx)
     -- the body still has to go out re-encoded. Mirrors the main rewrite path
     -- below, including the force-non-streaming behaviour.
     if (media_processed > 0 or media_stripped > 0) and not conf.dry_run then
-      if doc.stream == true then
+      if doc.stream == true and will_reemit then
         ctx.client_stream = true
         doc.stream = false
         doc.stream_options = nil
@@ -1123,6 +1133,18 @@ local function run_access(conf, ctx)
       if not enc then return fail_action(conf, ctx, "re-encode failed: " .. tostring(eerr)) end
       kong.service.request.set_raw_body(enc)
       kong.service.request.set_header("Content-Length", #enc)
+      -- Mark the request processed even though no TEXT span was tokenized.
+      -- Without this the response phase bails at the `not ctx.deidentified`
+      -- gate, and two things break: (1) we just downgraded the client's stream
+      -- to a buffered request, so nobody re-emits SSE and a streaming client
+      -- hangs -- an image pasted with no accompanying text does exactly this;
+      -- (2) in a multi-turn session the model echoes tokens minted on EARLIER
+      -- turns, and those would come back to the caller unresolved.
+      ctx.deidentified = true
+      if conf.reidentify.streaming ~= "passthrough" then
+        kong.service.request.clear_header("Accept-Encoding")
+        kong.service.request.enable_buffering()
+      end
     end
     return { ok = true }
   end
@@ -1181,7 +1203,7 @@ local function run_access(conf, ctx)
       -- non-streaming, remember the client wanted a stream, and re-emit the
       -- re-identified answer as SSE in :response(). (See demo/act2 — real coding
       -- agents always stream.)
-      if doc.stream == true then
+      if doc.stream == true and will_reemit then
         ctx.client_stream = true
         doc.stream = false
         doc.stream_options = nil
