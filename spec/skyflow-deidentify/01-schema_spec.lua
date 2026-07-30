@@ -141,6 +141,38 @@ describe(PLUGIN_NAME .. ": schema", function()
     assert.is_falsy(validate(c))
   end)
 
+  describe("sts (Profile B)", function()
+    it("accepts sts.enabled as the sole credential", function()
+      local c = base()
+      c.credentials = { sts = { enabled = true, service_account_id = "sa123",
+                                expected_issuer = "https://login.microsoftonline.com/t/v2.0",
+                                expected_audience = "client-id" } }
+      assert.is_truthy(validate(c))
+    end)
+
+    it("requires a service_account_id when enabled", function()
+      local c = base()
+      c.credentials = { sts = { enabled = true } }
+      assert.is_falsy(validate(c))
+    end)
+
+    it("rejects sts combined with another credential", function()
+      local c = base()
+      c.credentials = { api_key = "k", sts = { enabled = true, service_account_id = "sa123" } }
+      assert.is_falsy(validate(c))
+    end)
+
+    it("still requires exactly one credential overall", function()
+      local c = base()
+      c.credentials = {}
+      assert.is_falsy(validate(c))
+
+      c = base()
+      c.credentials = { api_key = "k", token = "t" }
+      assert.is_falsy(validate(c))
+    end)
+  end)
+
   it("accepts tool_inputs treatments and rejects unknown values", function()
     local c = base()
     c.reidentify = { enabled = true, tool_inputs = "plain_text" }

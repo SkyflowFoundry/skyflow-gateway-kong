@@ -3,13 +3,25 @@
 # (which App Runner injects from Secrets Manager) -- the image itself carries
 # no IDs, no keys, no secrets.
 #
-# Access model:
-#   * /claude and /_claude_upstream require the gateway apikey (key-auth,
-#     priority 1250) BEFORE the skyflow plugin (775) can run -- without the
-#     key there is no way to reach or consume the Skyflow service account.
-#   * Callers bring their own OpenAI key (Authorization: Bearer) -- the
-#     gateway stores no LLM credential.
-#   * /healthz is the only unauthenticated route (App Runner health checks).
+# Access model -- two credential profiles, one gateway:
+#
+#   /claude      PROFILE B (STS): the caller presents an Entra ID token as
+#                `Authorization: Bearer`. The gateway exchanges it for a
+#                Skyflow bearer whose ctx IS the caller's IdP claims, and holds
+#                no Skyflow private key. Skyflow logs these as Auth Mode: STS
+#                with the human in Subject/Context ID. This is the path Claude
+#                Desktop's gateway-OIDC mode uses (one credential, which is why
+#                key-auth is absent here -- an invalid token is rejected by the
+#                plugin's local iss/aud/exp precheck before any network hop).
+#
+#   /claude-sa   PROFILE A (service-account JWT): gateway-asserted identity via
+#                the `apikey`/`x-api-key` gateway credential. Kept for
+#                comparison -- the same request shows Auth Mode: SA-JWT with
+#                gateway-derived ctx.
+#
+#   Provider credentials are gateway-held in both profiles; the model in the
+#   request body picks Anthropic vs OpenAI.
+#   /healthz is unauthenticated (App Runner health checks).
 _format_version: "3.0"
 
 consumers:
@@ -26,8 +38,7 @@ services:
         strip_path: true
         protocols: ["http", "https"]
     plugins:
-      - name: key-auth
-        config: { key_names: ["apikey", "x-api-key"], hide_credentials: false }
+      # No key-auth: in STS mode the caller's IdP token is the credential.
       # Provider selected by the request body's `model` -- the standard
       # AI-gateway pattern. Kong's free ai-proxy pins one provider per plugin
       # instance, and ai-proxy-advanced (multi-target + model_alias) is
@@ -55,15 +66,14 @@ services:
           cluster_id: __SKYFLOW_CLUSTER_ID__
           account_id: __SKYFLOW_ACCOUNT_ID__
           credentials:
-            service_account_json: "{vault://env/SKYFLOW_SA_JSON}"
-            context:
-              tenant: __CTX_TENANT__
-              provider: by-model
-            context_headers:
-              caller.user: X-Demo-User
-            context_kong:
-              caller.consumer: consumer_username
-              caller.route: route_name
+            # Profile B: no Skyflow key here at all. ctx comes from the IdP, so
+            # the context/context_* settings would be ignored and are omitted.
+            sts:
+              enabled: true
+              service_account_id: __STS_SERVICE_ACCOUNT_ID__
+              token_header: authorization
+              expected_issuer: "__ENTRA_ISSUER__"
+              expected_audience: "__ENTRA_AUDIENCE__"
           profile: anthropic
           response_json_paths: ["$.content[*].text"]
           deidentify:
@@ -117,8 +127,8 @@ services:
   - name: claude-front-anthropic
     url: http://127.0.0.1:8000/_claude_upstream_anthropic
     routes:
-      - name: claude-anthropic
-        paths: ["/claude-anthropic"]
+      - name: claude-sa
+        paths: ["/claude-sa"]
         strip_path: true
         protocols: ["http", "https"]
     plugins:

@@ -423,6 +423,145 @@ local function sign_assertion(sa, claims)
   return unsigned .. "." .. b64url_encode(sig)
 end
 
+-- ============================ STS (Profile B) ============================
+-- Exchange the CALLER's IdP token for a Skyflow bearer (RFC 8693 delegation).
+--
+-- Differences from the service-account path below that matter operationally:
+--   * the gateway holds NO Skyflow private key -- nothing to sign, nothing to
+--     leak; it forwards an identity it was given
+--   * ctx comes entirely from the IdP's claims (per the account's STS config
+--     allowlist). The plugin's context/context_headers/context_kong settings
+--     are IGNORED here: Skyflow silently drops any context supplied in the
+--     exchange body, so gateway-asserted attributes are impossible -- put them
+--     in the IdP token (Entra app roles / claims-mapping policy) instead.
+--   * Skyflow records these as Auth Mode: STS with the human in Subject and
+--     Context ID, while Actor stays the service account (delegation semantics)
+--   * the minted bearer inherits the IdP token's `exp`, so its lifetime is
+--     bounded by the caller's session, not a fixed hour
+
+local STS_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
+local STS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"  -- the only one accepted
+
+-- How many attributes Skyflow actually put in the minted bearer's ctx. Logged
+-- because the allowlist is an INTERSECTION: ctx = the STS config's
+-- contextClaims that are also present in the caller's token. A claim the
+-- policy needs but the IdP omitted disappears silently, so surface the count.
+local function jwt_ctx_count(token)
+  local payload = token and token:match("^[^.]+%.([^.]+)%.")
+  local decoded = payload and b64url_decode(payload)
+  local claims = decoded and cjson.decode(decoded)
+  local ctx = type(claims) == "table" and claims.ctx
+  if type(ctx) ~= "table" then return 0 end
+  local n = 0
+  for _ in pairs(ctx) do n = n + 1 end
+  return n
+end
+
+-- Cheap, local pre-checks so a junk or misdirected token fails at the gateway
+-- instead of costing a round trip. Signature verification is Skyflow's job
+-- (it fetches the issuer's JWKS); this only rejects the obvious.
+local function precheck_caller_token(token, sts)
+  local payload = token and token:match("^[^.]+%.([^.]+)%.")
+  if not payload then return nil, "caller token is not a JWT" end
+  local decoded = b64url_decode(payload)
+  local claims = decoded and cjson.decode(decoded)
+  if type(claims) ~= "table" then return nil, "caller token payload is not JSON" end
+  if claims.exp and tonumber(claims.exp) and tonumber(claims.exp) <= ngx.now() then
+    return nil, "caller token expired"
+  end
+  if sts.expected_issuer and sts.expected_issuer ~= "" and claims.iss ~= sts.expected_issuer then
+    return nil, "caller token issuer mismatch"
+  end
+  if sts.expected_audience and sts.expected_audience ~= "" then
+    local aud = claims.aud
+    local ok = aud == sts.expected_audience
+    if not ok and type(aud) == "table" then
+      for _, a in ipairs(aud) do if a == sts.expected_audience then ok = true break end end
+    end
+    if not ok then return nil, "caller token audience mismatch" end
+  end
+  return claims
+end
+
+-- Exchange the caller's token; cache per caller token identity.
+local function sts_bearer(conf, deadline)
+  local sts = conf.credentials.sts
+  if not sts.service_account_id or sts.service_account_id == "" then
+    return nil, "credentials.sts.service_account_id is required"
+  end
+
+  local header = sts.token_header
+  if header == nil or header == "" then header = "authorization" end
+  local raw = kong.request.get_header(header)
+  if not raw or raw == "" then
+    return nil, "no caller identity token in '" .. header .. "'"
+  end
+  local token = raw:match("^[Bb]earer%s+(.+)$") or raw
+
+  local claims, perr = precheck_caller_token(token, sts)
+  if not claims then return nil, perr end
+
+  -- one cached Skyflow bearer per (caller subject, token expiry): a new sign-in
+  -- or a refreshed token mints a new one, and distinct callers never share
+  local cache_key = "sts\n" .. sts.service_account_id .. "\n"
+                    .. tostring(claims.sub or claims.oid or "?") .. "\n"
+                    .. tostring(claims.exp or 0)
+  local hit = TOKEN_CACHE[cache_key]
+  if hit and hit.exp - (conf.token_skew_seconds or 300) > ngx.now() then
+    return "Bearer " .. hit.token
+  end
+
+  local token_uri = sts.token_uri
+  if not token_uri or token_uri == "" then
+    token_uri = "https://manage.skyflowapis.com/v1/auth/sts/token"
+  end
+  local body = cjson.encode({
+    grant_type = STS_GRANT,
+    subject_token = token,
+    subject_token_type = STS_TOKEN_TYPE,
+    service_account_id = sts.service_account_id,
+  })
+
+  local attempts, last_err = (conf.retries or 0) + 1, nil
+  for _ = 1, attempts do
+    if deadline and ngx.now() >= deadline then
+      return nil, "deadline exceeded exchanging caller identity"
+    end
+    local httpc = http.new()
+    httpc:set_timeout(conf.timeout_ms)
+    local res, err = httpc:request_uri(token_uri, {
+      method = "POST", body = body,
+      headers = { ["Content-Type"] = "application/json" },
+      ssl_verify = true,
+      keepalive_timeout = conf.keepalive_idle_ms, keepalive_pool = conf.keepalive_pool_size,
+    })
+    if res and res.status == 200 then
+      local data = cjson.decode(res.body)
+      local minted = data and data.accessToken
+      if not minted or minted == "" then return nil, "sts endpoint returned no accessToken" end
+      local exp = jwt_exp(minted)
+      if exp == 0 then exp = math.floor(ngx.now()) + 300 end
+      if TOKEN_CACHE_N >= TOKEN_CACHE_MAX then TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 end
+      if not TOKEN_CACHE[cache_key] then TOKEN_CACHE_N = TOKEN_CACHE_N + 1 end
+      TOKEN_CACHE[cache_key] = { token = minted, exp = exp }
+      kong.log.info("skyflow: exchanged caller identity for STS bearer (",
+                    claims.preferred_username or claims.email or claims.sub or "?",
+                    ", ctx attrs=", jwt_ctx_count(minted),
+                    ", ttl=", math.floor(exp - ngx.now()), "s)")
+      return "Bearer " .. minted
+    elseif res and res.status >= 400 and res.status < 500 and res.status ~= 429 then
+      -- 4xx here is a configuration or identity problem (no STS config for this
+      -- (service account, issuer) pair, audience mismatch, expired token) --
+      -- the response message pinpoints it and retrying cannot help.
+      return nil, "sts exchange rejected: HTTP " .. res.status .. " "
+                  .. string.sub(res.body or "", 1, 180)
+    else
+      last_err = err or ("HTTP " .. tostring(res and res.status))
+    end
+  end
+  return nil, "sts exchange failed: " .. tostring(last_err)
+end
+
 -- Mint (or reuse) a Skyflow bearer for the configured service account.
 -- Returns "Bearer <token>" or nil, err. The network hop happens at most once
 -- per (SA, scope, ctx) per bearer lifetime per worker.
@@ -510,6 +649,9 @@ end
 -- only_one_of, so precedence only matters defensively).
 local function auth_value(conf, deadline)
   local c = conf.credentials
+  -- STS first when enabled: the caller's own identity is the strongest
+  -- credential available, and it means no Skyflow key is used at all.
+  if c.sts and c.sts.enabled then return sts_bearer(conf, deadline) end
   if c.api_key and c.api_key ~= "" then return "Bearer " .. c.api_key end
   if c.token and c.token ~= "" then return "Bearer " .. c.token end
   if c.service_account_json and c.service_account_json ~= "" then

@@ -55,14 +55,64 @@ local credentials = {
     { context_headers = { type = "map", keys = { type = "string" }, values = { type = "string" } } },
     { context_kong = { type = "map", keys = { type = "string" },
                        values = { type = "string", one_of = KONG_CTX_SOURCES } } },
+    -- Profile B: exchange the CALLER's IdP token for a Skyflow bearer
+    -- (RFC 8693 delegation). The gateway holds no Skyflow private key in this
+    -- mode, and `ctx` comes entirely from the IdP's claims -- the
+    -- context/context_headers/context_kong settings above do NOT apply,
+    -- because Skyflow ignores context supplied in the exchange body. Put
+    -- gateway-ish attributes (tenant, role, purpose) in the IdP token instead
+    -- (e.g. Entra app roles or a claims-mapping policy); they then arrive
+    -- IdP-signed rather than gateway-asserted.
+    { sts = {
+        type = "record",
+        fields = {
+          { enabled = { type = "boolean", default = false } },
+          -- the Skyflow service account the caller is delegating through;
+          -- must be listed in the account's STS configuration for the issuer
+          { service_account_id = { type = "string" } },
+          -- where the caller's token arrives (Claude Desktop's gateway OIDC
+          -- mode sends it as `Authorization: Bearer <id_token>`)
+          { token_header = { type = "string", default = "authorization" } },
+          { token_uri = { type = "string",
+                          default = "https://manage.skyflowapis.com/v1/auth/sts/token" } },
+          -- local fail-fast checks; Skyflow still verifies the signature
+          -- against the issuer's JWKS, so these are defense in depth
+          { expected_issuer = { type = "string" } },
+          { expected_audience = { type = "string" } },
+        },
+    } },
   },
   entity_checks = {
-    { only_one_of = { "api_key", "token", "service_account_json" } },
+    -- NOT only_one_of: that requires *exactly* one, which would reject STS mode
+    -- (Profile B carries no static credential -- the caller's IdP token is the
+    -- credential). This check enforces "exactly one credential source" across
+    -- all four options instead.
+    { custom_entity_check = {
+        field_sources = { "api_key", "token", "service_account_json", "sts" },
+        fn = function(entity)
+          local function set(v) return type(v) == "string" and v ~= "" end
+          local n = 0
+          if set(entity.api_key) then n = n + 1 end
+          if set(entity.token) then n = n + 1 end
+          if set(entity.service_account_json) then n = n + 1 end
+          if entity.sts and entity.sts.enabled then n = n + 1 end
+          if n == 0 then
+            return nil, "exactly one credential is required: api_key, token, "
+                        .. "service_account_json, or sts.enabled"
+          end
+          if n > 1 then
+            return nil, "only one credential may be set: api_key, token, "
+                        .. "service_account_json, or sts.enabled"
+          end
+          return true
+        end,
+    } },
     -- role_ids/context* shape the minted bearer; with a static api_key/token
     -- they would be silently ignored -- reject that config.
     { custom_entity_check = {
         field_sources = { "service_account_json", "role_ids", "context_json",
-                          "context", "context_headers", "context_kong" },
+                          "context", "context_headers", "context_kong", "sts",
+                          "api_key", "token" },
         fn = function(entity)
           local has_sa = type(entity.service_account_json) == "string"
                          and entity.service_account_json ~= ""
@@ -73,6 +123,16 @@ local credentials = {
             or nonempty(entity.context)
             or nonempty(entity.context_headers)
             or nonempty(entity.context_kong)
+          local sts = entity.sts
+          if sts and sts.enabled then
+            if not (type(sts.service_account_id) == "string" and sts.service_account_id ~= "") then
+              return nil, "credentials.sts.enabled requires sts.service_account_id"
+            end
+            if (type(entity.api_key) == "string" and entity.api_key ~= "")
+               or (type(entity.token) == "string" and entity.token ~= "") then
+              return nil, "credentials.sts.enabled cannot be combined with api_key/token"
+            end
+          end
           if uses_sa_opts and not has_sa then
             return nil, "role_ids/context_json/context/context_headers/context_kong "
                         .. "require credentials.service_account_json"

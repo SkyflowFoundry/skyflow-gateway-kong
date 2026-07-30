@@ -2,7 +2,8 @@
 # Render the declarative config from env at boot (App Runner injects the
 # secret values from Secrets Manager), then hand off to Kong's own entrypoint.
 set -eu
-for v in SKYFLOW_VAULT_ID SKYFLOW_CLUSTER_ID SKYFLOW_ACCOUNT_ID SKYFLOW_SA_JSON GATEWAY_API_KEY; do
+for v in SKYFLOW_VAULT_ID SKYFLOW_CLUSTER_ID SKYFLOW_ACCOUNT_ID SKYFLOW_SA_JSON \
+         GATEWAY_API_KEY STS_SERVICE_ACCOUNT_ID ENTRA_ISSUER ENTRA_AUDIENCE; do
   eval "val=\${$v:-}"
   [ -n "$val" ] || { echo "FATAL: $v is not set" >&2; exit 1; }
 done
