@@ -1,49 +1,53 @@
 # Production declarative config for the team Claude gateway on App Runner.
-# Substituted at CONTAINER BOOT by docker-entrypoint-prod.sh from env vars
-# (which App Runner injects from Secrets Manager) -- the image itself carries
-# no IDs, no keys, no secrets.
+# Rendered at CONTAINER BOOT by docker-entrypoint-prod.sh from env vars (App
+# Runner injects the secrets) -- the image carries no IDs and no keys.
 #
-# Access model -- two credential profiles, one gateway:
+# CREDENTIAL MODEL -- Profile B (STS delegation) only:
 #
-#   /claude      PROFILE B (STS): the caller presents an Entra ID token as
-#                `Authorization: Bearer`. The gateway exchanges it for a
-#                Skyflow bearer whose ctx IS the caller's IdP claims, and holds
-#                no Skyflow private key. Skyflow logs these as Auth Mode: STS
-#                with the human in Subject/Context ID. This is the path Claude
-#                Desktop's gateway-OIDC mode uses (one credential, which is why
-#                key-auth is absent here -- an invalid token is rejected by the
-#                plugin's local iss/aud/exp precheck before any network hop).
+#   The caller presents an enterprise IdP token (Entra ID) as
+#   `Authorization: Bearer`. The gateway exchanges it at Skyflow's STS endpoint
+#   for a short-lived bearer whose `ctx` IS the caller's IdP claims, then uses
+#   that bearer for Detect. Consequences worth stating plainly:
 #
-#   /claude-sa   PROFILE A (service-account JWT): gateway-asserted identity via
-#                the `apikey`/`x-api-key` gateway credential. Kept for
-#                comparison -- the same request shows Auth Mode: SA-JWT with
-#                gateway-derived ctx.
+#     * this gateway holds NO Skyflow credential -- no API key, no service
+#       account, no private key. Compromising it yields no vault access.
+#     * identity is IdP-verified, not gateway-asserted. Skyflow logs these as
+#       Auth Mode: STS with the human in Subject and the full claim set in
+#       Context ID, while Actor stays the service account (delegation).
+#     * ctx is exclusively the IdP's claims, per the account's STS config
+#       allowlist. Skyflow SILENTLY IGNORES context supplied by the caller of
+#       the exchange, so attributes like tenant/role/purpose belong in the IdP
+#       token -- Entra app roles and claims-mapping policies put them there,
+#       signed, which is strictly better than the gateway asserting them.
+#     * one credential for the client, which is what single-credential clients
+#       (Claude Desktop's gateway-OIDC mode) require.
 #
-#   Provider credentials are gateway-held in both profiles; the model in the
-#   request body picks Anthropic vs OpenAI.
-#   /healthz is unauthenticated (App Runner health checks).
+#   The sister repo (skyflow-gateway-litellm) runs Profile A -- gateway-held
+#   service account, gateway-asserted ctx -- so the two models can be compared
+#   side by side in the same Skyflow audit log.
+#
+#   Provider credentials ARE gateway-held (Anthropic + OpenAI); the `model` in
+#   the request body selects the provider.
 _format_version: "3.0"
 
-consumers:
-  - username: team
-    keyauth_credentials:
-      - key: __GATEWAY_API_KEY__
-
 services:
+  # ---------------------------------------------------------------- front door
   - name: claude-front
-    url: http://127.0.0.1:8000/_claude_upstream
+    url: http://127.0.0.1:8000/_up_anthropic
     routes:
       - name: claude
-        paths: ["/claude", "/claude-openai"]
+        paths: ["/claude"]
         strip_path: true
         protocols: ["http", "https"]
     plugins:
-      # No key-auth: in STS mode the caller's IdP token is the credential.
-      # Provider selected by the request body's `model` -- the standard
-      # AI-gateway pattern. Kong's free ai-proxy pins one provider per plugin
-      # instance, and ai-proxy-advanced (multi-target + model_alias) is
-      # enterprise-only, so this bundled pre-function rewrites the internal
-      # loopback path instead.
+      # No client key-auth: the caller's IdP token IS the credential. A junk or
+      # misdirected token is rejected by the plugin's local iss/aud/exp
+      # precheck before any network hop, so anonymous traffic costs nothing.
+      #
+      # Provider selected from the request body's `model` -- the standard
+      # AI-gateway pattern. (Kong's free ai-proxy pins one provider per plugin
+      # instance and ai-proxy-advanced is enterprise-only, so this bundled
+      # pre-function rewrites the internal loopback path instead.)
       - name: pre-function
         config:
           access:
@@ -51,13 +55,12 @@ services:
               local body = kong.request.get_body()
               local model = (body and body.model) or ""
               local tail = kong.request.get_path():gsub("^/claude[a-z-]*", "")
-              local upstream = model:find("^claude") and "/_claude_upstream_anthropic"
-                                                     or "/_claude_upstream"
+              local upstream = model:find("^gpt") and "/_up_openai" or "/_up_anthropic"
               kong.service.request.set_path(upstream .. tail)
               kong.log.info("skyflow-gateway: model=", model, " -> ", upstream)
-      # Flow log to stdout -> CloudWatch: consumer, route, status, latency,
-      # and the skyflow entity counts. No request/response bodies -- the
-      # gateway's own logs stay PII-free.
+      # Flow log to stdout -> CloudWatch: route, status, latency, and the
+      # skyflow entity counts. No request/response bodies -- the gateway's own
+      # logs stay PII-free by construction.
       - name: file-log
         config: { path: /dev/stdout }
       - name: skyflow-deidentify
@@ -66,8 +69,6 @@ services:
           cluster_id: __SKYFLOW_CLUSTER_ID__
           account_id: __SKYFLOW_ACCOUNT_ID__
           credentials:
-            # Profile B: no Skyflow key here at all. ctx comes from the IdP, so
-            # the context/context_* settings would be ignored and are omitted.
             sts:
               enabled: true
               service_account_id: __STS_SERVICE_ACCOUNT_ID__
@@ -83,60 +84,24 @@ services:
             enabled: true
             strategy: reidentify_text
             on_error: deny
+            # tool_inputs defaults to `tokenized`: an agent's tools receive
+            # vault tokens, never raw PII.
           on_skyflow_error: deny
           timeout_ms: 15000
           deadline_ms: 30000
 
-  - name: claude-upstream
-    url: http://localhost:32000
+  # -------------------------------------------------------------------- probe
+  # Same de-identification with re-identify OFF, so the response shows the
+  # tokens the provider actually received. Takes a caller IdP token like
+  # /claude does.
+  - name: probe-front
+    url: http://127.0.0.1:8000/_up_anthropic
     routes:
-      - name: claude-upstream
-        paths: ["/_claude_upstream"]
+      - name: probe
+        paths: ["/probe"]
         strip_path: true
         protocols: ["http", "https"]
     plugins:
-      # Same key gates the internal route: the loopback hop forwards the
-      # caller's apikey header (hide_credentials=false above), and a direct
-      # external hit without the key is rejected -- no de-identification
-      # bypass.
-      - name: key-auth
-        config: { key_names: ["apikey", "x-api-key"], hide_credentials: false }
-      # log_payloads on THIS route logs the TOKENIZED LLM payloads -- the
-      # exact bytes that egress to the provider and what it answers. Safe to
-      # log precisely because de-identification already happened upstream.
-      - name: file-log
-        config: { path: /dev/stdout }
-      - name: ai-proxy
-        config:
-          llm_format: anthropic
-          route_type: llm/v1/chat
-          logging: { log_statistics: true, log_payloads: true }
-          # gateway-held provider credential; the whole header value must be
-          # one vault reference (Kong does not interpolate mid-string)
-          auth:
-            header_name: Authorization
-            header_value: "{vault://env/OPENAI_AUTH_HEADER}"
-            allow_override: false
-          model:
-            # No `name`: ai-proxy then forwards the CALLER's model, so every
-            # model this provider offers works through the one endpoint. Pinning
-            # a name here would reject anything else ("cannot use own model").
-            provider: openai
-          max_request_body_size: 16777216
-
-  - name: claude-front-anthropic
-    url: http://127.0.0.1:8000/_claude_upstream_anthropic
-    routes:
-      - name: claude-sa
-        paths: ["/claude-sa"]
-        strip_path: true
-        protocols: ["http", "https"]
-    plugins:
-      - name: key-auth
-        config: { key_names: ["apikey", "x-api-key"], hide_credentials: false }
-      # Flow log to stdout -> CloudWatch: consumer, route, status, latency,
-      # and the skyflow entity counts. No request/response bodies -- the
-      # gateway's own logs stay PII-free.
       - name: file-log
         config: { path: /dev/stdout }
       - name: skyflow-deidentify
@@ -145,45 +110,41 @@ services:
           cluster_id: __SKYFLOW_CLUSTER_ID__
           account_id: __SKYFLOW_ACCOUNT_ID__
           credentials:
-            service_account_json: "{vault://env/SKYFLOW_SA_JSON}"
-            context:
-              tenant: __CTX_TENANT__
-              provider: anthropic
-            context_headers:
-              caller.user: X-Demo-User
-            context_kong:
-              caller.consumer: consumer_username
-              caller.route: route_name
+            sts:
+              enabled: true
+              service_account_id: __STS_SERVICE_ACCOUNT_ID__
+              token_header: authorization
+              expected_issuer: "__ENTRA_ISSUER__"
+              expected_audience: "__ENTRA_AUDIENCE__"
           profile: anthropic
-          response_json_paths: ["$.content[*].text"]
           deidentify:
             entities: [NAME, NAME_GIVEN, NAME_FAMILY, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB]
             token_format: VAULT_TOKEN
-          reidentify:
-            enabled: true
-            strategy: reidentify_text
-            on_error: deny
+          reidentify: { enabled: false }
           on_skyflow_error: deny
           timeout_ms: 15000
           deadline_ms: 30000
 
-  - name: claude-upstream-anthropic
+  # ------------------------------------------------------- internal upstreams
+  # Reachable only from the nested proxy hop (127.0.0.1). An external request
+  # arrives from the App Runner ingress and is refused, so de-identification
+  # cannot be bypassed -- and unlike key-auth this needs no credential
+  # forwarded inward, which is impossible when the caller holds only an IdP
+  # token.
+  - name: up-anthropic
     url: http://localhost:32000
     routes:
-      - name: claude-upstream-anthropic
-        paths: ["/_claude_upstream_anthropic"]
+      - name: up-anthropic
+        paths: ["/_up_anthropic"]
         strip_path: true
         protocols: ["http", "https"]
     plugins:
-      # Same key gates the internal route: the loopback hop forwards the
-      # caller's apikey header (hide_credentials=false above), and a direct
-      # external hit without the key is rejected -- no de-identification
-      # bypass.
-      - name: key-auth
-        config: { key_names: ["apikey", "x-api-key"], hide_credentials: false }
-      # log_payloads on THIS route logs the TOKENIZED LLM payloads -- the
-      # exact bytes that egress to the provider and what it answers. Safe to
-      # log precisely because de-identification already happened upstream.
+      - name: ip-restriction
+        config: { allow: ["127.0.0.1/32"], status: 403,
+                  message: "internal route: not externally reachable" }
+      # log_payloads here records the TOKENIZED payloads -- the exact bytes that
+      # egress to the provider and what it answers. Safe to log precisely
+      # because de-identification already happened on the front route.
       - name: file-log
         config: { path: /dev/stdout }
       - name: ai-proxy
@@ -191,21 +152,50 @@ services:
           llm_format: anthropic
           route_type: llm/v1/chat
           logging: { log_statistics: true, log_payloads: true }
-          # gateway-held provider credential; the whole header value must be
-          # one vault reference (Kong does not interpolate mid-string)
           auth:
             # Anthropic authenticates with x-api-key, never Bearer
             header_name: x-api-key
             header_value: "{vault://env/ANTHROPIC_API_KEY}"
             allow_override: false
           model:
-            # No `name` -- the caller's model passes through (see above)
+            # no `name`: ai-proxy forwards the caller's model, so any model the
+            # provider offers works through this one endpoint
             provider: anthropic
             options:
               anthropic_version: "2023-06-01"
               max_tokens: 8192
           max_request_body_size: 16777216
 
+  - name: up-openai
+    url: http://localhost:32000
+    routes:
+      - name: up-openai
+        paths: ["/_up_openai"]
+        strip_path: true
+        protocols: ["http", "https"]
+    plugins:
+      - name: ip-restriction
+        config: { allow: ["127.0.0.1/32"], status: 403,
+                  message: "internal route: not externally reachable" }
+      - name: file-log
+        config: { path: /dev/stdout }
+      - name: ai-proxy
+        config:
+          llm_format: anthropic
+          route_type: llm/v1/chat
+          logging: { log_statistics: true, log_payloads: true }
+          auth:
+            header_name: Authorization
+            # a vault reference must be the WHOLE value -- Kong does not
+            # interpolate "Bearer {vault://...}", so the env var carries the
+            # complete header value
+            header_value: "{vault://env/OPENAI_AUTH_HEADER}"
+            allow_override: false
+          model:
+            provider: openai
+          max_request_body_size: 16777216
+
+  # ------------------------------------------------------------------- health
   - name: healthz
     url: http://localhost:32001
     routes:
