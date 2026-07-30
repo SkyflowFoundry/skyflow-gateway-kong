@@ -460,17 +460,22 @@ end
 -- Cheap, local pre-checks so a junk or misdirected token fails at the gateway
 -- instead of costing a round trip. Signature verification is Skyflow's job
 -- (it fetches the issuer's JWKS); this only rejects the obvious.
+-- Returns claims, or nil + message + "identity". Every failure in here is the
+-- CALLER's to fix -- a fresh sign-in, or pointing at the right gateway -- so it
+-- must surface as 401, never as a 502 that implicates Skyflow.
 local function precheck_caller_token(token, sts)
   local payload = token and token:match("^[^.]+%.([^.]+)%.")
-  if not payload then return nil, "caller token is not a JWT" end
+  if not payload then return nil, "caller token is not a JWT", "identity" end
   local decoded = b64url_decode(payload)
   local claims = decoded and cjson.decode(decoded)
-  if type(claims) ~= "table" then return nil, "caller token payload is not JSON" end
+  if type(claims) ~= "table" then
+    return nil, "caller token payload is not JSON", "identity"
+  end
   if claims.exp and tonumber(claims.exp) and tonumber(claims.exp) <= ngx.now() then
-    return nil, "caller token expired"
+    return nil, "caller identity token has expired; sign in again", "identity"
   end
   if sts.expected_issuer and sts.expected_issuer ~= "" and claims.iss ~= sts.expected_issuer then
-    return nil, "caller token issuer mismatch"
+    return nil, "caller token issuer mismatch", "identity"
   end
   if sts.expected_audience and sts.expected_audience ~= "" then
     local aud = claims.aud
@@ -478,7 +483,7 @@ local function precheck_caller_token(token, sts)
     if not ok and type(aud) == "table" then
       for _, a in ipairs(aud) do if a == sts.expected_audience then ok = true break end end
     end
-    if not ok then return nil, "caller token audience mismatch" end
+    if not ok then return nil, "caller token audience mismatch", "identity" end
   end
   return claims
 end
@@ -494,12 +499,14 @@ local function sts_bearer(conf, deadline)
   if header == nil or header == "" then header = "authorization" end
   local raw = kong.request.get_header(header)
   if not raw or raw == "" then
-    return nil, "no caller identity token in '" .. header .. "'"
+    return nil, "no caller identity token in '" .. header
+                .. "'; this gateway cannot assert an identity on your behalf",
+           "identity"
   end
   local token = raw:match("^[Bb]earer%s+(.+)$") or raw
 
-  local claims, perr = precheck_caller_token(token, sts)
-  if not claims then return nil, perr end
+  local claims, perr, pkind = precheck_caller_token(token, sts)
+  if not claims then return nil, perr, pkind end
 
   -- one cached Skyflow bearer per (caller subject, token expiry): a new sign-in
   -- or a refreshed token mints a new one, and distinct callers never share
@@ -550,11 +557,15 @@ local function sts_bearer(conf, deadline)
                     ", ttl=", math.floor(exp - ngx.now()), "s)")
       return "Bearer " .. minted
     elseif res and res.status >= 400 and res.status < 500 and res.status ~= 429 then
-      -- 4xx here is a configuration or identity problem (no STS config for this
-      -- (service account, issuer) pair, audience mismatch, expired token) --
-      -- the response message pinpoints it and retrying cannot help.
+      -- 4xx here is a configuration OR identity problem, and the distinction
+      -- matters to whoever gets the error. 401/403 means Skyflow refused the
+      -- caller's token (bad signature, wrong audience, expired) -> the caller
+      -- signs in again. Any other 4xx is our own STS misconfiguration -- no
+      -- config for this (service account, issuer) pair, say -- and telling the
+      -- caller to re-authenticate would send them chasing our bug.
+      local kind = (res.status == 401 or res.status == 403) and "identity" or "config"
       return nil, "sts exchange rejected: HTTP " .. res.status .. " "
-                  .. string.sub(res.body or "", 1, 180)
+                  .. string.sub(res.body or "", 1, 180), kind
     else
       last_err = err or ("HTTP " .. tostring(res and res.status))
     end
@@ -1025,10 +1036,25 @@ local function run_access(conf, ctx)
   -- The deadline covers SA bearer minting too, so a hung token endpoint can't
   -- stall the request beyond deadline_ms.
   local deadline = ngx.now() + (conf.deadline_ms / 1000)
-  local authz, aerr = auth_value(conf, deadline)
+  local authz, aerr, akind = auth_value(conf, deadline)
   if not authz then
+    -- Auth failures ALWAYS fail closed -- never forward raw PII -- regardless of
+    -- posture. But WHICH failure matters to whoever reads the error:
+    --
+    --   identity -> 401. The caller's token is missing, expired, or meant for a
+    --     different gateway. They fix it by signing in again. Reporting this as
+    --     502 sends them to investigate Skyflow for their own expired session,
+    --     which is exactly the wrong place -- and a client that retries on 502
+    --     but re-authenticates on 401 will spin forever on the wrong one.
+    --   anything else -> 502. Skyflow is unreachable, or our own STS config is
+    --     wrong; telling the caller to re-authenticate would send them chasing
+    --     our bug.
+    if akind == "identity" then
+      kong.log.warn("skyflow: caller identity rejected: ", aerr)
+      return { deny = true, status = 401,
+               body = { message = "request blocked: " .. tostring(aerr) } }
+    end
     kong.log.err("skyflow auth error: ", aerr)
-    -- auth failures ALWAYS fail closed (never forward raw PII), regardless of posture
     return { deny = true, status = 502, body = { message = "request blocked: auth unavailable" } }
   end
 
@@ -1344,9 +1370,20 @@ function SkyflowDeidentify:response(conf)
   local authz, deadline
   if strat == "reidentify_text" then
     deadline = ngx.now() + (conf.deadline_ms / 1000)
-    local aerr
-    authz, aerr = auth_value(conf, deadline)
+    local aerr, akind
+    authz, aerr, akind = auth_value(conf, deadline)
     if not authz then
+      -- Same 401/502 split as the request leg. Reaching here with an identity
+      -- failure means the caller's token expired DURING generation -- rare, but
+      -- a long response makes it possible, and "sign in again" is the honest
+      -- answer rather than blaming Skyflow.
+      if akind == "identity" then
+        kong.log.warn("skyflow: caller identity rejected on the response leg: ", aerr)
+        if conf.reidentify.on_error == "deny" then
+          return kong.response.exit(401, { message = "response blocked: " .. tostring(aerr) })
+        end
+        return
+      end
       kong.log.err("skyflow re-identify auth error: ", aerr)
       if conf.reidentify.on_error == "deny" then
         return kong.response.exit(502, { message = "response blocked: re-identify unavailable" })
@@ -1527,6 +1564,7 @@ SkyflowDeidentify._test = {
   deep_copy         = deep_copy,
   canonical_ctx_key = canonical_ctx_key,
   scope_from_roles  = scope_from_roles,
+  precheck_caller_token = precheck_caller_token,
 }
 
 return SkyflowDeidentify

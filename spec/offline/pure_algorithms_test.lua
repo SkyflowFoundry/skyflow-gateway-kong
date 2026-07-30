@@ -226,5 +226,63 @@ eq(T.scope_from_roles({ "only" }), "role:only", "scope_from_roles one role")
 eq(T.scope_from_roles({}), nil, "scope_from_roles empty -> nil")
 eq(T.scope_from_roles(nil), nil, "scope_from_roles nil -> nil")
 
+-- 14. precheck_caller_token: which failures are the CALLER's (401) vs ours (502)
+--
+-- The harness stubs cjson.decode, so install a decoder good enough for the flat
+-- claim sets below. handler.lua resolves cjson.decode at call time, so swapping
+-- the field in place is visible to it.
+package.loaded["cjson.safe"].decode = function(str)
+  local out = {}
+  -- "key":[ "a", "b" ]  -> array of strings
+  for k, list in str:gmatch('"([%w_]+)"%s*:%s*%[([^%]]*)%]') do
+    local arr = {}
+    for v in list:gmatch('"([^"]*)"') do arr[#arr + 1] = v end
+    out[k] = arr
+  end
+  for k, v in str:gmatch('"([%w_]+)"%s*:%s*"([^"]*)"') do out[k] = v end
+  for k, v in str:gmatch('"([%w_]+)"%s*:%s*(%-?%d+%.?%d*)') do out[k] = tonumber(v) end
+  return out
+end
+
+local ISS, AUD = "https://login.microsoftonline.com/t1/v2.0", "aud-guid"
+local function jwt(claims_json)
+  return T.b64url_encode('{"alg":"RS256"}') .. "." .. T.b64url_encode(claims_json) .. ".sig"
+end
+local function pc(claims_json, sts)
+  return T.precheck_caller_token(jwt(claims_json), sts or
+    { expected_issuer = ISS, expected_audience = AUD })
+end
+
+-- ngx.now() is stubbed to 0, so exp=100 is in the future and exp=-1 is past
+local good = '{"iss":"' .. ISS .. '","aud":"' .. AUD .. '","sub":"u1","exp":100}'
+local claims = pc(good)
+eq(type(claims), "table", "precheck accepts a matching token")
+eq(claims.sub, "u1", "precheck returns the claims")
+
+local _, msg, kind = T.precheck_caller_token("not-a-jwt", { expected_issuer = ISS })
+eq(kind, "identity", "non-JWT is the caller's problem")
+eq(msg, "caller token is not a JWT", "non-JWT message")
+
+local _, emsg, ekind = pc('{"iss":"' .. ISS .. '","aud":"' .. AUD .. '","exp":-1}')
+eq(ekind, "identity", "expired token is the caller's problem")
+eq(emsg:find("expired", 1, true) ~= nil, true, "expired message says so")
+eq(emsg:find("sign in again", 1, true) ~= nil, true, "expired message says what to do")
+
+local _, imsg, ikind = pc('{"iss":"https://evil/","aud":"' .. AUD .. '","exp":100}')
+eq(ikind, "identity", "issuer mismatch is the caller's problem")
+eq(imsg, "caller token issuer mismatch", "issuer mismatch message")
+
+local _, amsg, akind2 = pc('{"iss":"' .. ISS .. '","aud":"other-app","exp":100}')
+eq(akind2, "identity", "audience mismatch is the caller's problem")
+eq(amsg, "caller token audience mismatch", "audience mismatch message")
+
+-- Entra sends aud as a list in some configurations; membership must count
+eq(type(pc('{"iss":"' .. ISS .. '","aud":["x","' .. AUD .. '"],"exp":100}')), "table",
+   "audience inside a list is accepted")
+
+-- an unconfigured check must not behave as "must be empty"
+eq(type(T.precheck_caller_token(jwt('{"iss":"https://anything/","exp":100}'), {})), "table",
+   "unconfigured issuer/audience checks are skipped")
+
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)
