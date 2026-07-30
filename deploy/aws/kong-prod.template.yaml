@@ -1,4 +1,5 @@
-# Production declarative config for the team Claude gateway on App Runner.
+# Production declarative config for the Kong AI Gateway (secured by Skyflow)
+# on AWS App Runner.
 # Rendered at CONTAINER BOOT by docker-entrypoint-prod.sh from env vars (App
 # Runner injects the secrets) -- the image carries no IDs and no keys.
 #
@@ -57,7 +58,7 @@ services:
               local tail = kong.request.get_path():gsub("^/claude[a-z-]*", "")
               local upstream = model:find("^gpt") and "/_up_openai" or "/_up_anthropic"
               kong.service.request.set_path(upstream .. tail)
-              kong.log.info("skyflow-gateway: model=", model, " -> ", upstream)
+              kong.log.info("kong-ai-gateway: model=", model, " -> ", upstream)
       # Flow log to stdout -> CloudWatch: route, status, latency, and the
       # skyflow entity counts. No request/response bodies -- the gateway's own
       # logs stay PII-free by construction.
@@ -194,6 +195,40 @@ services:
           model:
             provider: openai
           max_request_body_size: 16777216
+
+  # ------------------------------------------------------------- model list
+  # Anthropic's /v1/models, served by the gateway. ai-proxy only handles
+  # POST /v1/messages, so a GET here would 405 -- and clients that offer model
+  # discovery (Claude Desktop) call this at launch to populate their picker.
+  # Served statically because the set of models this gateway exposes is a
+  # deployment decision, not a provider lookup.
+  #
+  # Anthropic IDs only: Claude Desktop rejects a configured non-Anthropic model
+  # ("not an Anthropic model"). OpenAI models still work through /claude by
+  # putting `"model": "gpt-*"` in the request body -- they just aren't
+  # advertised here.
+  #
+  # Deliberately unauthenticated: a list of model names carries nothing
+  # sensitive, and requiring the IdP token here would make discovery fail
+  # before the user has signed in.
+  - name: models
+    url: http://localhost:32001
+    routes:
+      - name: models
+        paths: ["/claude/v1/models", "/probe/v1/models"]
+        strip_path: true
+        protocols: ["http", "https"]
+    plugins:
+      - name: request-termination
+        config:
+          status_code: 200
+          content_type: "application/json"
+          body: |
+            {"data":[
+              {"type":"model","id":"claude-sonnet-4-5","display_name":"Claude Sonnet 4.5 — Kong AI Gateway, secured by Skyflow"},
+              {"type":"model","id":"claude-opus-4-5","display_name":"Claude Opus 4.5 — Kong AI Gateway, secured by Skyflow"},
+              {"type":"model","id":"claude-haiku-4-5","display_name":"Claude Haiku 4.5 — Kong AI Gateway, secured by Skyflow"}
+            ],"has_more":false}
 
   # ------------------------------------------------------------------- health
   - name: healthz

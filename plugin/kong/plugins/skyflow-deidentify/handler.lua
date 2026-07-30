@@ -997,20 +997,54 @@ local function anthropic_message_to_sse(doc)
     stop_reason = null, stop_sequence = null,
     usage = doc.usage or { input_tokens = 0, output_tokens = 0 },
   } }) }
-  for i, block in ipairs(doc.content) do
-    local idx = i - 1
+  local idx = -1
+  for _, block in ipairs(doc.content) do
+    -- Emit each block AS ITS OWN TYPE. Collapsing everything to `text` looks
+    -- harmless but corrupts the client's stored history: a `thinking` block has
+    -- no `text` field, so it became `text: ""`, the client saved an empty text
+    -- block, and replaying that history made the API reject the NEXT turn with
+    -- "text content blocks must be non-empty". Extended thinking is on by
+    -- default in some clients, so this hit every multi-turn conversation.
     if block.type == "tool_use" then
+      idx = idx + 1
       out[#out + 1] = ev("content_block_start", { type = "content_block_start", index = idx,
         content_block = { type = "tool_use", id = block.id, name = block.name, input = {} } })
       out[#out + 1] = ev("content_block_delta", { type = "content_block_delta", index = idx,
         delta = { type = "input_json_delta", partial_json = cjson.encode(block.input or {}) } })
-    else
+      out[#out + 1] = ev("content_block_stop", { type = "content_block_stop", index = idx })
+
+    elseif block.type == "thinking" then
+      -- Reasoning text is passed through VERBATIM and never re-identified: the
+      -- block carries a signature the provider verifies when the client replays
+      -- it, so altering the text would invalidate the turn. Any vault tokens in
+      -- reasoning therefore stay tokenized -- cosmetic, and the safe direction.
+      idx = idx + 1
+      out[#out + 1] = ev("content_block_start", { type = "content_block_start", index = idx,
+        content_block = { type = "thinking", thinking = "" } })
+      out[#out + 1] = ev("content_block_delta", { type = "content_block_delta", index = idx,
+        delta = { type = "thinking_delta", thinking = block.thinking or "" } })
+      if block.signature then
+        out[#out + 1] = ev("content_block_delta", { type = "content_block_delta", index = idx,
+          delta = { type = "signature_delta", signature = block.signature } })
+      end
+      out[#out + 1] = ev("content_block_stop", { type = "content_block_stop", index = idx })
+
+    elseif block.type == "redacted_thinking" then
+      idx = idx + 1
+      out[#out + 1] = ev("content_block_start", { type = "content_block_start", index = idx,
+        content_block = { type = "redacted_thinking", data = block.data or "" } })
+      out[#out + 1] = ev("content_block_stop", { type = "content_block_stop", index = idx })
+
+    elseif type(block.text) == "string" and block.text ~= "" then
+      idx = idx + 1
       out[#out + 1] = ev("content_block_start", { type = "content_block_start", index = idx,
         content_block = { type = "text", text = "" } })
       out[#out + 1] = ev("content_block_delta", { type = "content_block_delta", index = idx,
-        delta = { type = "text_delta", text = block.text or "" } })
+        delta = { type = "text_delta", text = block.text } })
+      out[#out + 1] = ev("content_block_stop", { type = "content_block_stop", index = idx })
     end
-    out[#out + 1] = ev("content_block_stop", { type = "content_block_stop", index = idx })
+    -- anything else (including an empty text block) is dropped rather than
+    -- emitted as an empty block the client would persist and replay
   end
   out[#out + 1] = ev("message_delta", { type = "message_delta",
     delta = { stop_reason = doc.stop_reason or "end_turn", stop_sequence = null },

@@ -62,7 +62,7 @@ services:
               local upstream = model:find("^claude") and "/_claude_upstream_anthropic"
                                                      or "/_claude_upstream"
               kong.service.request.set_path(upstream .. tail)
-              kong.log.info("skyflow-gateway: model=", model, " -> ", upstream)
+              kong.log.info("kong-ai-gateway: model=", model, " -> ", upstream)
       - name: skyflow-deidentify
         config:
           vault_id: __SKYFLOW_VAULT_ID__

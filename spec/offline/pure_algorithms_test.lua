@@ -190,6 +190,36 @@ eq(sse:find("event: message_stop", 1, true) ~= nil, true, "anthropic sse: messag
 eq(sse:find('"index":0', 1, true) ~= nil and sse:find('"index":1', 1, true) ~= nil, true,
    "anthropic sse: 0-based block indexes")
 
+-- 12b. thinking blocks must survive the SSE re-emit AS thinking blocks.
+-- Collapsing them to text produced `text: ""`, which clients persist and
+-- replay, and the API then rejects the next turn ("text content blocks must be
+-- non-empty"). Extended thinking is on by default in some clients, so this
+-- broke every multi-turn conversation.
+local think = T.anthropic_message_to_sse({
+  id = "msg_2", type = "message", role = "assistant", model = "m",
+  content = {
+    { type = "thinking", thinking = "let me consider", signature = "sig-abc" },
+    { type = "text", text = "Hello Jane" },
+    { type = "text", text = "" },              -- must be dropped, not emitted
+  },
+  stop_reason = "end_turn",
+})
+eq(think:find('"type":"thinking"', 1, true) ~= nil, true, "thinking block kept as thinking")
+eq(think:find('"thinking_delta"', 1, true) ~= nil, true, "thinking text uses thinking_delta")
+eq(think:find('"signature":"sig-abc"', 1, true) ~= nil, true, "thinking signature preserved")
+eq(select(2, think:gsub('"type":"text_delta"', "")), 1, "exactly one text_delta (empty text dropped)")
+eq(select(2, think:gsub("event: content_block_start", "")), 2, "2 blocks emitted, not 3")
+eq(think:find('"text":""', 1, true) ~= nil, true, "block_start still opens text with empty string")
+-- indexes must stay contiguous after dropping a block
+eq(think:find('"index":0', 1, true) ~= nil and think:find('"index":1', 1, true) ~= nil, true,
+   "indexes contiguous 0,1")
+eq(think:find('"index":2', 1, true), nil, "no index 2 after dropping the empty block")
+
+local redacted = T.anthropic_message_to_sse({
+  type = "message", content = { { type = "redacted_thinking", data = "enc" } },
+})
+eq(redacted:find('"redacted_thinking"', 1, true) ~= nil, true, "redacted_thinking passed through")
+
 -- 13. scope_from_roles: token-exchange body scope string
 eq(T.scope_from_roles({ "r1", "r2" }), "role:r1 role:r2", "scope_from_roles two roles")
 eq(T.scope_from_roles({ "only" }), "role:only", "scope_from_roles one role")
