@@ -2,7 +2,11 @@
   "properties": {
     "config": {
       "type": "object",
-      "required": ["vault_id", "cluster_id", "credentials"],
+      "required": [
+        "vault_id",
+        "cluster_id",
+        "credentials"
+      ],
       "properties": {
         "vault_id": {
           "type": "string",
@@ -19,7 +23,12 @@
         "env": {
           "type": "string",
           "default": "PROD",
-          "enum": ["PROD", "SANDBOX", "DEV", "STAGE"],
+          "enum": [
+            "PROD",
+            "SANDBOX",
+            "DEV",
+            "STAGE"
+          ],
           "description": "Skyflow environment the vault lives in."
         },
         "skyflow_base_url_override": {
@@ -28,28 +37,24 @@
         },
         "credentials": {
           "type": "object",
-          "description": "Skyflow credential. Provide exactly one of api_key, token, or service_account_json. All values are referenceable Kong secrets and stored encrypted. NOTE: only api_key and static token are implemented in this build; service-account JWT (RS256) is a documented follow-up.",
+          "description": "Credentials. STS delegation (RFC 8693) is the ONLY path: the caller's enterprise IdP token is exchanged for a short-lived Skyflow bearer whose ctx is their signed claims. The gateway holds NO Skyflow credential -- no API key, no service account, no private key -- so compromising it yields no vault access.",
           "properties": {
-            "api_key": {
-              "type": "string",
-              "description": "Skyflow API key. Referenceable and encrypted."
-            },
             "token": {
               "type": "string",
               "description": "Static Skyflow bearer token. Referenceable and encrypted."
             },
-            "service_account_json": {
-              "type": "string",
-              "description": "Skyflow service-account credentials JSON (JWT/RS256 auth is a documented follow-up). Referenceable and encrypted."
-            },
             "role_ids": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "Optional Skyflow role IDs to scope the minted token."
             },
             "context": {
               "type": "object",
-              "additionalProperties": { "type": "string" },
+              "additionalProperties": {
+                "type": "string"
+              },
               "description": "Optional context key/value map for context-aware Skyflow policies."
             }
           }
@@ -64,25 +69,38 @@
         "profile": {
           "type": "string",
           "default": "openai",
-          "enum": ["openai", "anthropic", "mcp", "generic"],
+          "enum": [
+            "openai",
+            "anthropic",
+            "mcp",
+            "generic"
+          ],
           "description": "Built-in payload template selecting which JSON fields carry user text. 'generic' requires request_json_paths or content_type=text."
         },
         "request_json_paths": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "JSONPath-lite selectors ($, .key, [*], [n], *) for request text spans to de-identify. Overrides/augments the profile."
         },
         "response_json_paths": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "JSONPath-lite selectors for response text spans to re-identify. Overrides/augments the profile."
         },
         "content_type": {
           "type": "string",
           "default": "auto",
-          "enum": ["auto", "json", "text"],
+          "enum": [
+            "auto",
+            "json",
+            "text"
+          ],
           "description": "How to interpret the body. 'auto' sniffs; 'json' selects spans via JSONPath; 'text' treats the whole body as one span."
         },
         "max_body_size": {
@@ -105,25 +123,35 @@
           "properties": {
             "entities": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "default": [],
               "description": "Entity types to detect (e.g. NAME, EMAIL_ADDRESS, SSN, CREDIT_CARD). Empty = Skyflow's default detector set."
             },
             "token_format": {
               "type": "string",
               "default": "VAULT_TOKEN",
-              "enum": ["VAULT_TOKEN", "ENTITY_ONLY", "ENTITY_UNQ_COUNTER"],
+              "enum": [
+                "VAULT_TOKEN",
+                "ENTITY_ONLY",
+                "ENTITY_UNQ_COUNTER"
+              ],
               "description": "VAULT_TOKEN = reversible, stored, deterministic per value. ENTITY_ONLY = one-way label. ENTITY_UNQ_COUNTER = label + counter."
             },
             "allow_regex": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "default": [],
               "description": "Regex patterns to always allow (never tokenize)."
             },
             "restrict_regex": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "default": [],
               "description": "Regex patterns to always tokenize."
             },
@@ -131,13 +159,26 @@
               "type": "object",
               "description": "Optional date-shifting transformation.",
               "properties": {
-                "enabled": { "type": "boolean", "default": false },
-                "min_days": { "type": "integer", "default": 10 },
-                "max_days": { "type": "integer", "default": 30 },
+                "enabled": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "min_days": {
+                  "type": "integer",
+                  "default": 10
+                },
+                "max_days": {
+                  "type": "integer",
+                  "default": 30
+                },
                 "entities": {
                   "type": "array",
-                  "items": { "type": "string" },
-                  "default": ["DOB"],
+                  "items": {
+                    "type": "string"
+                  },
+                  "default": [
+                    "DOB"
+                  ],
                   "description": "Date entity types to shift."
                 }
               }
@@ -145,8 +186,10 @@
             "batch_mode": {
               "type": "string",
               "default": "per_span",
-              "enum": ["per_span", "joined"],
-              "description": "How multiple text spans are batched into Detect calls."
+              "enum": [
+                "per_span"
+              ],
+              "description": "How text spans are batched into Detect calls. Only per_span is implemented; spans are de-identified concurrently (see max_concurrency)."
             }
           }
         },
@@ -162,14 +205,22 @@
             "strategy": {
               "type": "string",
               "default": "mapping_only",
-              "enum": ["mapping_only", "reidentify_text", "detokenize"],
+              "enum": [
+                "mapping_only",
+                "reidentify_text",
+                "detokenize"
+              ],
               "description": "mapping_only = pure request-scoped substitution, no extra call. reidentify_text = vault-authoritative via Skyflow /v1/detect/reidentify/string (requires VAULT_TOKEN). detokenize = accepted but degrades to return_tokenized until implemented."
             },
             "entity_treatment": {
               "type": "object",
               "additionalProperties": {
                 "type": "string",
-                "enum": ["plain_text", "masked", "redacted"]
+                "enum": [
+                  "plain_text",
+                  "masked",
+                  "redacted"
+                ]
               },
               "default": {},
               "description": "Per-entity-type treatment override for re-identification."
@@ -177,19 +228,29 @@
             "default_treatment": {
               "type": "string",
               "default": "plain_text",
-              "enum": ["plain_text", "masked", "redacted"],
+              "enum": [
+                "plain_text",
+                "masked",
+                "redacted"
+              ],
               "description": "Treatment for entity types without an explicit entity_treatment entry."
             },
             "streaming": {
               "type": "string",
               "default": "buffer",
-              "enum": ["buffer", "passthrough"],
+              "enum": [
+                "buffer",
+                "passthrough"
+              ],
               "description": "How streaming responses are handled. 'buffer' collects the full response so tokens can be matched."
             },
             "on_error": {
               "type": "string",
               "default": "return_tokenized",
-              "enum": ["return_tokenized", "deny"],
+              "enum": [
+                "return_tokenized",
+                "deny"
+              ],
               "description": "Behavior when re-identification fails."
             }
           }
@@ -220,7 +281,7 @@
           "default": 8,
           "minimum": 1,
           "maximum": 64,
-          "description": "Maximum concurrent Skyflow calls per request."
+          "description": "Maximum concurrent Skyflow Detect calls per request. Spans are processed in waves of this width, so request latency is roughly ceil(spans/width) round trips rather than one per span. Must not exceed keepalive_pool_size."
         },
         "keepalive_pool_size": {
           "type": "integer",
@@ -239,13 +300,19 @@
         "on_skyflow_error": {
           "type": "string",
           "default": "deny",
-          "enum": ["deny", "allow"],
+          "enum": [
+            "deny",
+            "allow"
+          ],
           "description": "Enforcement posture when Skyflow is unreachable or errors. 'deny' fails closed."
         },
         "on_parse_error": {
           "type": "string",
           "default": "deny",
-          "enum": ["deny", "skip"],
+          "enum": [
+            "deny",
+            "skip"
+          ],
           "description": "Behavior when the body can't be parsed. 'deny' fails closed; 'skip' forwards untouched."
         },
         "dry_run": {
@@ -257,7 +324,10 @@
           "type": "object",
           "description": "Structured logging. Never logs raw values.",
           "properties": {
-            "detections": { "type": "boolean", "default": true },
+            "detections": {
+              "type": "boolean",
+              "default": true
+            },
             "sample_rate": {
               "type": "number",
               "default": 1.0,
@@ -270,27 +340,52 @@
         "metrics": {
           "type": "object",
           "properties": {
-            "enabled": { "type": "boolean", "default": true }
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            }
           }
         }
       }
     },
     "protocols": {
       "type": "array",
-      "default": ["grpc", "grpcs", "http", "https"],
+      "default": [
+        "grpc",
+        "grpcs",
+        "http",
+        "https"
+      ],
       "items": {
         "type": "string",
-        "enum": ["http", "https", "grpc", "grpcs", "ws", "wss"]
+        "enum": [
+          "http",
+          "https",
+          "grpc",
+          "grpcs",
+          "ws",
+          "wss"
+        ]
       }
     },
     "service": {
       "type": "object",
-      "properties": { "id": { "type": "string" } }
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
     },
     "route": {
       "type": "object",
-      "properties": { "id": { "type": "string" } }
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
     }
   },
-  "required": ["config"]
+  "required": [
+    "config"
+  ]
 }

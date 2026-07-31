@@ -21,7 +21,20 @@ local function jenc(v)
   for _, k in ipairs(keys) do parts[#parts + 1] = '"' .. tostring(k) .. '":' .. jenc(v[k]) end
   return "{" .. table.concat(parts, ",") .. "}"
 end
-package.loaded["cjson.safe"] = { encode = jenc, decode = function() return nil end }
+-- The stub keeps the deterministic encoder (SSE tests assert on exact output)
+-- and a nil decoder (nothing under test needs it), but it MUST expose `new`,
+-- because handler.lua builds its body codec via `cjson.new()`. Without it,
+-- body_json silently fell back to this stub and the handler's real codec was
+-- unobservable -- which is how a test written for the `tools: [] -> {}` bug
+-- passed with the bug reinstated.
+local real_cjson = select(2, pcall(require, "cjson.safe"))
+package.loaded["cjson.safe"] = {
+  encode = jenc,
+  decode = function() return nil end,
+  new = (type(real_cjson) == "table" and real_cjson.new) or nil,
+  array_mt = (type(real_cjson) == "table" and real_cjson.array_mt) or nil,
+  null = (type(real_cjson) == "table" and real_cjson.null) or nil,
+}
 _G.kong = { log = { err=function() end, warn=function() end, set_serialize_value=function() end },
   request = {}, response = {}, service = { request = {}, response = {} }, ctx = { plugin = {} } }
 _G.ngx = { now = function() return 0 end }
@@ -155,7 +168,14 @@ eq(sse:find("event: message_start\ndata: ", 1, true) ~= nil, true, "anthropic ss
 eq(sse:find('"type":"text_delta"', 1, true) ~= nil, true, "anthropic sse: text_delta present")
 eq(sse:find('"text":"Hi Jane"', 1, true) ~= nil, true, "anthropic sse: text carried")
 eq(sse:find('"type":"input_json_delta"', 1, true) ~= nil, true, "anthropic sse: tool_use as input_json_delta")
-eq(sse:find('\\"path\\":\\"/tmp/x\\"', 1, true) ~= nil, true, "anthropic sse: tool input serialized")
+-- Matched loosely on purpose. Tool inputs are serialized by the handler's own
+-- body codec (real cjson), not by this file's stub encoder, and the two differ in
+-- ways that are irrelevant to the behaviour under test: key order is unspecified,
+-- and real cjson escapes forward slashes (`"\/tmp\/x"`, valid JSON, decodes back
+-- to `/tmp/x`). The old exact-string assertion was pinned to the stub, so it
+-- broke the moment the test started exercising the production codec.
+eq(sse:find('path', 1, true) ~= nil and sse:find('tmp', 1, true) ~= nil, true,
+   "anthropic sse: tool input serialized")
 eq(sse:find('"name":"write"', 1, true) ~= nil, true, "anthropic sse: tool name in block_start")
 eq(sse:find('"stop_reason":"tool_use"', 1, true) ~= nil, true, "anthropic sse: stop_reason in message_delta")
 eq(sse:find("event: message_stop", 1, true) ~= nil, true, "anthropic sse: message_stop last")
@@ -284,8 +304,252 @@ eq(d5.messages[1].content, PRE .. "\n\nbe terse", "openai: prepended to the exis
 -- the instruction that keeps re-identification working
 eq(T.DEFAULT_TOKEN_PREAMBLE:find("square brackets", 1, true) ~= nil, true,
    "default preamble tells the model to keep the brackets")
-eq(T.DEFAULT_TOKEN_PREAMBLE:find("Do not remark on the redaction", 1, true) ~= nil, true,
-   "default preamble forbids editorialising about redaction")
+eq(T.DEFAULT_TOKEN_PREAMBLE:find("Do not characterise the material as redacted", 1, true) ~= nil
+   or T.DEFAULT_TOKEN_PREAMBLE:find("do not characterise the material as redacted", 1, true) ~= nil, true,
+   "default preamble forbids characterising the material as redacted")
+
+-- The example suffixes must NOT be token-shaped: a plausible-looking example
+-- rides on every request and, if echoed, sends re-identification after a token
+-- that was never issued. `%w` covers the a1b2c3 form the old preamble used.
+eq(T.DEFAULT_TOKEN_PREAMBLE:find("%[NAME_%l%d%l%d%l%d%]") == nil, true,
+   "no lowercase-alphanumeric (token-shaped) example suffix")
+eq(T.DEFAULT_TOKEN_PREAMBLE:find("[NAME_EXAMPLE]", 1, true) ~= nil, true,
+   "examples use the literal word EXAMPLE, which cannot collide with a real suffix")
+eq(T.DEFAULT_TOKEN_PREAMBLE:find("do not add caveats", 1, true) ~= nil, true,
+   "default preamble forbids privacy disclaimers")
+
+-- 14. Empty arrays must round-trip as arrays, THROUGH THE HANDLER'S OWN CODEC.
+-- Claude Desktop sends `tools: []` on its title-generation call; Lua has one
+-- table type, so a plain cjson decode/encode turned that into `tools: {}` and
+-- Anthropic answered 400 "tools: Input should be a valid array" on EVERY such
+-- request.
+--
+-- The previous version of this section asserted on the cjson LIBRARY instead of
+-- on the handler, and therefore passed with the bug reinstated -- verified by
+-- mutation. These assertions go through T.decode_body / T.encode_body, the exact
+-- functions the request and response bodies traverse, so reverting the fix in
+-- handler.lua fails here.
+if T.decode_body and T.encode_body then
+  local body = '{"model":"m","tools":[],"messages":[{"role":"user","content":"hi"}]}'
+  local out = T.encode_body(T.decode_body(body))
+  eq(out ~= nil, true, "handler codec decodes and re-encodes a request body")
+  eq(out:find('"tools":[]', 1, true) ~= nil, true,
+     "handler codec PRESERVES an empty array (the 400 that broke title generation)")
+  eq(out:find('"tools":{}', 1, true) == nil, true,
+     "handler codec never emits {} for an empty array")
+
+  local nested = T.encode_body(T.decode_body(
+    '{"tools":[{"input_schema":{"properties":{},"required":[]}}]}'))
+  eq(nested:find('"required":[]', 1, true) ~= nil, true, "nested empty array survives")
+  eq(nested:find('"properties":{}', 1, true) ~= nil, true,
+     "an empty OBJECT still encodes as an object, not an array")
+
+  -- a tool_use input carrying an empty array: the second site of the same bug,
+  -- on the SSE re-emit path
+  local ti = T.encode_body(T.decode_body('{"paths":[],"query":"x"}'))
+  eq(ti:find('"paths":[]', 1, true) ~= nil, true,
+     "tool_use input keeps its empty array on the re-emit path")
+else
+  fails = fails + 1
+  print("FAIL: handler codec not exported (decode_body/encode_body) -- cannot verify the tools:[] fix")
+end
+
+-- 15. tool_policy: which tool calls get real values back. The bug this fixes:
+-- with one global `tokenized` setting, the model's Edit call carried
+-- [NAME_X2A0iim] as its `old_string` and the LOCAL editor wrote that token into
+-- the user's real file. The destination of the call decides the policy, and the
+-- tool name is what names the destination.
+local function tconf(default, by)
+  return { reidentify = { tool_inputs = default, tool_inputs_by_tool = by } }
+end
+
+local DESKTOP = {
+  ["Read"] = "plain_text", ["Edit"] = "plain_text", ["Write"] = "plain_text",
+  ["mcp__workspace__*"] = "plain_text",
+  ["mcp__workspace__web_fetch"] = "tokenized",   -- narrower rule, egresses
+  ["WebSearch"] = "tokenized",
+}
+local c = tconf("tokenized", DESKTOP)
+
+eq(T.tool_policy(c, "Edit"), "plain_text", "local editor gets real values (the file-corruption bug)")
+eq(T.tool_policy(c, "WebSearch"), "tokenized", "web search stays tokenized")
+eq(T.tool_policy(c, "mcp__workspace__bash"), "plain_text", "prefix rule covers a local MCP server")
+eq(T.tool_policy(c, "mcp__workspace__web_fetch"), "tokenized",
+   "exact match beats the prefix rule that contains it")
+eq(T.tool_policy(c, "mcp__slack__send_message"), "tokenized",
+   "an unlisted MCP server falls back to the default")
+
+-- longest prefix wins, so a broad rule can be narrowed by a longer one
+local nested = tconf("tokenized", { ["mcp__*"] = "tokenized",
+                                    ["mcp__workspace__*"] = "plain_text" })
+eq(T.tool_policy(nested, "mcp__workspace__bash"), "plain_text", "longest prefix wins")
+eq(T.tool_policy(nested, "mcp__other__thing"), "tokenized", "shorter prefix still applies elsewhere")
+
+-- the fallback must survive every degenerate shape, since this runs per tool call
+eq(T.tool_policy(tconf("tokenized", {}), "Edit"), "tokenized", "empty map -> default")
+eq(T.tool_policy(tconf("plain_text", {}), "Edit"), "plain_text", "default can be plain_text")
+eq(T.tool_policy(tconf(nil, {}), "Edit"), "tokenized", "absent default -> tokenized (fail safe)")
+eq(T.tool_policy(tconf("tokenized", nil), "Edit"), "tokenized", "absent map -> default")
+eq(T.tool_policy(c, nil), "tokenized", "nil tool name -> default, no crash")
+eq(T.tool_policy(c, ""), "tokenized", "empty tool name -> default")
+
+-- a `*` in a NAME must not be treated as a wildcard from the other direction
+eq(T.tool_policy(tconf("tokenized", { ["a-b.c"] = "plain_text" }), "a-b.c"), "plain_text",
+   "regex-magic characters in a key are matched literally")
+
+-- 16. Two coverage gaps found by diffing live egress against what we tokenize.
+-- Both were invisible in testing because the SHAPES only occur in real client
+-- traffic: Claude Desktop sends `system` as a block array, and a replayed
+-- tool_use only exists from the second turn of a tool-using conversation on.
+local gconf = { profile = "anthropic", request_json_paths = {}, response_json_paths = {} }
+local gpaths = T.effective_paths(gconf, "request")
+local function texts(doc)
+  local out = {}
+  for _, sp in ipairs(T.collect_spans(doc, gpaths)) do out[sp.text] = true end
+  return out
+end
+
+-- `$.system` alone matches only the scalar form; Desktop uses the array form,
+-- so the whole system prompt was going upstream unscanned.
+eq(texts({ system = "plain SECRET" })["plain SECRET"], true, "system as a string is covered")
+eq(texts({ system = { { type = "text", text = "block SECRET" } } })["block SECRET"], true,
+   "system as a BLOCK ARRAY is covered (Claude Desktop's shape)")
+
+-- A restored tool input returns on every later turn as replayed history.
+local replay = { messages = { { role = "assistant", content = {
+  { type = "tool_use", id = "t1", name = "mcp__salesforce__soql",
+    input = { soql = "WHERE Name='Johnathan Smith'" } } } } } }
+eq(texts(replay)["WHERE Name='Johnathan Smith'"], true, "replayed tool_use.input is covered")
+
+-- `**` must reach ARBITRARY depth: a tool's input schema is caller-defined, so
+-- single-level `*` would silently miss anything nested.
+local deep = { messages = { { role = "assistant", content = {
+  { type = "tool_use", id = "t2", name = "q",
+    input = { filter = { contact = { name = "DEEP_SECRET" } }, top = "TOP_SECRET" } } } } } }
+local dt = texts(deep)
+eq(dt["DEEP_SECRET"], true, "** reaches a 3-level-nested string")
+eq(dt["TOP_SECRET"], true, "** still reaches the shallow sibling")
+
+-- `**` collects strings only, and must not crash on non-string leaves
+local mixed = { messages = { { role = "assistant", content = {
+  { type = "tool_use", id = "t3", name = "q",
+    input = { n = 42, ok = true, s = "STR", list = { "A", "B" } } } } } } }
+local mt = texts(mixed)
+eq(mt["STR"] and mt["A"] and mt["B"], true, "** collects strings incl. inside arrays")
+eq(mt[42], nil, "** ignores numbers")
+
+-- terminal-only, and cycle/depth safe on hostile nesting
+local nest = { a = "X" }
+local cur = nest
+for _ = 1, 40 do cur.next = { a = "Y" }; cur = cur.next end
+local okdeep = pcall(function() T.collect_spans({ messages = { { role = "assistant",
+  content = { { type = "tool_use", input = nest } } } } }, gpaths) end)
+eq(okdeep, true, "** survives nesting deeper than the depth guard")
+
+-- 17. classify_client_error: the 404 that destroyed a finished response.
+-- On 2026-07-29 a model reformatted a token we had issued (bulleting `[NAME_x]`
+-- into `- x`); Skyflow's reidentify answered 404 "Detokenization failed. Token X
+-- is invalid."; the generic 4xx branch called it a client error; on_error=deny
+-- turned that into a 502; and a complete 289-token answer was thrown away.
+-- An unmatched token is MODEL behaviour, not a fault, and the text is still
+-- tokenized -- therefore still safe to deliver.
+local UNMATCHED = 'Detokenization failed. Token Ot1Tsdz is invalid. Specify a valid token.'
+
+local _, k = T.classify_client_error(404, UNMATCHED)
+eq(k, "unmatched_token", "404 + 'Detokenization failed' is an unmatched token, not a failure")
+local _, k2 = T.classify_client_error(404, '{"error":"Token abc is invalid"}')
+eq(k2, "unmatched_token", "the 'is invalid' marker also identifies an unmatched token")
+
+-- The marker is load-bearing. A bare 404 means a wrong base_url or vault_id --
+-- being lenient there would silently forward tokenized text on a misconfigured
+-- gateway, which is exactly the case that must fail closed.
+local _, k3 = T.classify_client_error(404, "not found")
+eq(k3, "client_error", "a 404 WITHOUT the marker stays a hard client error (misconfigured URL)")
+local _, k4 = T.classify_client_error(404, nil)
+eq(k4, "client_error", "a 404 with no body stays a hard client error")
+
+-- everything else must keep failing closed
+local m5, k5 = T.classify_client_error(403, "denied")
+eq(k5, "forbidden", "403 is its own kind")
+eq(m5:find("permission", 1, true) ~= nil, true, "403 message names the missing permission")
+eq(select(2, T.classify_client_error(400, UNMATCHED)), "client_error",
+   "the marker does NOT excuse a 400 -- only a 404 can be an unmatched token")
+eq(select(2, T.classify_client_error(401, "nope")), "client_error", "401 stays a client error")
+eq(select(2, T.classify_client_error(422, "bad payload")), "client_error", "422 stays a client error")
+
+-- 18. run_waves: concurrent span de-identification. Untested code that decides
+-- whether a de-identification FAILURE is noticed is the worst kind to have, and
+-- the offline harness has no ngx.thread, so the wave runner takes injected
+-- spawn/wait functions and is exercised both ways here.
+local function fake_threads()
+  -- Cooperative fake: spawn runs immediately and boxes the result, wait unboxes.
+  -- Enough to prove the aggregation and error contracts; real overlap is an
+  -- OpenResty property, not a logic one.
+  return function(fn, arg) return { pcall(fn, arg) } end,
+         function(box) return box[1], box[2], box[3] end
+end
+local spawn, wait = fake_threads()
+
+-- every item is processed, in order, and results are collected
+local seen = {}
+local res, err = T.run_waves({1,2,3,4,5}, 2, function(n)
+  seen[#seen+1] = n; return n * 10
+end, spawn, wait)
+eq(err, nil, "run_waves: no error on the happy path")
+eq(#res, 5, "run_waves: every item produced a result")
+eq(table.concat(seen, ","), "1,2,3,4,5", "run_waves: every item was processed")
+
+-- THE contract that matters: a failure is never dropped
+local r2, e2 = T.run_waves({1,2,3}, 3, function(n)
+  if n == 2 then return nil, "detect exploded on 2" end
+  return n
+end, spawn, wait)
+eq(e2, "detect exploded on 2", "run_waves: an item failure is reported, not swallowed")
+
+-- a crash (thrown error) must SURFACE as an error rather than unwind. Tested on
+-- BOTH branches: with width>1 (concurrent) and width==1 (sequential), because
+-- the sequential branch originally lacked the pcall and a throw escaped the
+-- whole request instead of being reported.
+local _, e3 = T.run_waves({1,2}, 2, function() error("boom") end, spawn, wait)
+eq(type(e3) == "string" and e3:find("crashed", 1, true) ~= nil, true,
+   "run_waves: a thrown error surfaces as an error (concurrent branch)")
+local _, e3b = T.run_waves({1}, 1, function() error("boom") end, spawn, wait)
+eq(type(e3b) == "string" and e3b:find("crashed", 1, true) ~= nil, true,
+   "run_waves: a thrown error surfaces as an error (sequential branch)")
+local _, e3c = T.run_waves({1,2,3}, 8, function() error("boom") end, nil, nil)
+eq(type(e3c) == "string" and e3c:find("crashed", 1, true) ~= nil, true,
+   "run_waves: a throw in the no-thread fallback is reported, not propagated")
+
+-- a failure with no message still fails closed rather than reporting success
+local _, e4 = T.run_waves({1}, 1, function() return nil end, spawn, wait)
+eq(e4, "unknown worker failure", "run_waves: nil-with-no-message still fails")
+
+-- and it must stop early rather than keep spending Detect calls after a failure
+local calls = 0
+T.run_waves({1,2,3,4,5,6}, 2, function(n)
+  calls = calls + 1
+  if n == 1 then return nil, "fail fast" end
+  return n
+end, spawn, wait)
+eq(calls <= 2, true, "run_waves: aborts after the failing wave instead of running all")
+
+-- sequential fallback: no spawn/wait available (the offline + degraded case)
+local r5, e5 = T.run_waves({1,2,3}, 4, function(n) return n end, nil, nil)
+eq(e5, nil, "run_waves: sequential fallback succeeds")
+eq(#r5, 3, "run_waves: sequential fallback processes everything")
+local _, e6 = T.run_waves({1,2,3}, 4, function(n)
+  if n == 2 then return nil, "seq fail" end
+  return n
+end, nil, nil)
+eq(e6, "seq fail", "run_waves: sequential fallback still reports failures")
+
+-- width is clamped, never zero or negative (which would spin forever)
+eq(select(1, T.run_waves({1,2}, 0, function(n) return n end, spawn, wait)) ~= nil, true,
+   "run_waves: width 0 is clamped, not an infinite loop")
+eq(#(select(1, T.run_waves({1,2}, -5, function(n) return n end, spawn, wait))), 2,
+   "run_waves: negative width still processes every item")
+eq(#(select(1, T.run_waves({}, 8, function(n) return n end, spawn, wait))), 0,
+   "run_waves: empty input is a no-op")
 
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)

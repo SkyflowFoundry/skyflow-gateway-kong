@@ -20,6 +20,27 @@
 local http  = require "resty.http"
 local cjson = require "cjson.safe"
 
+-- A SEPARATE decoder for LLM request/response bodies, because those bodies must
+-- round-trip byte-for-byte in shape and plain cjson cannot do it: Lua has one
+-- table type, so `[]` and `{}` both decode to an empty table and both re-encode
+-- as `{}`. Anthropic rejects that with `tools: Input should be a valid array`,
+-- which is exactly what broke Claude Desktop's title-generation call -- it sends
+-- `tools: []`, and every rewritten request came back 400 while the visible
+-- conversation (which sends a populated `tools`) worked fine.
+--
+-- decode_array_with_array_mt stamps decoded arrays with cjson.array_mt, so the
+-- encoder emits `[]`. It is set on a private instance rather than the shared
+-- module: this is a global toggle, and flipping it on the `cjson` every other
+-- plugin and Kong core shares would change their encodings too.
+local body_json = cjson
+do
+  local ok_new, inst = pcall(function () return cjson.new() end)
+  if ok_new and inst and inst.decode_array_with_array_mt then
+    inst.decode_array_with_array_mt(true)
+    body_json = inst
+  end
+end
+
 -- Upstream LLM responses are commonly gzip-encoded; we must inflate before we
 -- can parse/re-identify them. Kong bundles a gzip helper -- load it guarded so
 -- the plugin still loads if the module path differs on a given build.
@@ -67,7 +88,26 @@ local function walk(node, tokens, i, out)
     end
   end
 
-  if tok == "[*]" then
+  if tok == "**" then
+    -- Recursive descent: every string leaf at any depth below here. Needed
+    -- because a tool call's `input` is arbitrary caller-defined JSON -- a
+    -- single-level `*` reaches `input.soql` but not `input.filter.name`, and
+    -- "de-identified only at the depth we guessed" is not a property worth
+    -- having. Terminal only: `**` followed by more tokens is not supported.
+    if type(node) ~= "table" or not last then return end
+    local function deep(parent, depth)
+      if depth > 32 then return end   -- guard the Lua stack on hostile nesting
+      for k, v in pairs(parent) do
+        if type(v) == "string" then
+          out[#out + 1] = { parent = parent, key = k, text = v }
+        elseif type(v) == "table" then
+          deep(v, depth + 1)
+        end
+      end
+    end
+    deep(node, 1)
+
+  elseif tok == "[*]" then
     if type(node) ~= "table" then return end
     for idx = 1, #node do consider(node, idx) end
   elseif tok == "*" then
@@ -96,15 +136,35 @@ end
 
 local PROFILE_PATHS = {
   openai = {
-    request  = { "$.messages[*].content", "$.messages[*].content[*].text", "$.input", "$.prompt" },
+    -- tool_calls arguments is a JSON *string*, so it is one span rather than a
+    -- subtree. Same replayed-history exposure as the Anthropic `input.**` path.
+    request  = { "$.messages[*].content", "$.messages[*].content[*].text", "$.input", "$.prompt",
+                 "$.messages[*].tool_calls[*].function.arguments" },
     response = { "$.choices[*].message.content", "$.choices[*].text" },
   },
   anthropic = {
-    -- The two trailing paths cover tool_result blocks (string form and
-    -- text-block form) -- agent traffic surfaces most sensitive data THERE
-    -- (file contents, command output), not in the user's typed message.
-    request  = { "$.system", "$.messages[*].content[*].text", "$.messages[*].content",
-                 "$.messages[*].content[*].content", "$.messages[*].content[*].content[*].text" },
+    -- The tool_result paths cover both the string and text-block forms -- agent
+    -- traffic surfaces most sensitive data THERE (file contents, command
+    -- output), not in the user's typed message.
+    --
+    -- `$.system[*].text` is NOT redundant with `$.system`. Claude Desktop sends
+    -- the system prompt as an ARRAY OF BLOCKS, and `$.system` only matches the
+    -- scalar form, so the entire system prompt went out unscanned. Verified
+    -- against live traffic: a hostname that Detect tokenized inside a
+    -- tool_result appeared in the clear in the system prompt of the SAME
+    -- request.
+    --
+    -- `input.**` covers a replayed tool_use. This one only bites once tool
+    -- inputs are restored to plain text: the gateway hands the client a real
+    -- value, the client stores it in history, and history replays on every
+    -- subsequent turn -- so without this path the value we just restored goes
+    -- straight back to the provider in the clear. Re-tokenizing is also
+    -- self-consistent: tokenization is deterministic, so the model sees the same
+    -- token it saw the first time.
+    request  = { "$.system", "$.system[*].text",
+                 "$.messages[*].content[*].text", "$.messages[*].content",
+                 "$.messages[*].content[*].content", "$.messages[*].content[*].content[*].text",
+                 "$.messages[*].content[*].input.**" },
     response = { "$.content[*].text" },
   },
   mcp = {
@@ -254,20 +314,38 @@ end
 -- Re-identification resolves a token by matching it; a model that rewrites
 -- `[NAME_xFaTgtN]` as `NAME_xFaTgtN` or `**[NAME_xFaTgtN]**` can defeat the
 -- lookup, and the caller then sees a token instead of the real value.
+-- The example suffixes are deliberately the literal word EXAMPLE rather than
+-- token-shaped strings. An earlier version used [NAME_a1b2c3], which read as a
+-- real token: it appeared on the wire on every request, and had the model ever
+-- echoed it back, re-identification would have tried to resolve a token that was
+-- never in any vault. EXAMPLE cannot collide with a generated suffix, and if it
+-- ever does surface in output it is self-evidently the instruction leaking
+-- rather than a lookup that silently failed.
 local DEFAULT_TOKEN_PREAMBLE =
-  "Some values in this conversation have been replaced with privacy-preserving "
-  .. "placeholders that look like [NAME_a1b2c3], [EMAIL_ADDRESS_d4e5f6] or "
-  .. "[ACCOUNT_NUMBER_g7h8i9].\n\n"
+  "Some values in this conversation appear as placeholders: an entity type and a "
+  .. "short code in square brackets, such as [NAME_EXAMPLE], "
+  .. "[EMAIL_ADDRESS_EXAMPLE] or [ACCOUNT_NUMBER_EXAMPLE].\n\n"
   .. "Treat each placeholder as the real value it stands for. They are stable: "
   .. "the same placeholder always refers to the same person or thing, so you can "
   .. "compare, group and reason about them normally.\n\n"
   .. "When you refer to one, reproduce it exactly as written, including the "
   .. "square brackets. Do not translate, shorten, reformat, emphasise or "
   .. "pluralise a placeholder.\n\n"
-  .. "Do not remark on the redaction, apologise for it, or say information is "
-  .. "missing or unavailable -- nothing is missing. Do not guess or invent what a "
-  .. "placeholder might stand for. Simply answer the request, using the "
-  .. "placeholders where you would have used the underlying values."
+  -- Each clause below corresponds to an observed failure. The bare "do not
+  -- remark on the redaction" wording was not enough on summarization tasks: the
+  -- model still described documents as "containing redacted personal
+  -- information" and listed which fields were "redacted", which is commentary
+  -- about the transport rather than an answer about the content.
+  .. "Write as though the placeholders were the underlying values. Do not "
+  .. "mention, describe, count or draw attention to the placeholders themselves. "
+  .. "Do not characterise the material as redacted, masked, anonymised, "
+  .. "sanitised or privacy-protected, and do not add caveats or disclaimers "
+  .. "about it -- that is a property of how the text reached you, not a fact "
+  .. "about its content, and the reader already knows it.\n\n"
+  .. "Nothing is missing or unavailable, so never say that it is, apologise for "
+  .. "it, or decline on those grounds. Do not guess or invent what a placeholder "
+  .. "might stand for. Simply answer the request, using the placeholders exactly "
+  .. "where you would have used the underlying values."
 
 -- Prepend the preamble to whatever system prompt the caller already sent,
 -- handling every shape the two profiles use: absent, a plain string, or an
@@ -514,6 +592,33 @@ local function auth_value(conf, deadline)
 end
 
 -- POST JSON to Skyflow with a per-attempt timeout and deadline-bounded retries.
+-- Classify a 4xx from Skyflow. Pure, and exported for tests, because the one
+-- case that matters here is impossible to reach through the HTTP path offline
+-- and cost a real user a finished answer when it was miscategorised.
+--
+-- Returns (message, kind). `kind == "unmatched_token"` means the vault could not
+-- resolve a token in the text -- the model reformatted a placeholder we issued
+-- (`[NAME_x]` bulleted to `- x`, bolded, split). That is model behaviour, not a
+-- gateway or vault fault, and on the RESPONSE leg it must degrade to "leave that
+-- span tokenized" rather than destroy a complete response. On 2026-07-29 it did
+-- the latter: 404 -> generic client error -> on_error=deny -> 502, and a
+-- finished 289-token answer was discarded.
+--
+-- The body marker is load-bearing. Treating ANY 404 as benign would silently
+-- forward tokenized text when the base URL or vault_id is simply wrong, which is
+-- exactly the misconfiguration that must fail closed.
+local function classify_client_error(status, body)
+  body = tostring(body or "")
+  if status == 404 and (body:find("Detokenization failed", 1, true)
+                        or body:find("is invalid", 1, true)) then
+    return "skyflow 404 unmatched token", "unmatched_token"
+  end
+  if status == 403 then
+    return "skyflow 403 (grant the Detect de-identify/re-identify permission)", "forbidden"
+  end
+  return "skyflow status " .. tostring(status) .. " (client error, not retried)", "client_error"
+end
+
 local function skyflow_post(conf, authz, path, payload, deadline)
   local url = base_url(conf) .. path
   local headers = { ["Authorization"] = authz, ["Content-Type"] = "application/json" }
@@ -537,12 +642,11 @@ local function skyflow_post(conf, authz, path, payload, deadline)
       if not data then return nil, "non-JSON response from Skyflow" end
       if data.errors and #data.errors > 0 then return nil, "skyflow returned errors[]" end
       return data
-    elseif res and res.status == 403 then
-      return nil, "skyflow 403 (grant the Detect de-identify/re-identify permission)"
     elseif res and res.status >= 400 and res.status < 500 and res.status ~= 429 then
       -- client error (bad payload / vault_id / credential): retrying can't help,
       -- so fail fast instead of burning the whole deadline budget.
-      return nil, "skyflow status " .. res.status .. " (client error, not retried)"
+      local cerr, ckind = classify_client_error(res.status, res.body)
+      return nil, cerr, ckind
     else
       -- 429 / 5xx / transport: retryable within the deadline, with small backoff.
       last_err = res and ("skyflow status " .. res.status) or ("transport: " .. tostring(err))
@@ -803,8 +907,11 @@ end
 -- request-scoped map). Returns re-identified text (or nil, err).
 local function skyflow_reidentify(conf, authz, text, deadline)
   local payload = { text = text, vault_id = conf.vault_id }
-  local data, err = skyflow_post(conf, authz, "/v1/detect/reidentify/string", payload, deadline)
-  if not data then return nil, err end
+  -- third return value carries the failure KIND; "unmatched_token" is benign on
+  -- this leg and the caller degrades instead of failing the whole response.
+  local data, err, kind = skyflow_post(conf, authz, "/v1/detect/reidentify/string",
+                                       payload, deadline)
+  if not data then return nil, err, kind end
   return data.processed_text or data.text or text
 end
 
@@ -860,7 +967,103 @@ local function read_request_body()
   return data
 end
 
+-- Move the caller's IdP token out of the shared nginx request headers and into
+-- per-request plugin context, FIRST THING, before any path that can return.
+--
+-- Two separate leaks close here:
+--   * egress -- Kong's ai-proxy drivers only ever set_header their provider
+--     credential and never clear an inbound Authorization (verified in
+--     kong/llm/drivers/anthropic.lua). Anthropic authenticates with x-api-key,
+--     so nothing downstream overwrites ours and the caller's enterprise token
+--     would ride all the way to api.anthropic.com. (The OpenAI route escapes
+--     this only because its credential occupies Authorization itself -- an
+--     accident, not a design.)
+--   * LOGS -- clear_header mutates the same table file-log's serializer reads.
+--     This used to run ~40 lines below, AFTER the 401/413/422 early returns, so
+--     every rejected request serialized its (invalid or expired) caller token to
+--     stdout and on to CloudWatch, where retention is unlimited. Rejected
+--     requests are exactly the ones carrying suspect credentials.
+--
+-- Nothing inward needs the header: internal routes are guarded by source IP, and
+-- the STS bearer we mint travels in our own request to Skyflow. sts_bearer reads
+-- ctx.caller_token in preference to the header, so stashing before clearing is
+-- what keeps auth working at all.
+local function take_caller_token(conf, ctx)
+  local sts = conf.credentials and conf.credentials.sts
+  local hdr = (sts and sts.token_header) or "authorization"
+  local raw = kong.request.get_header(hdr)
+  if raw and raw ~= "" then ctx.caller_token = raw end
+  if kong.service and kong.service.request and kong.service.request.clear_header then
+    kong.service.request.clear_header(hdr)
+    -- also clear Authorization when the token arrived in a custom header, so a
+    -- separate bearer cannot ride along to the provider
+    if hdr:lower() ~= "authorization" then
+      kong.service.request.clear_header("Authorization")
+    end
+  end
+end
+
+-- Run `fn` over `items` in concurrent waves of at most `width`, returning
+-- (results, first_error). Hoisted out of the access phase and exported so the
+-- concurrency semantics are testable without a live Kong: the offline harness has
+-- no ngx.thread, and a fail-closed gateway cannot afford an untested path that
+-- decides whether de-identification failures are noticed.
+--
+-- Guarantees, in order of importance:
+--   * a failure in ANY item is reported -- never dropped. A swallowed error here
+--     would turn "de-identification failed" into "forwarded in the clear".
+--   * every spawned thread is waited on, even after a failure is known, so none
+--     outlives the request.
+--   * no locking needed: OpenResty light threads are cooperatively scheduled on a
+--     single worker, so only one runs Lua at a time.
+--   * degrades to a plain sequential loop where light threads are unavailable,
+--     which is also what makes it testable offline.
+local function run_waves(items, width, fn, spawn, wait)
+  local results, first_err = {}, nil
+  width = math.max(1, math.floor(tonumber(width) or 1))
+  local concurrent = spawn and wait
+  local i = 1
+  while i <= #items and not first_err do
+    local last = math.min(i + width - 1, #items)
+    if concurrent and last > i then
+      local threads = {}
+      for j = i, last do threads[#threads + 1] = spawn(fn, items[j]) end
+      for t = 1, #threads do
+        local ok_t, value, err = wait(threads[t])
+        if not ok_t then
+          first_err = first_err or ("worker crashed: " .. tostring(value))
+        elseif value == nil then
+          first_err = first_err or (err or "unknown worker failure")
+        else
+          results[#results + 1] = value
+        end
+      end
+    else
+      for j = i, last do
+        -- pcall, to match the concurrent branch. ngx.thread.wait already reports
+        -- a thrown error as `ok == false`; without pcall here the same fault
+        -- would UNWIND out of the sequential path instead of being reported,
+        -- so the two branches would fail differently for identical input.
+        local ok_c, value, err = pcall(fn, items[j])
+        if not ok_c then
+          first_err = first_err or ("worker crashed: " .. tostring(value))
+          break
+        end
+        if value == nil then
+          first_err = first_err or (err or "unknown worker failure")
+          break
+        end
+        results[#results + 1] = value
+      end
+    end
+    i = last + 1
+  end
+  return results, first_err
+end
+
 local function run_access(conf, ctx)
+  take_caller_token(conf, ctx)
+
   local raw = read_request_body()
   if raw == nil then
     if conf.on_parse_error == "deny" then
@@ -900,26 +1103,8 @@ local function run_access(conf, ctx)
     return { deny = true, status = 502, body = { message = "request blocked: auth unavailable" } }
   end
 
-  -- Strip the credential we just consumed, so it cannot egress to the model
-  -- provider. This is NOT belt-and-braces: Kong's own ai-proxy drivers add their
-  -- provider credential with set_header and never clear an inbound
-  -- Authorization -- verified in kong/llm/drivers/anthropic.lua, whose
-  -- configure_request only ever calls set_header(auth_header_name, ...). Since
-  -- Anthropic authenticates with x-api-key rather than Authorization, nothing
-  -- downstream overwrites ours, and the caller's enterprise IdP token would ride
-  -- all the way to api.anthropic.com. (The OpenAI route happens to escape this
-  -- because its credential occupies Authorization itself -- an accident, not a
-  -- design.) Nothing inward needs it: internal routes are guarded by source IP,
-  -- and the STS bearer we minted travels in our own request to Skyflow.
-  if kong.service and kong.service.request and kong.service.request.clear_header then
-    -- keep a copy for the response leg BEFORE clearing: this call mutates the
-    -- shared nginx request headers, not just what goes upstream
-    local sts = conf.credentials.sts
-    local hdr = (sts and sts.token_header) or "authorization"
-    local raw = kong.request.get_header(hdr)
-    if raw and raw ~= "" then ctx.caller_token = raw end
-    kong.service.request.clear_header("Authorization")
-  end
+  -- (the caller's token was stashed and stripped by take_caller_token at the top
+  -- of this function, before any path that can return)
 
   -- Will this request's response actually be re-emitted as SSE by :response()?
   -- Downgrading the client's stream is only safe if the answer is yes; otherwise
@@ -948,7 +1133,7 @@ local function run_access(conf, ctx)
   -- Build the list of text spans to process.
   local doc, spans
   if json_mode then
-    doc = cjson.decode(raw)
+    doc = body_json.decode(raw)
     if doc == nil then
       if conf.on_parse_error == "deny" then
         return { deny = true, status = 422, body = { message = "request blocked: invalid JSON" } }
@@ -989,7 +1174,7 @@ local function run_access(conf, ctx)
         doc.stream = false
         doc.stream_options = nil
       end
-      local enc, eerr = cjson.encode(doc)
+      local enc, eerr = body_json.encode(doc)
       if not enc then return fail_action(conf, ctx, "re-encode failed: " .. tostring(eerr)) end
       kong.service.request.set_raw_body(enc)
       kong.service.request.set_header("Content-Length", #enc)
@@ -1022,21 +1207,46 @@ local function run_access(conf, ctx)
     kong.log.warn("skyflow: deidentify.batch_mode='joined' is not implemented; using per_span")
   end
 
-  -- De-identify each span (sequential; deadline-bounded). Aggregate the map.
+  -- De-identify every span, CONCURRENTLY, in waves of conf.max_concurrency.
+  --
+  -- This loop used to be sequential, which made latency linear in span count:
+  -- measured on real traffic, Detect costs ~104ms per span at the median and
+  -- ~403ms at p90, so a large agent request spent essentially all of its
+  -- wall-clock here (worst observed: 26.3s of a 31.4s request). It also made
+  -- `max_concurrency` -- which the schema has always declared, the security doc
+  -- describes as a DoS control, and the partner schema ships -- dead config.
+  --
+  -- ngx.thread.spawn is permitted in the access phase, and lua-resty-http uses
+  -- cosockets, so the requests genuinely overlap. OpenResty light threads are
+  -- cooperatively scheduled on one worker, so `by_token`/`counts` need no
+  -- locking: only one thread runs Lua at a time and the aggregation below
+  -- happens after wait().
+  --
+  -- Fail-closed is the delicate part. A dropped thread error would silently
+  -- convert "de-identification failed" into "forwarded in the clear", so EVERY
+  -- thread's outcome is collected and the first failure aborts the whole request
+  -- exactly as the sequential version did. Threads already spawned are waited on
+  -- rather than abandoned, so none can outlive the request.
   local by_token, counts = {}, {}
+  local pending = {}
   for _, span in ipairs(spans) do
     -- Skip empty spans: agent conversations carry messages with content "" (e.g.
     -- an assistant turn that only made tool calls). Skyflow Detect 400s on empty
     -- text, so leave it untouched rather than fail the whole request.
     if span.text == "" then
       span.processed = span.text
-      goto continue
+    else
+      pending[#pending + 1] = span
     end
-    local processed, ents = deidentify_text(conf, authz, span.text, deadline)
-    if not processed then
-      return fail_action(conf, ctx, ents)   -- on failure `ents` is the error string
-    end
-    span.processed = processed
+  end
+
+  local width = tonumber(conf.max_concurrency) or 8
+  local results, first_err = run_waves(
+    pending, width, run_span,
+    ngx and ngx.thread and ngx.thread.spawn,
+    ngx and ngx.thread and ngx.thread.wait)
+
+  for _, ents in ipairs(results) do
     for _, e in ipairs(ents) do
       if e.token then
         -- Detect returns the class as `entity_type` (e.g. "NAME"); keep the
@@ -1046,7 +1256,10 @@ local function run_access(conf, ctx)
         counts[etype or "?"] = (counts[etype or "?"] or 0) + 1
       end
     end
-    ::continue::
+  end
+
+  if first_err then
+    return fail_action(conf, ctx, first_err)
   end
 
   ctx.mapping = by_token
@@ -1075,7 +1288,7 @@ local function run_access(conf, ctx)
         doc.stream = false
         doc.stream_options = nil
       end
-      local enc, eerr = cjson.encode(doc)
+      local enc, eerr = body_json.encode(doc)
       if not enc then return fail_action(conf, ctx, "re-encode failed: " .. tostring(eerr)) end
       newbody = enc
     else
@@ -1144,6 +1357,41 @@ local function sse_chunk(doc)
   }
 end
 
+-- Which policy applies to ONE tool call, by name. See the schema comment on
+-- tool_inputs_by_tool for why the tool's name is the right key: it names the
+-- destination, and the destination is what decides whether real values may
+-- materialize there.
+--
+-- Exact match beats prefix match, and the LONGEST prefix wins, so a broad rule
+-- can be narrowed by a specific one:
+--     "mcp__workspace__*"        = "plain_text"   -- runs locally
+--     "mcp__workspace__web_fetch" = "tokenized"   -- ...except this one egresses
+local function tool_policy(conf, name)
+  local reid = conf.reidentify
+  local fallback = reid.tool_inputs or "tokenized"
+  local by = reid.tool_inputs_by_tool
+  if type(by) ~= "table" or type(name) ~= "string" or name == "" then
+    return fallback
+  end
+
+  local exact = by[name]
+  if exact then return exact end
+
+  local best, best_len = nil, -1
+  for pattern, treatment in pairs(by) do
+    -- plain string ops, not Lua patterns: tool names contain no magic chars but
+    -- a config value could, and `find(..., true)` keeps it literal either way.
+    local star = pattern:sub(-1) == "*"
+    if star then
+      local prefix = pattern:sub(1, -2)
+      if #prefix > best_len and name:sub(1, #prefix) == prefix then
+        best, best_len = treatment, #prefix
+      end
+    end
+  end
+  return best or fallback
+end
+
 -- Serialize a (re-identified) chat.completion as a minimal SSE stream, so a
 -- streaming OpenAI client (e.g. a coding agent) gets the event-stream it asked
 -- for even though the gateway had to buffer the full response to re-identify it.
@@ -1191,7 +1439,10 @@ local function anthropic_message_to_sse(doc)
       out[#out + 1] = ev("content_block_start", { type = "content_block_start", index = idx,
         content_block = { type = "tool_use", id = block.id, name = block.name, input = {} } })
       out[#out + 1] = ev("content_block_delta", { type = "content_block_delta", index = idx,
-        delta = { type = "input_json_delta", partial_json = cjson.encode(block.input or {}) } })
+        -- body_json, not cjson: a tool's arguments routinely contain empty
+        -- arrays, and the shared codec would ship them as `{}` -- the same
+        -- shape error that made Anthropic reject `tools: []`.
+        delta = { type = "input_json_delta", partial_json = body_json.encode(block.input or {}) } })
       out[#out + 1] = ev("content_block_stop", { type = "content_block_stop", index = idx })
 
     elseif block.type == "thinking" then
@@ -1240,6 +1491,41 @@ local function doc_to_sse(doc)
   return completion_to_sse(doc)
 end
 
+-- Hand the client an SSE stream when we are BAILING OUT of re-identification.
+--
+-- The access phase downgraded the client's `stream: true` to a buffered upstream
+-- call, on the promise that :response() would convert the result back to SSE.
+-- Every early return in :response() breaks that promise and ships a JSON body
+-- with `Content-Type: text/event-stream`, which a strict client reports as a
+-- decode error or simply stalls on. Two of those paths were reachable with the
+-- SHIPPED defaults (`on_error: return_tokenized`, and the empty-mapping bail),
+-- so this is not an edge case.
+--
+-- Deliberately does NOT re-identify: callers use it precisely when
+-- re-identification could not happen. Tokenized text is safe to deliver -- a
+-- token is not PII -- and a readable answer containing `[NAME_x]` beats a stall.
+-- Returns true if it emitted, so callers can tell a handled bail from a no-op.
+local function reemit_tokenized_stream(ctx)
+  if not ctx.client_stream then return false end
+  local raw = kong.service.response.get_raw_body()
+  if not raw or raw == "" then return false end
+  if inflate_gzip and (kong.service.response.get_header("Content-Encoding") or ""):find("gzip", 1, true) then
+    local ok_inf, inflated = pcall(inflate_gzip, raw)
+    if ok_inf and inflated then raw = inflated end
+  end
+  local doc = body_json.decode(raw)
+  if not doc then return false end
+  local ok_sse, sse = pcall(doc_to_sse, doc)
+  if not ok_sse or not sse or sse == "" then return false end
+  kong.response.set_raw_body(sse)
+  kong.response.clear_header("Content-Encoding")
+  kong.response.set_header("Content-Type", "text/event-stream")
+  kong.response.set_header("Content-Length", #sse)
+  kong.log.warn("skyflow: re-identification skipped; re-emitting the TOKENIZED ",
+                "response as SSE so the streaming client does not stall")
+  return true
+end
+
 function SkyflowDeidentify:response(conf)
   if not conf.reidentify.enabled then return end
 
@@ -1260,14 +1546,27 @@ function SkyflowDeidentify:response(conf)
   -- it needs a non-empty map. reidentify_text resolves tokens via the vault and
   -- must NOT depend on that map (it can be empty even when de-identification
   -- happened) -- gate only on whether tokens actually went upstream.
+  -- Each bail below must still convert the stream we downgraded. See
+  -- reemit_tokenized_stream: returning early here used to ship JSON under
+  -- `Content-Type: text/event-stream`.
   if strat == "mapping_only" then
-    if not next(by_token) then return end
+    if not next(by_token) then reemit_tokenized_stream(ctx); return end
   elseif not ctx.deidentified then
+    reemit_tokenized_stream(ctx)
     return
   end
 
   local status = kong.service.response.get_status()
-  if not status or status < 200 or status >= 300 then return end
+  if not status or status < 200 or status >= 300 then
+    -- An upstream error body is JSON, and doc_to_sse would mangle it into a
+    -- content-bearing message. Leave the body alone but drop the streaming
+    -- content type we no longer honour, so the client parses it as the error it
+    -- is instead of as a broken event stream.
+    if ctx.client_stream then
+      kong.response.set_header("Content-Type", "application/json")
+    end
+    return
+  end
 
   -- reidentify_text calls the vault; resolve auth + a fresh deadline up front
   -- (deadline first: SA bearer minting is itself deadline-bounded).
@@ -1286,12 +1585,14 @@ function SkyflowDeidentify:response(conf)
         if conf.reidentify.on_error == "deny" then
           return kong.response.exit(401, { message = "response blocked: " .. tostring(aerr) })
         end
+        reemit_tokenized_stream(ctx)
         return
       end
       kong.log.err("skyflow re-identify auth error: ", aerr)
       if conf.reidentify.on_error == "deny" then
         return kong.response.exit(502, { message = "response blocked: re-identify unavailable" })
       end
+      reemit_tokenized_stream(ctx)
       return
     end
     if next(conf.reidentify.entity_treatment) or conf.reidentify.default_treatment ~= "plain_text" then
@@ -1306,9 +1607,24 @@ function SkyflowDeidentify:response(conf)
 
   -- Restore one text span. mapping_only substitutes from the request-scoped map
   -- (honors treatments); reidentify_text resolves vault tokens via Skyflow.
+  --
+  -- An UNMATCHED token is not an error here: the model mangled a placeholder we
+  -- issued, so the vault cannot resolve it. Return the text as-is -- it is still
+  -- tokenized, therefore still safe to deliver -- and count it, so a rising
+  -- number is visible in the flow log instead of silently degrading quality.
+  -- Every OTHER failure still propagates and the on_error gate applies.
+  local unmatched = 0
   local function restore(text)
     if strat == "reidentify_text" then
-      return skyflow_reidentify(conf, authz, text, deadline)
+      local out, err, kind = skyflow_reidentify(conf, authz, text, deadline)
+      if not out and kind == "unmatched_token" then
+        unmatched = unmatched + 1
+        kong.log.warn("skyflow: leaving a span tokenized -- the vault could not ",
+                      "resolve a token in it (the model most likely reformatted ",
+                      "it); delivering the response anyway")
+        return text
+      end
+      return out, err
     end
     return reidentify_string(text, by_token, treatment_fn)
   end
@@ -1344,29 +1660,32 @@ function SkyflowDeidentify:response(conf)
     local newbody
     local streamed = false
     if wants_json(conf, ct) then
-      local doc = cjson.decode(body)
+      local doc = body_json.decode(body)
       if doc == nil then
         call_err = "response body not decodable JSON"; return
       end
-      -- Tool inputs (OpenAI tool_calls / Anthropic tool_use): treatment is a
-      -- policy choice (reidentify.tool_inputs).
-      --   tokenized  (default) -- leave the model's tokens in place. The
-      --     gateway is the trust boundary: tools fan data out to arbitrary
-      --     external services (web search, APIs, files), so real values must
-      --     only materialize at the gateway on authorized egress, never
-      --     inside agent-land. A tool acting on a token simply no-ops.
-      --   plain_text -- restore real values before the agent executes the
-      --     tool (trust-the-client deployments; collect_spans only covers
-      --     message content, so this needs its own pass).
-      local restore_tools = conf.reidentify.tool_inputs == "plain_text"
+      -- Tool inputs (OpenAI tool_calls / Anthropic tool_use). The policy is
+      -- decided PER CALL by tool_policy(), because the right answer depends on
+      -- where that particular tool sends its arguments:
+      --   tokenized  -- leave the model's tokens in place. Correct when the tool
+      --     fans data out past the gateway (web search, Slack, a remote API):
+      --     real values must only materialize on authorized egress, and a tool
+      --     handed a token simply no-ops.
+      --   plain_text -- restore real values before the agent runs the tool.
+      --     Correct when the tool executes on the caller's own machine, where
+      --     leaving tokens is actively harmful: an `Edit` call carrying
+      --     `[NAME_X2A0iim]` writes that token into the user's real file.
+      -- collect_spans only covers message content, so this needs its own pass.
       local tool_changed = false
-      if restore_tools and doc.choices then
+
+      if doc.choices then
         for _, ch in ipairs(doc.choices) do
           local tcs = ch.message and ch.message.tool_calls
           if type(tcs) == "table" then
             for _, tc in ipairs(tcs) do
               local fn = tc["function"]
-              if fn and type(fn.arguments) == "string" and fn.arguments ~= "" then
+              if fn and type(fn.arguments) == "string" and fn.arguments ~= ""
+                 and tool_policy(conf, fn.name) == "plain_text" then
                 local restored, rerr = restore(fn.arguments)
                 if not restored then call_err = rerr; return end
                 fn.arguments = restored
@@ -1377,15 +1696,16 @@ function SkyflowDeidentify:response(conf)
         end
       end
 
-      -- Anthropic-native messages: same policy, tool_use.input form.
-      if restore_tools and is_anthropic_message(doc) then
+      -- Anthropic-native messages: same per-call policy, tool_use.input form.
+      if is_anthropic_message(doc) then
         for _, block in ipairs(doc.content) do
-          if block.type == "tool_use" and block.input ~= nil then
-            local enc = cjson.encode(block.input)
+          if block.type == "tool_use" and block.input ~= nil
+             and tool_policy(conf, block.name) == "plain_text" then
+            local enc = body_json.encode(block.input)
             if enc and enc ~= "" then
               local restored, rerr = restore(enc)
               if not restored then call_err = rerr; return end
-              block.input = cjson.decode(restored) or block.input
+              block.input = body_json.decode(restored) or block.input
               tool_changed = true
             end
           end
@@ -1408,7 +1728,7 @@ function SkyflowDeidentify:response(conf)
             span.parent[span.key] = restored
           end
         end
-        newbody = cjson.encode(doc)
+        newbody = body_json.encode(doc)
         -- Client asked to stream; re-emit the re-identified doc as SSE in the
         -- format the client's protocol expects (OpenAI chunk or Anthropic
         -- message events).
@@ -1431,13 +1751,26 @@ function SkyflowDeidentify:response(conf)
     end
   end)
 
+  if unmatched > 0 then
+    kong.ctx.plugin.unmatched_tokens = unmatched
+  end
+
   if (not ok) or call_err then
-    kong.log.warn("skyflow re-identify error; returning tokenized response",
-                  (not ok) and (": pcall: " .. tostring(perr))
-                            or (call_err and (": " .. call_err) or ""))
+    -- Say what is actually about to happen. This message used to read
+    -- "returning tokenized response" unconditionally and then 502 two lines
+    -- later, which is how a response-destroying bug read as benign in the logs
+    -- for a day.
+    local detail = (not ok) and (": pcall: " .. tostring(perr))
+                   or (call_err and (": " .. call_err) or "")
     if conf.reidentify.on_error == "deny" then
+      kong.log.err("skyflow re-identify failed; WITHHOLDING the response (502)", detail)
       return kong.response.exit(502, { message = "response blocked: re-identify failed" })
     end
+    kong.log.warn("skyflow re-identify failed; returning the TOKENIZED response", detail)
+    -- ...and it has to be a STREAM if that is what the client asked for. This
+    -- path is the shipped default (`on_error: return_tokenized`), so without
+    -- this the most likely failure mode was also a protocol violation.
+    reemit_tokenized_stream(ctx)
   end
 end
 
@@ -1446,6 +1779,13 @@ function SkyflowDeidentify:log(conf)
     local ctx = kong.ctx.plugin
     kong.log.set_serialize_value("skyflow.entities_by_type", ctx.entities_by_type or {})
     kong.log.set_serialize_value("skyflow.posture", ctx.posture or "enforce")
+    -- Spans delivered still tokenized because the vault could not resolve a
+    -- token the model had reformatted. Emitted only when non-zero, so it reads
+    -- as a signal rather than noise -- a rising rate means the preamble is
+    -- losing and response quality is degrading quietly.
+    if ctx.unmatched_tokens then
+      kong.log.set_serialize_value("skyflow.unmatched_tokens", ctx.unmatched_tokens)
+    end
   end
 end
 
@@ -1454,6 +1794,14 @@ SkyflowDeidentify._test = {
   parse_path        = parse_path,
   collect_spans     = collect_spans,
   effective_paths   = effective_paths,
+  tool_policy       = tool_policy,
+  classify_client_error = classify_client_error,
+  run_waves         = run_waves,
+  -- the codec the request/response bodies actually go through. Exported because
+  -- asserting on the cjson LIBRARY instead of on this is what let the
+  -- `tools: [] -> {}` bug pass a test written specifically for it.
+  decode_body       = function(s) return body_json.decode(s) end,
+  encode_body       = function(v) return body_json.encode(v) end,
   mask              = mask,
   plain_replace     = plain_replace,
   reidentify_string = reidentify_string,

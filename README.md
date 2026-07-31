@@ -270,7 +270,7 @@ data plane for you). See [`deployment`](docs/using/deployment.md).
 ```text
 plugin/kong/plugins/skyflow-deidentify/
 ├── schema.lua      # config contract — require-free (Konnect upload constraint)
-├── handler.lua     # self-contained: auth (API key / SA-JWT + ctx) + Skyflow Detect
+├── handler.lua     # self-contained: auth (STS delegation) + Skyflow Detect
 │                   #   client + JSONPath-lite body targeting + de-id + re-id
 └── *.rockspec      # self-managed / local installs only
 

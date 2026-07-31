@@ -87,7 +87,7 @@ curl -X POST http://localhost:8001/routes/chat/plugins \
   --data name=skyflow-deidentify \
   --data config.vault_id=$SKYFLOW_VAULT_ID \
   --data config.cluster_id=$SKYFLOW_CLUSTER_ID \
-  --data config.credentials.api_key=$SKYFLOW_API_KEY \
+  --data config.credentials.sts.service_account_id=$SKYFLOW_STS_SERVICE_ACCOUNT_ID \
   --data config.profile=mcp \
   --data 'config.deidentify.entities=NAME,EMAIL_ADDRESS'
 ```

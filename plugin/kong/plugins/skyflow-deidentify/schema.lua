@@ -163,6 +163,26 @@ local reidentify = {
     -- real values first (trust-the-client deployments).
     { tool_inputs = { type = "string", one_of = { "tokenized", "plain_text" },
                       default = "tokenized" } },
+    -- Per-tool override of the above, because one global setting is wrong in
+    -- both directions for an agent harness. The destination of a tool call is
+    -- what decides the policy, and the tool NAME is the only thing that reveals
+    -- it -- Claude Desktop names MCP tools `mcp__<server>__<tool>` and built-ins
+    -- bare (`Read`, `Edit`, `Bash`).
+    --
+    -- A tool that runs on the caller's own machine needs REAL values: left
+    -- tokenized, an Edit call writes the vault token into the user's actual
+    -- file, which is corruption rather than protection. A tool that ships its
+    -- arguments to a third party (Slack, Gmail, web search) must stay tokenized
+    -- or the gateway has been bypassed.
+    --
+    -- Keys are exact tool names, or a `*`-suffixed prefix (`mcp__workspace__*`).
+    -- Exact beats prefix; longest prefix wins; no match falls back to
+    -- `tool_inputs`. A map of plain strings on purpose: Konnect's custom-plugin
+    -- validator rejects per-entity validation functions.
+    { tool_inputs_by_tool = { type = "map", keys = { type = "string" },
+                              values = { type = "string",
+                                         one_of = { "tokenized", "plain_text" } },
+                              default = {} } },
     { entity_treatment = { type = "map", keys = { type = "string" },
                            values = { type = "string", one_of = TREATMENTS }, default = {} } },
     { default_treatment = { type = "string", one_of = TREATMENTS, default = "plain_text" } },

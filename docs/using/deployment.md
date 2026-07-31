@@ -60,9 +60,9 @@ Attach `skyflow-deidentify` to a Route/Service with your Skyflow vault details.
 See [operations.md](operations.md) for ready-to-copy decK, Admin API, KIC, and
 Konnect config, including the nested-proxy layout for composing with `ai-proxy`.
 
-Provide a Skyflow **API key** with the Detect de-identify (and, if you re-identify,
+Provide no Skyflow credential. STS delegation (RFC 8693) is the only credential path: the caller's enterprise IdP token is exchanged for a short-lived Skyflow bearer whose `ctx` is their signed claims. The gateway holds **no** Skyflow credential -- no API key, no service account, no private key -- so there is nothing here for an attacker who compromises the host to steal.
 reidentify) permission — supply it as a secret reference such as
-`credentials.api_key: "{vault://env/SKYFLOW_API_KEY}"`.
+Configure `credentials.sts.service_account_id`, `expected_issuer` and `expected_audience` instead; none of them is a secret.
 
 ## Validate
 

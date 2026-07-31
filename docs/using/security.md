@@ -28,7 +28,7 @@ threat model, data handling, secrets, governance, and compliance.
 | **MITM to Skyflow** | Network interception | TLS to `*.vault.skyflowapis.com`; certificate verification on (never `ssl_verify=false` in prod). |
 | **DoS / amplification** | Huge bodies, many spans | `max_body_size`, `max_spans`, `max_concurrency`, `deadline_ms`; oversized ⇒ configured posture. |
 | **PII reaches upstream before tokenization** | Plugin not on the request path | De-identify runs in `access`; with `ai-proxy` the nested-proxy topology keeps de-identify on the front route so the internal `ai-proxy` route only ever sees tokens. |
-| **Credential compromise** | Leaked API key reused | Store as a secret reference; rotate out-of-band; scope the Skyflow role to least privilege. |
+| **Credential compromise** | Gateway host compromised | Nothing to steal: the gateway holds no Skyflow credential. Access requires a live caller IdP token, and the vault enforces that caller's own entitlements. |
 
 ## Data handling & residency
 
@@ -45,15 +45,15 @@ threat model, data handling, secrets, governance, and compliance.
 
 - Credentials are schema-typed `encrypted` + `referenceable`, so they're never
   stored in plaintext and never returned by the Admin API.
-- Provide `credentials.api_key` / `credentials.service_account_json` as a secret
+- There is no Skyflow credential to provide. STS delegation (RFC 8693) is the only credential path: the caller's enterprise IdP token is exchanged for a short-lived Skyflow bearer whose `ctx` is their signed claims. The gateway holds **no** Skyflow credential -- no API key, no service account, no private key -- so there is nothing here for an attacker who compromises the host to steal.
   reference — Kong **Secrets Management** (`{vault://env/...}`, HashiCorp Vault,
   AWS/GCP SM) or a Konnect control-plane secret.
-- Rotate the API key out-of-band and swap the referenced secret; no plugin change
+- Nothing to rotate at the gateway. Revoking the caller's IdP session, or the STS issuer trust in the Skyflow account, removes access.
   needed.
 
 ### Service-account JWT auth (recommended)
 
-`credentials.service_account_json` holds the Skyflow service-account credentials
+`credentials.sts` names the delegating service account and the expected issuer and audience; it contains no secret.
 JSON. The gateway signs an RS256 JWT assertion in-process (Kong-bundled
 `resty.openssl`; the private key never leaves the data plane) and exchanges it
 for a short-lived bearer (~60 min), cached per worker and re-minted

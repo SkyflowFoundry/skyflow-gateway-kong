@@ -56,9 +56,7 @@ Top-level config object. Types use Kong's typedefs where possible.
 | `account_id` | string | — | | Sent as `X-SKYFLOW-ACCOUNT-ID` when present. |
 | `env` | string (enum) | `PROD` | | `PROD`\|`SANDBOX`\|`DEV`\|`STAGE`. |
 | `skyflow_base_url_override` | string | — | | Full base URL for private-cloud tenants (bypasses derivation). |
-| `credentials.api_key` | string (**referenceable**, encrypted) | — | one-of | API-key auth (PoC default). |
 | `credentials.token` | string (referenceable, encrypted) | — | one-of | Static bearer token. |
-| `credentials.service_account_json` | string (referenceable, encrypted) | — | one-of | `credentials.json` contents for SA-JWT auth. |
 | `credentials.role_ids` | array<string> | — | | Scoped-token roles (SA-JWT only). |
 | `credentials.context` | map<string,string> | — | | Policy context embedded in SA-JWT (`ctx`). |
 | `token_skew_seconds` | integer | `300` | | Refresh the cached token this long before `expiresIn`. |
@@ -107,7 +105,7 @@ are never stored in plaintext in the DB and never appear in `GET /plugins`.
 | `timeout_ms` | integer | `5000` | Per-attempt connect/send/read timeout to Skyflow. |
 | `deadline_ms` | integer | `8000` | Total budget incl. retries. |
 | `retries` | integer | `2` | Max retries for idempotent/ retryable Skyflow errors. |
-| `max_concurrency` | integer | `8` | Parallel Detect calls for `per_span` batching. |
+| `max_concurrency` | integer | `8` | Parallel Detect calls for `per_span` batching. |  <!-- wired into the concurrent span runner (run_waves); waves of this width -->
 | `keepalive_pool_size` | integer | `16` | `lua-resty-http` pool size per worker. |
 | `keepalive_idle_ms` | integer | `60000` | Keepalive idle timeout. |
 | `on_skyflow_error` | string (enum) | `deny` | `deny`\|`allow` (de-identify failure posture). |

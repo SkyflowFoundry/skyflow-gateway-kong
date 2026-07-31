@@ -5,27 +5,32 @@
 # truth and streams config over the cluster connection, so a data plane that also
 # had KONG_DECLARATIVE_CONFIG set would refuse to start.
 #
-# The plugin is NOT baked in. Kong 3.15 can stream custom plugin CODE from the
-# control plane, so handler.lua and schema.lua are uploaded once and every data
-# plane receives them over the cluster connection:
+# The plugin IS baked into this image (COPY plugin /kong-plugins below), and the
+# control plane holds only its SCHEMA, uploaded to:
 #
-#   POST /v2/control-planes/{cp}/core-entities/custom-plugins
-#     { "name": ..., "schema": <schema.lua>, "handler": <handler.lua> }
+#   PUT /v2/control-planes/{cp}/core-entities/plugin-schemas/skyflow-deidentify
+#     { "name": ..., "lua_schema": <schema.lua> }
 #
-# That replaces the old plugin-schemas endpoint, which carried only the schema
-# and required the code in the image. The two are mutually exclusive: uploading
-# custom-plugins fails while a plugin-schemas entry of the same name exists.
+# Upload the schema BEFORE syncing a config that references a new field, or
+# validation of the skyflow-deidentify config fails against the control plane.
 #
-# `custom_plugin_streaming_enabled` is REQUIRED and defaults to off. Without it
-# the control plane reports issue P309 -- "streaming custom plugins have been
-# removed from the config and the data plane may be inoperable" -- and the node
-# silently serves its last good config, which for a privacy gateway means
-# proxying with no de-identification at all. Learned the hard way.
+# Kong 3.15 can also STREAM custom plugin code from the control plane via the
+# `custom-plugins` endpoint, which would remove the need to bake it in. That was
+# attempted and reverted, and everything below is why -- keep it here so the next
+# person does not rediscover it:
 #
-# KONG_PLUGINS must NOT name the streamed plugin. Listing it makes Kong demand
-# the code be installed locally at boot -- "skyflow-deidentify plugin is enabled
-# but not installed" -- and the node dies before it can ever receive the stream.
-# Streamed plugins are discovered from the control-plane config instead.
+#   * `custom_plugin_streaming_enabled` is REQUIRED and defaults to off. Without
+#     it the control plane reports issue P309 -- "streaming custom plugins have
+#     been removed from the config and the data plane may be inoperable" -- and
+#     the node silently serves its last good config, which for a privacy gateway
+#     means proxying with NO de-identification at all. Learned the hard way.
+#   * `plugin-schemas` and `custom-plugins` are mutually exclusive: uploading to
+#     custom-plugins fails while a plugin-schemas entry of the same name exists.
+#   * With streaming, KONG_PLUGINS must NOT name the plugin -- listing it makes
+#     Kong demand the code locally at boot ("skyflow-deidentify plugin is enabled
+#     but not installed") and the node dies before the stream arrives. Because
+#     the plugin is baked in here, KONG_PLUGINS DOES name it below. That is the
+#     single line to change if streaming is revisited.
 #
 # The plugin still has to satisfy Konnect's custom-plugin constraints: no
 # require() in schema.lua, no per-entity custom validation function (the upload
