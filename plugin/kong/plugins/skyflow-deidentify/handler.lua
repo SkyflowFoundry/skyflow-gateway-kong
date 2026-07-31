@@ -94,9 +94,24 @@ local function walk(node, tokens, i, out)
     -- single-level `*` reaches `input.soql` but not `input.filter.name`, and
     -- "de-identified only at the depth we guessed" is not a property worth
     -- having. Terminal only: `**` followed by more tokens is not supported.
-    if type(node) ~= "table" or not last then return end
+    if type(node) ~= "table" then return end
+    if not last then
+      -- `**` is terminal-only. Silently collecting nothing would mean a
+      -- misconfigured path de-identifies NOTHING while the request still
+      -- succeeds, so record it and let the caller fail closed.
+      out.bad_path = true
+      return
+    end
     local function deep(parent, depth)
-      if depth > 32 then return end   -- guard the Lua stack on hostile nesting
+      if depth > 32 then
+        -- FAIL CLOSED, not open. This guard exists for the Lua stack, but
+        -- returning quietly meant a caller could bury PII at depth 33 and the
+        -- request would report success with that subtree unscanned -- the exact
+        -- opposite of the max_spans contract 30 lines below, which refuses
+        -- rather than partially de-identifying.
+        out.depth_exceeded = true
+        return
+      end
       for k, v in pairs(parent) do
         if type(v) == "string" then
           out[#out + 1] = { parent = parent, key = k, text = v }
@@ -139,7 +154,12 @@ local PROFILE_PATHS = {
     -- tool_calls arguments is a JSON *string*, so it is one span rather than a
     -- subtree. Same replayed-history exposure as the Anthropic `input.**` path.
     request  = { "$.messages[*].content", "$.messages[*].content[*].text", "$.input", "$.prompt",
-                 "$.messages[*].tool_calls[*].function.arguments" },
+                 "$.messages[*].tool_calls[*].function.arguments",
+                 -- OpenAI's end-user identifier fields, same reasoning as
+                 -- Anthropic's metadata.user_id
+                 "$.user", "$.messages[*].name",
+                 "$.tools[*].function.description",
+                 "$.tools[*].function.parameters.properties.*.description" },
     response = { "$.choices[*].message.content", "$.choices[*].text" },
   },
   anthropic = {
@@ -161,10 +181,23 @@ local PROFILE_PATHS = {
     -- straight back to the provider in the clear. Re-tokenizing is also
     -- self-consistent: tokenization is deterministic, so the model sees the same
     -- token it saw the first time.
+    -- `metadata.user_id` is Anthropic's documented end-user identifier, and teams
+    -- routinely put a raw email in it. Tokenizing it is semantically safe because
+    -- tokens are deterministic, so any join or rate-limit keyed on it still
+    -- works -- it just stops being an identifier the provider can read.
     request  = { "$.system", "$.system[*].text",
                  "$.messages[*].content[*].text", "$.messages[*].content",
                  "$.messages[*].content[*].content", "$.messages[*].content[*].content[*].text",
-                 "$.messages[*].content[*].input.**" },
+                 "$.messages[*].content[*].input.**",
+                 "$.metadata.user_id",
+                 -- Tool SCHEMAS egress on every single turn (Claude Desktop
+                 -- resends the whole `tools` array each request), and MCP tool
+                 -- descriptions are frequently generated from customer systems.
+                 -- Descriptions only, deliberately: tokenizing an enum or a
+                 -- default would change values the provider validates against
+                 -- and break the tool contract.
+                 "$.tools[*].description",
+                 "$.tools[*].input_schema.properties.*.description" },
     response = { "$.content[*].text" },
   },
   mcp = {
@@ -352,12 +385,28 @@ local DEFAULT_TOKEN_PREAMBLE =
 -- Anthropic array of content blocks.
 local function inject_token_preamble(doc, text, profile)
   if profile == "openai" or profile == "mcp" then
-    if type(doc.messages) ~= "table" then return end
-    local first = doc.messages[1]
+    -- MCP bodies carry their messages at `params.messages`, not at the top
+    -- level (see PROFILE_PATHS.mcp). Requiring doc.messages made this a silent
+    -- no-op for every MCP request: the placeholders were injected nowhere and
+    -- the model was never told what they meant -- precisely the editorialising
+    -- failure the preamble exists to prevent.
+    local msgs = doc.messages
+    if type(msgs) ~= "table" and type(doc.params) == "table" then
+      msgs = doc.params.messages
+    end
+    if type(msgs) ~= "table" then
+      -- No message array anywhere. Say so rather than returning quietly: the
+      -- caller believes the model was briefed, and silence is why this went
+      -- unnoticed.
+      kong.log.warn("skyflow: token preamble not injected -- no message array on ",
+                    "this ", tostring(profile), " request shape")
+      return
+    end
+    local first = msgs[1]
     if type(first) == "table" and first.role == "system" and type(first.content) == "string" then
       first.content = text .. "\n\n" .. first.content
     else
-      table.insert(doc.messages, 1, { role = "system", content = text })
+      table.insert(msgs, 1, { role = "system", content = text })
     end
     return
   end
@@ -705,6 +754,40 @@ local MEDIA_FORMATS = {
 
 -- Collect every base64 attachment block, including ones nested in tool_result
 -- content (an agent reading a file produces exactly that).
+-- Adapt an OPENAI-shaped attachment to the Anthropic `source` view the rest of
+-- this file speaks. Without this, `type == "image_url"` and `type == "file"`
+-- matched nothing: an OpenAI-shaped client pasting a photo of a driver's licence
+-- got it neither de-identified NOR stripped -- the one outcome the attachment
+-- policy exists to make impossible. (LiteLLM handled both shapes already.)
+--
+-- Both carry the bytes as a data URL, so parse it into media_type + base64 and
+-- install a `source` table plus a writeback so the redacted bytes land back in
+-- the field the provider actually reads.
+local function adapt_openai_media(block)
+  local url, setter
+  if block.type == "image_url" and type(block.image_url) == "table" then
+    url = block.image_url.url
+    setter = function(v) block.image_url.url = v end
+  elseif block.type == "file" and type(block.file) == "table" then
+    url = block.file.file_data
+    setter = function(v) block.file.file_data = v end
+  end
+  if type(url) ~= "string" then return nil end
+
+  local mime, b64 = url:match("^data:([%w%-%+%./]+);base64,(.*)$")
+  if not mime then
+    -- A remote http(s) URL: the gateway never sees the bytes, so it cannot
+    -- inspect them. Present it as a non-base64 source so the `unsupported`
+    -- policy applies (strip by default) rather than forwarding it blind.
+    block.source = { type = "url", media_type = nil }
+    block._skyflow_writeback = setter
+    return block
+  end
+  block.source = { type = "base64", media_type = mime, data = b64 }
+  block._skyflow_writeback = function(v) setter("data:" .. mime .. ";base64," .. v) end
+  return block
+end
+
 local function collect_media(data)
   local out = {}
   local function walk(blocks)
@@ -714,6 +797,9 @@ local function collect_media(data)
         local t = block.type
         if t == "image" or t == "document" then
           out[#out + 1] = block
+        elseif t == "image_url" or t == "file" then
+          local adapted = adapt_openai_media(block)
+          if adapted then out[#out + 1] = adapted end
         elseif type(block.content) == "table" then
           walk(block.content)   -- tool_result carrying attachments
         end
@@ -873,6 +959,8 @@ local function process_media(conf, authz, data, deadline)
       local redacted, n, err = deidentify_file(conf, authz, src.data, fmt, deadline)
       if not redacted then return nil, nil, err end
       src.data = redacted
+      -- an adapted OpenAI block stores its bytes in a data URL, so put them back
+      if block._skyflow_writeback then block._skyflow_writeback(redacted) end
       processed = processed + 1
       kong.log.info("skyflow: de-identified ", fmt, " attachment (",
                     n or "?", " entities redacted)")
@@ -1197,6 +1285,20 @@ local function run_access(conf, ctx)
   -- Fail closed if the payload carries more sensitive-text fields than we will
   -- process. Never forward a partially de-identified body -- the untouched
   -- extras would leak upstream in the clear.
+  -- A structural limit was hit while collecting spans, so part of the body was
+  -- never scanned. Same posture as max_spans: refuse rather than forward a
+  -- partially de-identified body.
+  if spans.depth_exceeded then
+    kong.log.err("skyflow: request nests deeper than the 32-level scan limit; blocking")
+    return { deny = true, status = 413,
+             body = { message = "request blocked: nested too deeply to de-identify" } }
+  end
+  if spans.bad_path then
+    kong.log.err("skyflow: a configured json path uses '**' in a non-terminal ",
+                 "position, which scans nothing; blocking rather than under-scanning")
+    return { deny = true, status = 500,
+             body = { message = "request blocked: gateway de-identification path misconfigured" } }
+  end
   if #spans > conf.max_spans then
     kong.log.err("skyflow: ", #spans, " spans exceed max_spans=", conf.max_spans, "; blocking request")
     return { deny = true, status = 413,
@@ -1796,6 +1898,7 @@ SkyflowDeidentify._test = {
   effective_paths   = effective_paths,
   tool_policy       = tool_policy,
   classify_client_error = classify_client_error,
+  collect_media     = collect_media,
   run_waves         = run_waves,
   -- the codec the request/response bodies actually go through. Exported because
   -- asserting on the cjson LIBRARY instead of on this is what let the

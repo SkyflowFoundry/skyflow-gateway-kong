@@ -551,5 +551,95 @@ eq(#(select(1, T.run_waves({1,2}, -5, function(n) return n end, spawn, wait))), 
 eq(#(select(1, T.run_waves({}, 8, function(n) return n end, spawn, wait))), 0,
    "run_waves: empty input is a no-op")
 
+-- 19. P2 coverage fixes, each for a surface that was silently unprotected.
+
+-- (a) OpenAI-shaped attachments. `image_url` / `file` matched nothing, so a
+-- photo of an ID pasted into an OpenAI-shaped client was neither de-identified
+-- NOR stripped -- the one outcome the attachment policy exists to prevent.
+local om = T.collect_media({ messages = { { role = "user", content = {
+  { type = "text", text = "look at this" },
+  { type = "image_url", image_url = { url = "data:image/png;base64,QUJD" } },
+  { type = "file", file = { filename = "x.pdf", file_data = "data:application/pdf;base64,REVG" } },
+} } } })
+eq(#om, 2, "openai image_url + file are both collected as attachments")
+eq(om[1].source.media_type, "image/png", "image_url data URL parsed to a media type")
+eq(om[1].source.data, "QUJD", "image_url base64 payload extracted")
+eq(om[1].source.type, "base64", "image_url presents as a base64 source")
+eq(om[2].source.media_type, "application/pdf", "file data URL parsed to a media type")
+
+-- the writeback must rebuild the data URL, or redacted bytes never reach the wire
+om[1]._skyflow_writeback("WllY")
+eq(om[1].image_url.url, "data:image/png;base64,WllY", "redacted bytes written back as a data URL")
+
+-- a REMOTE url has no bytes for us to inspect, so it must present as
+-- non-base64 and fall to the `unsupported` policy (strip), not pass through
+local rm = T.collect_media({ messages = { { role = "user", content = {
+  { type = "image_url", image_url = { url = "https://example.com/licence.png" } },
+} } } })
+eq(#rm, 1, "a remote image_url is still collected")
+eq(rm[1].source.type, "url", "a remote url is NOT presented as base64 (so it gets stripped)")
+
+-- Anthropic shapes must keep working
+local am = T.collect_media({ messages = { { role = "user", content = {
+  { type = "image", source = { type = "base64", media_type = "image/jpeg", data = "QQ" } },
+} } } })
+eq(#am, 1, "anthropic image blocks still collected")
+eq(am[1].source.media_type, "image/jpeg", "anthropic source untouched")
+
+-- (b) MCP preamble. The injector required doc.messages, but MCP bodies carry
+-- params.messages -- so every MCP request was de-identified WITHOUT ever telling
+-- the model what the placeholders meant.
+local mcp = { params = { messages = { { role = "user", content = "hi" } } } }
+T.inject_token_preamble(mcp, "PRE", "mcp")
+eq(mcp.params.messages[1].role, "system", "mcp: preamble inserted into params.messages")
+eq(mcp.params.messages[1].content, "PRE", "mcp: preamble content present")
+eq(mcp.params.messages[2].content, "hi", "mcp: original message preserved")
+
+-- openai top-level messages still work
+local oa = { messages = { { role = "user", content = "hi" } } }
+T.inject_token_preamble(oa, "PRE", "openai")
+eq(oa.messages[1].role, "system", "openai: unchanged behaviour")
+
+-- (c) the `**` depth guard must fail CLOSED. Previously it returned quietly, so
+-- PII buried past the limit was forwarded while the request reported success.
+local deep = { v = "SECRET" }
+for _ = 1, 40 do deep = { n = deep } end
+local dspans = T.collect_spans(
+  { messages = { { role = "assistant", content = { { type = "tool_use", input = deep } } } } },
+  T.effective_paths({ profile = "anthropic", request_json_paths = {}, response_json_paths = {} }, "request"))
+eq(dspans.depth_exceeded, true, "exceeding the ** depth limit is RECORDED, not silently ignored")
+
+-- a shallow body must not trip it
+local shallow = T.collect_spans(
+  { messages = { { role = "assistant", content = { { type = "tool_use", input = { a = { b = "x" } } } } } } },
+  T.effective_paths({ profile = "anthropic", request_json_paths = {}, response_json_paths = {} }, "request"))
+eq(shallow.depth_exceeded, nil, "a normally-nested body does not trip the depth guard")
+
+-- a non-terminal `**` scans nothing, so it must be reported rather than silently
+-- under-scanning
+local badp = T.collect_spans({ a = { b = "x" } }, { "$.a.**.b" })
+eq(badp.bad_path, true, "a non-terminal ** is flagged as a misconfiguration")
+
+-- (d) identifier + tool-description surfaces that egress on every turn
+local idconf = { profile = "anthropic", request_json_paths = {}, response_json_paths = {} }
+local idspans = T.collect_spans({
+  metadata = { user_id = "jane@acme.com" },
+  tools = { { name = "lookup", description = "search records for Jane Doe",
+              input_schema = { properties = { q = { description = "e.g. Jane Doe" } } } } },
+  messages = { { role = "user", content = "hi" } },
+}, T.effective_paths(idconf, "request"))
+local idfound = {}
+for _, sp in ipairs(idspans) do idfound[sp.text] = true end
+eq(idfound["jane@acme.com"], true, "metadata.user_id is covered")
+eq(idfound["search records for Jane Doe"], true, "tools[].description is covered")
+eq(idfound["e.g. Jane Doe"], true, "input_schema property descriptions are covered")
+
+-- enums and defaults are deliberately NOT scanned: tokenizing a value the
+-- provider validates against would break the tool contract
+local enumspans = T.collect_spans({ tools = { { name = "t",
+  input_schema = { properties = { status = { ["enum"] = { "OPEN", "CLOSED" }, default = "OPEN" } } } } } },
+  T.effective_paths(idconf, "request"))
+eq(#enumspans, 0, "tool enums/defaults are intentionally left alone")
+
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)
