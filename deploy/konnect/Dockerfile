@@ -61,12 +61,18 @@ ENV KONG_ROLE=data_plane \
     KONG_PROXY_ACCESS_LOG=/dev/stdout \
     KONG_LUA_SSL_TRUSTED_CERTIFICATE=system
 
-# Agent bodies are large: tool schemas plus file contents. Self-hosting the data
-# plane is what lets us raise these -- they are NOT settable on Konnect's own
-# Dedicated Cloud Gateways, where the nginx default of 8-16 KB would spool most
-# real requests to disk.
-ENV KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE=16m \
-    KONG_NGINX_HTTP_CLIENT_MAX_BODY_SIZE=16m
+# Sized to the CLIENT's ceiling, not a guess. Claude Desktop refuses a request
+# over 32MB itself ("Accumulated images and attachments pushed the request over
+# the limit"), so anything it will actually send must fit here. At 16m a request
+# between 16 and 32MB was rejected by nginx before the plugin ever saw it, which
+# the user experiences as an opaque gateway error on a request their client
+# considered valid.
+#
+# Self-hosting the data plane is what lets us raise these at all -- they are NOT
+# settable on Konnect's Dedicated Cloud Gateways, where the nginx default of
+# 8-16KB would spool most real agent requests to disk.
+ENV KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE=32m \
+    KONG_NGINX_HTTP_CLIENT_MAX_BODY_SIZE=32m
 
 EXPOSE 8000
 # Kong's own entrypoint, deliberately: no rendering step to go wrong.

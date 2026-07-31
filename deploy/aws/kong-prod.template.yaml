@@ -103,6 +103,13 @@ services:
           # and spans run in concurrent waves of max_concurrency, so this is a
           # latency budget as much as a capacity one. FAIL-CLOSED: over the limit
           # the request is refused (413), never partially de-identified.
+          # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
+          # This was never set, so it took the schema default of 1MB -- two orders
+          # of magnitude below what the client will send. A request over it is
+          # refused with 413 "body too large" (fail-closed, correct, but the limit
+          # was far too low: real agent turns already reach 250KB+ and a single
+          # PDF attachment clears 1MB easily).
+          max_body_size: 33554432
           max_spans: 128
           max_concurrency: 8
           response_json_paths: ["$.content[*].text"]
@@ -214,6 +221,13 @@ services:
           # and spans run in concurrent waves of max_concurrency, so this is a
           # latency budget as much as a capacity one. FAIL-CLOSED: over the limit
           # the request is refused (413), never partially de-identified.
+          # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
+          # This was never set, so it took the schema default of 1MB -- two orders
+          # of magnitude below what the client will send. A request over it is
+          # refused with 413 "body too large" (fail-closed, correct, but the limit
+          # was far too low: real agent turns already reach 250KB+ and a single
+          # PDF attachment clears 1MB easily).
+          max_body_size: 33554432
           max_spans: 128
           max_concurrency: 8
           deidentify:

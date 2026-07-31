@@ -111,6 +111,13 @@ services:
           #
           # Raise this only together with concurrent span processing; until then
           # the ceiling is a latency budget, not a capacity one.
+          # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
+          # This was never set, so it took the schema default of 1MB -- two orders
+          # of magnitude below what the client will send. A request over it is
+          # refused with 413 "body too large" (fail-closed, correct, but the limit
+          # was far too low: real agent turns already reach 250KB+ and a single
+          # PDF attachment clears 1MB easily).
+          max_body_size: 33554432
           max_spans: 128
           # Spans are de-identified in concurrent waves of this width, so
           # de-identification costs roughly ceil(spans/8) Detect round-trips
@@ -239,6 +246,13 @@ services:
           #
           # Raise this only together with concurrent span processing; until then
           # the ceiling is a latency budget, not a capacity one.
+          # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
+          # This was never set, so it took the schema default of 1MB -- two orders
+          # of magnitude below what the client will send. A request over it is
+          # refused with 413 "body too large" (fail-closed, correct, but the limit
+          # was far too low: real agent turns already reach 250KB+ and a single
+          # PDF attachment clears 1MB easily).
+          max_body_size: 33554432
           max_spans: 128
           # Spans are de-identified in concurrent waves of this width, so
           # de-identification costs roughly ceil(spans/8) Detect round-trips

@@ -1350,6 +1350,20 @@ local function run_access(conf, ctx)
     end
   end
 
+  -- One span's worth of work. Defined HERE, not hoisted: it closes over conf,
+  -- authz and deadline. An earlier refactor moved run_waves to module scope and
+  -- took this definition with it, leaving the call below referencing an
+  -- undefined name -- which Lua resolves as a nil global, so every request died
+  -- with "worker crashed: attempt to call a nil value" and the gateway fail-closed
+  -- into a 502. The offline suite passed throughout, because run_waves is tested
+  -- with an injected fake and nothing exercises the access phase itself.
+  local function run_span(span)
+    local processed, ents = deidentify_text(conf, authz, span.text, deadline)
+    if not processed then return nil, ents end   -- on failure `ents` is the error
+    span.processed = processed
+    return ents
+  end
+
   local width = tonumber(conf.max_concurrency) or 8
   local results, first_err = run_waves(
     pending, width, run_span,

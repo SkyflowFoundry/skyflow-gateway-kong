@@ -26,6 +26,18 @@ jobs:
             --entrypoint resty kong/kong-gateway:3.15.0.2 \
             spec/offline/pure_algorithms_test.lua
 
+      # The outage guard. A local function that is CALLED but never DEFINED
+      # resolves as a nil global and kills every request at runtime -- which is
+      # exactly what took the gateway down: a refactor moved run_waves to module
+      # scope and took run_span's definition with it, leaving the call site.
+      # The whole offline suite passed throughout, because run_waves is tested
+      # with an injected fake and nothing exercises the access phase.
+      - name: no undefined globals
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w \
+            --entrypoint sh kong/kong-gateway:3.15.0.2 \
+            -c 'cd /w && ./spec/offline/no_undefined_globals.sh'
+
       # A test that cannot fail is worse than a missing one. Reintroduce the
       # `tools: [] -> {}` bug that 400'd every Claude Desktop title-generation
       # request and assert the suite NOTICES. The previous version of that test
