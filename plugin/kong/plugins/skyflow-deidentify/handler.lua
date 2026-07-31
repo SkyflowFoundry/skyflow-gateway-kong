@@ -1260,6 +1260,14 @@ local function run_access(conf, ctx)
       if doc.stream == true and will_reemit then
         ctx.client_stream = true
         doc.stream = false
+        -- Remember `include_usage` before discarding stream_options. We strip
+        -- it because the upstream call is forced non-streaming, but a client that
+        -- asked for a usage chunk got NONE -- silently, so token accounting just
+        -- read as zero. The buffered response carries usage, so it can be
+        -- re-emitted as the final chunk below.
+        if type(doc.stream_options) == "table" and doc.stream_options.include_usage then
+          ctx.want_usage_chunk = true
+        end
         doc.stream_options = nil
       end
       local enc, eerr = body_json.encode(doc)
@@ -1388,6 +1396,14 @@ local function run_access(conf, ctx)
       if doc.stream == true and will_reemit then
         ctx.client_stream = true
         doc.stream = false
+        -- Remember `include_usage` before discarding stream_options. We strip
+        -- it because the upstream call is forced non-streaming, but a client that
+        -- asked for a usage chunk got NONE -- silently, so token accounting just
+        -- read as zero. The buffered response carries usage, so it can be
+        -- re-emitted as the final chunk below.
+        if type(doc.stream_options) == "table" and doc.stream_options.include_usage then
+          ctx.want_usage_chunk = true
+        end
         doc.stream_options = nil
       end
       local enc, eerr = body_json.encode(doc)
@@ -1499,8 +1515,18 @@ end
 -- for even though the gateway had to buffer the full response to re-identify it.
 -- One chunk + a [DONE] sentinel. The client renders it at once instead of
 -- token-by-token, an acceptable trade for never leaking PII.
-local function completion_to_sse(doc)
-  return "data: " .. cjson.encode(sse_chunk(doc)) .. "\n\ndata: [DONE]\n\n"
+local function completion_to_sse(doc, want_usage)
+  local out = "data: " .. cjson.encode(sse_chunk(doc)) .. "\n\n"
+  -- OpenAI's contract for stream_options.include_usage: a FINAL chunk with an
+  -- empty choices array and the usage object. Only sent when the client asked.
+  if want_usage and type(doc.usage) == "table" then
+    local empty_choices = cjson.array_mt and setmetatable({}, cjson.array_mt) or {}
+    out = out .. "data: " .. cjson.encode({
+      id = doc.id, object = "chat.completion.chunk", created = doc.created,
+      model = doc.model, choices = empty_choices, usage = doc.usage,
+    }) .. "\n\n"
+  end
+  return out .. "data: [DONE]\n\n"
 end
 
 -- True when the buffered upstream body is an Anthropic-native message (e.g.
@@ -1573,24 +1599,52 @@ local function anthropic_message_to_sse(doc)
       idx = idx + 1
       out[#out + 1] = ev("content_block_start", { type = "content_block_start", index = idx,
         content_block = { type = "text", text = "" } })
+      -- citations ride on the text block and are lost if not re-emitted
+      if block.citations ~= nil then
+        out[#out + 1] = ev("content_block_delta", { type = "content_block_delta", index = idx,
+          delta = { type = "citations_delta", citation = block.citations } })
+      end
       out[#out + 1] = ev("content_block_delta", { type = "content_block_delta", index = idx,
         delta = { type = "text_delta", text = block.text } })
       out[#out + 1] = ev("content_block_stop", { type = "content_block_stop", index = idx })
+
+    elseif block.type ~= nil and block.type ~= "text" then
+      -- UNKNOWN block type -- pass it through verbatim rather than dropping it.
+      --
+      -- This emitter is an allowlist, so every content type Anthropic adds was
+      -- silently discarded: server_tool_use, web_search_tool_result,
+      -- mcp_tool_use, document. That is invisible content loss AND history
+      -- corruption -- the client stores a turn missing blocks it will replay.
+      -- Re-emitting the raw block keeps unknown types intact; the trade is that
+      -- their text is not re-identified, which is the safe direction (a token is
+      -- not PII) and no worse than dropping them.
+      idx = idx + 1
+      out[#out + 1] = ev("content_block_start", { type = "content_block_start", index = idx,
+        content_block = block })
+      out[#out + 1] = ev("content_block_stop", { type = "content_block_stop", index = idx })
     end
-    -- anything else (including an empty text block) is dropped rather than
-    -- emitted as an empty block the client would persist and replay
+    -- an EMPTY text block is still dropped: emitting it makes the client persist
+    -- and replay `text: ""`, which the API then rejects with "text content blocks
+    -- must be non-empty" on the following turn.
   end
+  -- Carry the FULL usage object. Rebuilding it with only output_tokens dropped
+  -- cache_read_input_tokens / cache_creation_input_tokens / server_tool_use,
+  -- which is what a client needs to attribute prompt-cache cost -- so a cached
+  -- conversation looked like it was paying full price for every turn.
+  local usage = doc.usage
+  if type(usage) ~= "table" then usage = { output_tokens = 0 } end
   out[#out + 1] = ev("message_delta", { type = "message_delta",
-    delta = { stop_reason = doc.stop_reason or "end_turn", stop_sequence = null },
-    usage = { output_tokens = (doc.usage and doc.usage.output_tokens) or 0 } })
+    delta = { stop_reason = doc.stop_reason or "end_turn",
+              stop_sequence = doc.stop_sequence or null },
+    usage = usage })
   out[#out + 1] = ev("message_stop", { type = "message_stop" })
   return table.concat(out)
 end
 
 -- Shape-appropriate SSE re-emit for a buffered doc.
-local function doc_to_sse(doc)
+local function doc_to_sse(doc, want_usage)
   if is_anthropic_message(doc) then return anthropic_message_to_sse(doc) end
-  return completion_to_sse(doc)
+  return completion_to_sse(doc, want_usage)
 end
 
 -- Hand the client an SSE stream when we are BAILING OUT of re-identification.
@@ -1617,7 +1671,7 @@ local function reemit_tokenized_stream(ctx)
   end
   local doc = body_json.decode(raw)
   if not doc then return false end
-  local ok_sse, sse = pcall(doc_to_sse, doc)
+  local ok_sse, sse = pcall(doc_to_sse, doc, ctx.want_usage_chunk)
   if not ok_sse or not sse or sse == "" then return false end
   kong.response.set_raw_body(sse)
   kong.response.clear_header("Content-Encoding")
@@ -1820,7 +1874,7 @@ function SkyflowDeidentify:response(conf)
         -- streaming we STILL must hand back SSE, not the raw JSON completion, or
         -- the client stalls waiting for event-stream frames.
         if not ctx.client_stream then return end
-        newbody = doc_to_sse(doc)
+        newbody = doc_to_sse(doc, ctx.want_usage_chunk)
         streamed = true
       else
         for _, span in ipairs(spans) do
@@ -1835,7 +1889,7 @@ function SkyflowDeidentify:response(conf)
         -- format the client's protocol expects (OpenAI chunk or Anthropic
         -- message events).
         if ctx.client_stream then
-          newbody = doc_to_sse(doc)
+          newbody = doc_to_sse(doc, ctx.want_usage_chunk)
           streamed = true
         end
       end
@@ -1898,6 +1952,7 @@ SkyflowDeidentify._test = {
   effective_paths   = effective_paths,
   tool_policy       = tool_policy,
   classify_client_error = classify_client_error,
+  doc_to_sse        = doc_to_sse,
   collect_media     = collect_media,
   run_waves         = run_waves,
   -- the codec the request/response bodies actually go through. Exported because

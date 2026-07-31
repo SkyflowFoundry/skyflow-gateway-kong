@@ -95,6 +95,16 @@ services:
               expected_issuer: "__ENTRA_ISSUER__"
               expected_audience: "__ENTRA_AUDIENCE__"
           profile: anthropic
+          # Kept in lockstep with deploy/konnect/kong.yaml. This file is the
+          # no-control-plane fallback, and drifting from the live config is the
+          # dangerous failure mode: it deploys cleanly and protects LESS.
+          #
+          # 128 because Detect costs ~104ms/span at the median and ~403ms at p90
+          # and spans run in concurrent waves of max_concurrency, so this is a
+          # latency budget as much as a capacity one. FAIL-CLOSED: over the limit
+          # the request is refused (413), never partially de-identified.
+          max_spans: 128
+          max_concurrency: 8
           response_json_paths: ["$.content[*].text"]
           deidentify:
             entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
@@ -109,8 +119,34 @@ services:
             enabled: true
             strategy: reidentify_text
             on_error: deny
-            # tool_inputs defaults to `tokenized`: an agent's tools receive
-            # vault tokens, never raw PII.
+            # Default `tokenized`: an unknown tool is assumed to ship its
+            # arguments somewhere we do not control, so it gets vault tokens.
+            tool_inputs: tokenized
+            # Exceptions are tools that execute on the CALLER'S OWN MACHINE,
+            # where a token is corruption rather than protection: an Edit call
+            # whose old_string is `[NAME_X2A0iim]` matches nothing, and a Write
+            # persists the token into the user's real file. Nothing leaves the
+            # device, and the caller already supplied the IdP token that unlocked
+            # the data.
+            #
+            # Enumerated, not `mcp__workspace__*`: a prefix rule silently opts in
+            # every tool that server adds later, and mcp__workspace__web_fetch
+            # shows servers do mix local and egressing tools under one prefix.
+            tool_inputs_by_tool:
+              Read: plain_text
+              Edit: plain_text
+              Write: plain_text
+              NotebookEdit: plain_text
+              Glob: plain_text
+              Grep: plain_text
+              mcp__workspace__bash: plain_text
+              # Egressing tools, pinned explicitly so flipping the default above
+              # can never start leaking through these.
+              WebSearch: tokenized
+              WebFetch: tokenized
+              mcp__workspace__web_fetch: tokenized
+              mcp__cowork__create_artifact: tokenized
+              mcp__cowork__update_artifact: tokenized
           on_skyflow_error: deny
           timeout_ms: 15000
           deadline_ms: 60000
@@ -170,6 +206,16 @@ services:
               expected_issuer: "__ENTRA_ISSUER__"
               expected_audience: "__ENTRA_AUDIENCE__"
           profile: anthropic
+          # Kept in lockstep with deploy/konnect/kong.yaml. This file is the
+          # no-control-plane fallback, and drifting from the live config is the
+          # dangerous failure mode: it deploys cleanly and protects LESS.
+          #
+          # 128 because Detect costs ~104ms/span at the median and ~403ms at p90
+          # and spans run in concurrent waves of max_concurrency, so this is a
+          # latency budget as much as a capacity one. FAIL-CLOSED: over the limit
+          # the request is refused (413), never partially de-identified.
+          max_spans: 128
+          max_concurrency: 8
           deidentify:
             entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
                        ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER, DRIVER_LICENSE]

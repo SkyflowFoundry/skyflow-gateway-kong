@@ -641,5 +641,67 @@ local enumspans = T.collect_spans({ tools = { { name = "t",
   T.effective_paths(idconf, "request"))
 eq(#enumspans, 0, "tool enums/defaults are intentionally left alone")
 
+-- 20. SSE emitter fidelity. This emitter is an ALLOWLIST, so every content type
+-- Anthropic adds was silently discarded -- invisible content loss, and history
+-- corruption when the client replays a turn missing blocks.
+local fid = T.doc_to_sse({
+  -- `type = "message"` is what is_anthropic_message() dispatches on; without it
+  -- doc_to_sse takes the OpenAI path and emits a chat.completion chunk instead.
+  type = "message",
+  id = "m1", model = "mm", role = "assistant", stop_reason = "end_turn",
+  content = {
+    { type = "text", text = "see this" },
+    { type = "server_tool_use", id = "srv1", name = "web_search", input = { q = "x" } },
+    { type = "web_search_tool_result", tool_use_id = "srv1", content = { { title = "T" } } },
+  },
+  usage = { input_tokens = 10, output_tokens = 5,
+            cache_read_input_tokens = 900, cache_creation_input_tokens = 40 },
+})
+eq(fid:find("server_tool_use", 1, true) ~= nil, true,
+   "an unknown block type is passed through, not dropped")
+eq(fid:find("web_search_tool_result", 1, true) ~= nil, true,
+   "a second unknown block type also survives")
+eq(fid:find('"text_delta"', 1, true) ~= nil, true, "known text blocks still emit a text_delta")
+-- 3 blocks -> message_start + 3x(start[,delta]+stop) + message_delta + message_stop
+eq(select(2, fid:gsub("event: content_block_start", "")), 3,
+   "every block gets a content_block_start, including unknown ones")
+
+-- usage fidelity: rebuilding usage with only output_tokens hid prompt-cache cost,
+-- so a fully cached conversation looked like it paid full price every turn
+eq(fid:find("cache_read_input_tokens", 1, true) ~= nil, true,
+   "message_delta carries cache_read_input_tokens")
+eq(fid:find("cache_creation_input_tokens", 1, true) ~= nil, true,
+   "message_delta carries cache_creation_input_tokens")
+eq(fid:find("input_tokens", 1, true) ~= nil, true, "message_delta carries input_tokens")
+
+-- citations ride on a text block and were lost
+local cit = T.doc_to_sse({ type = "message", id = "m", role = "assistant", content = {
+  { type = "text", text = "quoted", citations = { { type = "char_location" } } } } })
+eq(cit:find("citations_delta", 1, true) ~= nil, true, "citations on a text block are re-emitted")
+
+-- an EMPTY text block must STILL be dropped: emitting it makes the client
+-- persist and replay `text: ""`, which the API rejects on the next turn with
+-- "text content blocks must be non-empty"
+local empt = T.doc_to_sse({ type = "message", id = "m", role = "assistant",
+  content = { { type = "text", text = "" } } })
+eq(empt:find("event: content_block_start", 1, true) == nil, true,
+   "an empty text block is still dropped (replaying it breaks the NEXT turn)")
+
+-- OpenAI include_usage: the final chunk must have EMPTY choices + usage, and only
+-- when the client asked. Silently omitting it made token accounting read as zero.
+local no_usage = T.doc_to_sse({ id = "c1", object = "chat.completion", model = "m",
+  choices = { { message = { role = "assistant", content = "hi" }, finish_reason = "stop" } },
+  usage = { prompt_tokens = 5, completion_tokens = 2, total_tokens = 7 } }, false)
+eq(no_usage:find("total_tokens", 1, true) == nil, true,
+   "no usage chunk when include_usage was not requested")
+local with_usage = T.doc_to_sse({ id = "c1", object = "chat.completion", model = "m",
+  choices = { { message = { role = "assistant", content = "hi" }, finish_reason = "stop" } },
+  usage = { prompt_tokens = 5, completion_tokens = 2, total_tokens = 7 } }, true)
+eq(with_usage:find("total_tokens", 1, true) ~= nil, true,
+   "usage chunk IS emitted when include_usage was requested")
+eq(select(2, with_usage:gsub("data: ", "")), 3,
+   "include_usage yields content chunk + usage chunk + [DONE]")
+eq(with_usage:find("[DONE]", 1, true) ~= nil, true, "[DONE] still terminates the stream")
+
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)
