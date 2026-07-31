@@ -157,9 +157,11 @@ local PROFILE_PATHS = {
                  "$.messages[*].tool_calls[*].function.arguments",
                  -- OpenAI's end-user identifier fields, same reasoning as
                  -- Anthropic's metadata.user_id
-                 "$.user", "$.messages[*].name",
-                 "$.tools[*].function.description",
-                 "$.tools[*].function.parameters.properties.*.description" },
+                 "$.user", "$.messages[*].name" },
+    -- see the anthropic note above: the OpenAI equivalents
+    -- ("$.tools[*].function.description",
+    --  "$.tools[*].function.parameters.properties.*.description") are opt-in for
+    -- the same span-amplification reason.
     response = { "$.choices[*].message.content", "$.choices[*].text" },
   },
   anthropic = {
@@ -189,15 +191,26 @@ local PROFILE_PATHS = {
                  "$.messages[*].content[*].text", "$.messages[*].content",
                  "$.messages[*].content[*].content", "$.messages[*].content[*].content[*].text",
                  "$.messages[*].content[*].input.**",
-                 "$.metadata.user_id",
-                 -- Tool SCHEMAS egress on every single turn (Claude Desktop
-                 -- resends the whole `tools` array each request), and MCP tool
-                 -- descriptions are frequently generated from customer systems.
-                 -- Descriptions only, deliberately: tokenizing an enum or a
-                 -- default would change values the provider validates against
-                 -- and break the tool contract.
-                 "$.tools[*].description",
-                 "$.tools[*].input_schema.properties.*.description" },
+                 "$.metadata.user_id" },
+    -- NOT in the default set, deliberately, and this was learned the hard way.
+    --
+    -- Tool SCHEMAS do egress on every turn and MCP descriptions are often
+    -- generated from customer systems, so scanning them is genuinely useful:
+    --   "$.tools[*].description"
+    --   "$.tools[*].input_schema.properties.*.description"
+    -- But Claude Desktop resends ~30 tool definitions on EVERY request, each with
+    -- a description plus many property descriptions. Adding these produced ~130
+    -- extra spans on every call -- a 10x amplification -- so a fifteen-character
+    -- "new task" blew straight through max_spans and was refused with 413, which
+    -- the client reports to the user as "Request too large". Availability lost to
+    -- a low-yield surface.
+    --
+    -- They are also STATIC: identical on every turn of a conversation, so scanning
+    -- them re-spends the same Detect calls forever. Until there is a cache keyed
+    -- on the tool set, this belongs behind an explicit opt-in.
+    --
+    -- To enable, add them to `request_json_paths` (which MERGES with the base set)
+    -- and raise max_spans to at least 512 in the same change.
     response = { "$.content[*].text" },
   },
   mcp = {

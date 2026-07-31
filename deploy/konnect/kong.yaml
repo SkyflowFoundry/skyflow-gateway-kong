@@ -118,7 +118,17 @@ services:
           # was far too low: real agent turns already reach 250KB+ and a single
           # PDF attachment clears 1MB easily).
           max_body_size: 33554432
-          max_spans: 128
+          # 512. The earlier 128 was sized for SEQUENTIAL processing, where 512
+          # spans meant ~53s at the median against a 60s deadline. Spans now run
+          # in concurrent waves of max_concurrency, so the cost is
+          # ceil(spans/8) round trips: ~6.7s at 512 spans, not ~53s.
+          #
+          # Headroom matters more than it looks. Observed span counts are median
+          # 2 / p90 18 / max 49 for message content alone, but any path touching
+          # the `tools` array multiplies that ~10x because Claude Desktop resends
+          # ~30 tool definitions every turn -- which is exactly how a
+          # fifteen-character request reached 139 spans and was refused 413.
+          max_spans: 512
           # Spans are de-identified in concurrent waves of this width, so
           # de-identification costs roughly ceil(spans/8) Detect round-trips
           # instead of one per span. Set explicitly rather than left to the
@@ -253,7 +263,17 @@ services:
           # was far too low: real agent turns already reach 250KB+ and a single
           # PDF attachment clears 1MB easily).
           max_body_size: 33554432
-          max_spans: 128
+          # 512. The earlier 128 was sized for SEQUENTIAL processing, where 512
+          # spans meant ~53s at the median against a 60s deadline. Spans now run
+          # in concurrent waves of max_concurrency, so the cost is
+          # ceil(spans/8) round trips: ~6.7s at 512 spans, not ~53s.
+          #
+          # Headroom matters more than it looks. Observed span counts are median
+          # 2 / p90 18 / max 49 for message content alone, but any path touching
+          # the `tools` array multiplies that ~10x because Claude Desktop resends
+          # ~30 tool definitions every turn -- which is exactly how a
+          # fifteen-character request reached 139 spans and was refused 413.
+          max_spans: 512
           # Spans are de-identified in concurrent waves of this width, so
           # de-identification costs roughly ceil(spans/8) Detect round-trips
           # instead of one per span. Set explicitly rather than left to the

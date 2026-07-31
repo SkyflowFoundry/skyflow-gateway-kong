@@ -631,14 +631,36 @@ local idspans = T.collect_spans({
 local idfound = {}
 for _, sp in ipairs(idspans) do idfound[sp.text] = true end
 eq(idfound["jane@acme.com"], true, "metadata.user_id is covered")
-eq(idfound["search records for Jane Doe"], true, "tools[].description is covered")
-eq(idfound["e.g. Jane Doe"], true, "input_schema property descriptions are covered")
 
--- enums and defaults are deliberately NOT scanned: tokenizing a value the
+-- tool SCHEMAS are deliberately NOT in the default path set. Claude Desktop
+-- resends ~30 tool definitions every turn, so scanning their descriptions added
+-- ~130 spans to EVERY request -- a 10x amplification that pushed a
+-- fifteen-character message past max_spans and got it refused with 413, which the
+-- client showed the user as "Request too large".
+eq(idfound["search records for Jane Doe"], nil,
+   "tools[].description is NOT scanned by default (10x span amplification)")
+eq(idfound["e.g. Jane Doe"], nil,
+   "input_schema property descriptions are NOT scanned by default")
+
+-- ...but they must still WORK when an operator opts in, because the surface is
+-- real. request_json_paths MERGES with the profile's base set.
+local optin = { profile = "anthropic", response_json_paths = {},
+  request_json_paths = { "$.tools[*].description",
+                         "$.tools[*].input_schema.properties.*.description" } }
+local optspans = T.collect_spans({
+  tools = { { name = "lookup", description = "search records for Jane Doe",
+              input_schema = { properties = { q = { description = "e.g. Jane Doe" } } } } },
+}, T.effective_paths(optin, "request"))
+local optfound = {}
+for _, sp in ipairs(optspans) do optfound[sp.text] = true end
+eq(optfound["search records for Jane Doe"], true, "opt-in reaches tools[].description")
+eq(optfound["e.g. Jane Doe"], true, "opt-in reaches property descriptions")
+
+-- enums and defaults stay unscanned even when opted in: tokenizing a value the
 -- provider validates against would break the tool contract
 local enumspans = T.collect_spans({ tools = { { name = "t",
   input_schema = { properties = { status = { ["enum"] = { "OPEN", "CLOSED" }, default = "OPEN" } } } } } },
-  T.effective_paths(idconf, "request"))
+  T.effective_paths(optin, "request"))
 eq(#enumspans, 0, "tool enums/defaults are intentionally left alone")
 
 -- 20. SSE emitter fidelity. This emitter is an ALLOWLIST, so every content type
