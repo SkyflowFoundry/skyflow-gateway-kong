@@ -9,15 +9,26 @@ Re-identify APIs** to sanitize request bodies bound upstream and re-hydrate the
 originals in responses. It composes with **Kong AI Gateway (`ai-proxy`)**, so
 the model provider only ever sees tokens.
 
-```text
-  Client                     Kong + Skyflow                    LLM / MCP / API
-  "Email Jane Doe"  ──►  de-identify (PII → tokens)  ──►  sees "[NAME_aB3xQ]"
-  "…Jane Doe…"      ◄──  re-identify (tokens → PII)  ◄──  replies with tokens
-                              │        ▲
-                              ▼        │  Skyflow Detect  /deidentify · /reidentify
-                       ┌──────────────────────────┐
-                       │ Skyflow Data Privacy Vault│
-                       └──────────────────────────┘
+```mermaid
+flowchart LR
+    C["<b>Client</b><br/>Email Jane Doe"]
+    K["<b>Kong + Skyflow</b><br/>access: de-identify<br/>response: re-identify"]
+    L["<b>LLM / MCP / API</b><br/>sees only<br/>[NAME_aB3xQ]"]
+    V[("<b>Skyflow</b><br/>Data Privacy Vault")]
+
+    C -- "PII" --> K
+    K -- "tokens" --> L
+    L -- "tokens" --> K
+    K -- "PII restored" --> C
+    K <-. "Detect<br/>/deidentify · /reidentify" .-> V
+
+    classDef clear fill:#f7ebe3,stroke:#9c4221,color:#16191f
+    classDef safe  fill:#e4efed,stroke:#1b5e5a,color:#16191f
+    classDef vault fill:#ede9f6,stroke:#4c3a8c,color:#16191f
+    class C clear
+    class L safe
+    class K safe
+    class V vault
 ```
 
 > **Status: working proof-of-concept.** De-identify (request) and re-identify
@@ -95,22 +106,33 @@ the upstream body is gzip-encoded, which real OpenAI always is (see
 
 The fix is **two routes, two independent buffered cycles**:
 
-```text
-  Client
-    │  "Email Jane Doe at jane@acme.com"
-    ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │ /ai/chat            skyflow-deidentify                        │
-  │   access   : de-identify   ──►  Skyflow Detect  (PII → tokens)│
-  │   response : re-identify   ◄──  Skyflow Detect  (tokens → PII)│
-  └───────────────┬─────────────────────────────────▲────────────┘
-                  │ tokens only (loopback)           │ tokens only
-                  ▼                                  │
-  ┌──────────────────────────────────────────────────────────────┐
-  │ /_ai_upstream       ai-proxy  ──►  OpenAI / Anthropic / …     │
-  │   (LLM sees only tokens; no skyflow plugin on this route)     │
-  └──────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant F as Front route /ai/chat<br/>(skyflow-deidentify)
+    participant U as Internal route<br/>(ai-proxy only)
+    participant P as OpenAI / Anthropic
+    participant S as Skyflow Detect
+
+    C->>F: Email Jane Doe at jane@acme.com
+    Note over F: access phase
+    F->>S: de-identify
+    S-->>F: [NAME_aB3xQ] · [EMAIL_ADDRESS_kp2]
+    F->>U: tokens only, over loopback
+    U->>P: tokens only
+    P-->>U: reply, still tokenized
+    U-->>F: transformed, uncompressed JSON
+    Note over F: response phase
+    F->>S: re-identify
+    S-->>F: original values
+    F-->>C: reply with Jane Doe restored
 ```
+
+Two routes means two independent buffered cycles. The front route does de-id and
+re-id; its upstream is an internal route running `ai-proxy` alone, so the front
+route only ever sees `ai-proxy`'s already-transformed, uncompressed JSON — which
+it can handle exactly like a plain LLM upstream.
 
 The front route does de-id + re-id and proxies to an internal route that runs
 `ai-proxy` alone. The front route's upstream is `ai-proxy`'s already-transformed,
