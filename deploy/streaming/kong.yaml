@@ -1,43 +1,56 @@
-# Production declarative config for the Kong AI Gateway (secured by Skyflow)
-# on AWS App Runner.
-# Rendered at CONTAINER BOOT by docker-entrypoint-prod.sh from env vars (App
-# Runner injects the secrets) -- the image carries no IDs and no keys.
+# Kong AI Gateway secured by Skyflow -- STREAMING-NATIVE deployment.
 #
-# CREDENTIAL MODEL -- Profile B (STS delegation) only:
+# What makes this different from deploy/konnect/: the plugin CODE is not in the
+# image. schema.lua and handler.lua are uploaded to the control plane and streamed
+# to every data plane, so BOTH the config and the plugin itself are pushed from
+# Konnect. That is the only arrangement that works on a gateway whose image you do
+# not control (Konnect Dedicated Cloud Gateways), and it turns a plugin change
+# into an API call rather than a build-push-deploy.
 #
-#   The caller presents an enterprise IdP token (Entra ID) as
-#   `Authorization: Bearer`. The gateway exchanges it at Skyflow's STS endpoint
-#   for a short-lived bearer whose `ctx` IS the caller's IdP claims, then uses
-#   that bearer for Detect. Consequences worth stating plainly:
+# Requires three data-plane settings; see deploy/streaming/Dockerfile for why each
+# one matters and what breaks without it:
+#   KONG_CUSTOM_PLUGIN_STREAMING_ENABLED=on
+#   KONG_UNTRUSTED_LUA=lax          <- streamed handlers run sandboxed; `strict`
+#                                      forbids require() and rejects the config
+#   KONG_PLUGINS=bundled            <- must NOT name skyflow-deidentify
 #
-#     * this gateway holds NO Skyflow credential -- no API key, no service
-#       account, no private key. Compromising it yields no vault access.
-#     * identity is IdP-verified, not gateway-asserted. Skyflow logs these as
-#       Auth Mode: STS with the human in Subject and the full claim set in
-#       Context ID, while Actor stays the service account (delegation).
-#     * ctx is exclusively the IdP's claims, per the account's STS config
-#       allowlist. Skyflow SILENTLY IGNORES context supplied by the caller of
-#       the exchange, so attributes like tenant/role/purpose belong in the IdP
-#       token -- Entra app roles and claims-mapping policies put them there,
-#       signed, which is strictly better than the gateway asserting them.
+# Built greenfield deliberately. The previous control plane had accumulated a
+# stale non-streaming node still registered alongside the new one, four file-log
+# instances, and a duplicate hostname; streaming worked first time on a clean
+# control plane with the identical image and env, and reported P309 on the dirty
+# one. Kept lean here on purpose.
+#
+# CREDENTIAL MODEL -- STS delegation (RFC 8693) only:
+#   The caller presents an enterprise IdP token (Entra) as `Authorization: Bearer`.
+#   The gateway exchanges it at Skyflow's STS endpoint for a short-lived bearer
+#   whose `ctx` IS the caller's signed claims. Consequences worth stating:
+#     * this gateway holds NO Skyflow credential. Compromising it yields no vault
+#       access.
+#     * identity is IdP-verified, not gateway-asserted: Skyflow logs the human in
+#       Subject with the full claim set as Context, and the service account stays
+#       the Actor (delegation).
 #     * one credential for the client, which is what single-credential clients
 #       (Claude Desktop's gateway-OIDC mode) require.
 #
-#   The sister repo (skyflow-gateway-litellm) runs Profile A -- gateway-held
-#   service account, gateway-asserted ctx -- so the two models can be compared
-#   side by side in the same Skyflow audit log.
+#   Provider credentials ARE gateway-held (Anthropic + OpenAI); the `model` in the
+#   request body selects which internal upstream handles the call.
 #
-#   Provider credentials ARE gateway-held (Anthropic + OpenAI); the `model` in
-#   the request body selects the provider.
+# file-log appears three times, not once, and they are NOT redundant:
+#   ai-front     -> the skyflow entity counts for the request
+#   up-anthropic -> the ai.proxy egress payload, i.e. what the provider actually
+#                   received. This is the audit trail that proves tokens-only.
+#   up-openai    -> the same for the OpenAI leg
+# A single global instance would also log /healthz every 10s and lose the
+# distinction, so this stays explicit.
 _format_version: "3.0"
 
 services:
   # ---------------------------------------------------------------- front door
-  - name: claude-front
+  - name: ai-front
     url: http://127.0.0.1:8000/_up_anthropic
     routes:
-      - name: claude
-        paths: ["/claude"]
+      - name: ai
+        paths: ["/ai"]
         strip_path: true
         protocols: ["http", "https"]
     plugins:
@@ -59,7 +72,7 @@ services:
               -- ai-proxy instances have to live on separate internal routes.
               --
               -- Strips whatever the FIRST path segment is rather than matching
-              -- "^/claude": the old pattern hard-coded one route, so this same
+              -- "^/ai": the old pattern hard-coded one route, so this same
               -- snippet on /probe produced /_up_anthropic/probe/v1/messages and
               -- 404'd -- which is why /probe used to be Anthropic-only.
               local body = kong.request.get_body()
@@ -85,24 +98,29 @@ services:
         config: { path: /dev/stdout }
       - name: skyflow-deidentify
         config:
-          vault_id: __SKYFLOW_VAULT_ID__
-          cluster_id: __SKYFLOW_CLUSTER_ID__
-          account_id: __SKYFLOW_ACCOUNT_ID__
+          vault_id: i65a450543bf48b68c3fa58c5ed7ce30
+          cluster_id: ebfc9bee4242
+          account_id: j58448d299cf4e42ac433948d9c70d94
           credentials:
             sts:
-              service_account_id: __STS_SERVICE_ACCOUNT_ID__
+              service_account_id: mab1f43f916b4ba082b500e1ab5be59f
               token_header: authorization
-              expected_issuer: "__ENTRA_ISSUER__"
-              expected_audience: "__ENTRA_AUDIENCE__"
+              expected_issuer: "https://login.microsoftonline.com/5b772553-7aad-487a-91a9-3b93382ac28b/v2.0"
+              expected_audience: "9ff1c091-fc74-4dae-929b-9cd58382b621"
           profile: anthropic
-          # Kept in lockstep with deploy/konnect/kong.yaml. This file is the
-          # no-control-plane fallback, and drifting from the live config is the
-          # dangerous failure mode: it deploys cleanly and protects LESS.
+          # FAIL-CLOSED: over the limit the request is rejected with 413 rather
+          # than partially de-identified.
           #
-          # 128 because Detect costs ~104ms/span at the median and ~403ms at p90
-          # and spans run in concurrent waves of max_concurrency, so this is a
-          # latency budget as much as a capacity one. FAIL-CLOSED: over the limit
-          # the request is refused (413), never partially de-identified.
+          # 128, not 512. Measured on real traffic: Detect costs ~104ms per span
+          # at the median and ~403ms at p90, and spans are processed
+          # SEQUENTIALLY, so 512 spans is ~53s at the median and ~206s at p90
+          # against a 60s deadline_ms -- i.e. over budget for most of the
+          # distribution, turning a hard 413 into a slow timeout. Observed real
+          # span counts are median 2, p90 18, max 49, so 128 leaves >2.5x
+          # headroom over the worst request actually seen.
+          #
+          # Raise this only together with concurrent span processing; until then
+          # the ceiling is a latency budget, not a capacity one.
           # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
           # This was never set, so it took the schema default of 1MB -- two orders
           # of magnitude below what the client will send. A request over it is
@@ -121,8 +139,21 @@ services:
           # ~30 tool definitions every turn -- which is exactly how a
           # fifteen-character request reached 139 spans and was refused 413.
           max_spans: 512
+          # Spans are de-identified in concurrent waves of this width, so
+          # de-identification costs roughly ceil(spans/8) Detect round-trips
+          # instead of one per span. Set explicitly rather than left to the
+          # schema default because this used to be DEAD CONFIG -- declared,
+          # documented as a DoS control, shipped in the partner schema, and
+          # referenced nowhere in the handler. Must stay <= keepalive_pool_size
+          # (16) or waves will contend for connections.
           max_concurrency: 8
-          response_json_paths: ["$.content[*].text"]
+          # response_json_paths is deliberately UNSET. "$.content[*].text" was
+          # listed here, but that is already the anthropic profile's response
+          # default and the two MERGE -- so every assistant text block was
+          # collected twice and detokenized twice, doubling response-leg latency
+          # and Detect spend for byte-identical output. effective_paths() now
+          # dedupes, so this line was also redundant; only add paths the profile
+          # does not already cover.
           deidentify:
             entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
                        ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER, DRIVER_LICENSE]
@@ -136,19 +167,22 @@ services:
             enabled: true
             strategy: reidentify_text
             on_error: deny
-            # Default `tokenized`: an unknown tool is assumed to ship its
+            # Default stays `tokenized`: an unknown tool is assumed to ship its
             # arguments somewhere we do not control, so it gets vault tokens.
             tool_inputs: tokenized
-            # Exceptions are tools that execute on the CALLER'S OWN MACHINE,
-            # where a token is corruption rather than protection: an Edit call
-            # whose old_string is `[NAME_X2A0iim]` matches nothing, and a Write
+            # The exceptions are tools that execute on the CALLER'S OWN MACHINE.
+            # There, tokens are not protection but corruption: an Edit call whose
+            # old_string is `[NAME_X2A0iim]` matches nothing, and a Write call
             # persists the token into the user's real file. Nothing leaves the
-            # device, and the caller already supplied the IdP token that unlocked
-            # the data.
+            # device, so the caller -- who is already authorized for this data,
+            # having just supplied the IdP token that unlocked it -- may see it.
             #
-            # Enumerated, not `mcp__workspace__*`: a prefix rule silently opts in
-            # every tool that server adds later, and mcp__workspace__web_fetch
-            # shows servers do mix local and egressing tools under one prefix.
+            # Listed one by one rather than as `mcp__workspace__*`, deliberately:
+            # a prefix rule silently opts in every tool a server adds LATER, and
+            # `mcp__workspace__web_fetch` shows that servers do mix local and
+            # egressing tools under one name. Prefix rules are supported (longest
+            # wins, exact beats prefix) but each new local tool should be a
+            # visible decision, not an inherited default.
             tool_inputs_by_tool:
               Read: plain_text
               Edit: plain_text
@@ -157,11 +191,13 @@ services:
               Glob: plain_text
               Grep: plain_text
               mcp__workspace__bash: plain_text
-              # Egressing tools, pinned explicitly so flipping the default above
-              # can never start leaking through these.
+              # Egressing tools, pinned explicitly. Redundant against the
+              # default above -- kept so that flipping that default can never
+              # silently start leaking through these.
               WebSearch: tokenized
               WebFetch: tokenized
               mcp__workspace__web_fetch: tokenized
+              # Artifacts are published to claude.ai, so they egress too.
               mcp__cowork__create_artifact: tokenized
               mcp__cowork__update_artifact: tokenized
           on_skyflow_error: deny
@@ -190,7 +226,7 @@ services:
               -- ai-proxy instances have to live on separate internal routes.
               --
               -- Strips whatever the FIRST path segment is rather than matching
-              -- "^/claude": the old pattern hard-coded one route, so this same
+              -- "^/ai": the old pattern hard-coded one route, so this same
               -- snippet on /probe produced /_up_anthropic/probe/v1/messages and
               -- 404'd -- which is why /probe used to be Anthropic-only.
               local body = kong.request.get_body()
@@ -209,28 +245,31 @@ services:
               local upstream = model:find("^gpt") and "/_up_openai" or "/_up_anthropic"
               kong.service.request.set_path(upstream .. tail)
               kong.log.info("kong-ai-gateway: model=", model, " -> ", upstream)
-      - name: file-log
-        config: { path: /dev/stdout }
       - name: skyflow-deidentify
         config:
-          vault_id: __SKYFLOW_VAULT_ID__
-          cluster_id: __SKYFLOW_CLUSTER_ID__
-          account_id: __SKYFLOW_ACCOUNT_ID__
+          vault_id: i65a450543bf48b68c3fa58c5ed7ce30
+          cluster_id: ebfc9bee4242
+          account_id: j58448d299cf4e42ac433948d9c70d94
           credentials:
             sts:
-              service_account_id: __STS_SERVICE_ACCOUNT_ID__
+              service_account_id: mab1f43f916b4ba082b500e1ab5be59f
               token_header: authorization
-              expected_issuer: "__ENTRA_ISSUER__"
-              expected_audience: "__ENTRA_AUDIENCE__"
+              expected_issuer: "https://login.microsoftonline.com/5b772553-7aad-487a-91a9-3b93382ac28b/v2.0"
+              expected_audience: "9ff1c091-fc74-4dae-929b-9cd58382b621"
           profile: anthropic
-          # Kept in lockstep with deploy/konnect/kong.yaml. This file is the
-          # no-control-plane fallback, and drifting from the live config is the
-          # dangerous failure mode: it deploys cleanly and protects LESS.
+          # FAIL-CLOSED: over the limit the request is rejected with 413 rather
+          # than partially de-identified.
           #
-          # 128 because Detect costs ~104ms/span at the median and ~403ms at p90
-          # and spans run in concurrent waves of max_concurrency, so this is a
-          # latency budget as much as a capacity one. FAIL-CLOSED: over the limit
-          # the request is refused (413), never partially de-identified.
+          # 128, not 512. Measured on real traffic: Detect costs ~104ms per span
+          # at the median and ~403ms at p90, and spans are processed
+          # SEQUENTIALLY, so 512 spans is ~53s at the median and ~206s at p90
+          # against a 60s deadline_ms -- i.e. over budget for most of the
+          # distribution, turning a hard 413 into a slow timeout. Observed real
+          # span counts are median 2, p90 18, max 49, so 128 leaves >2.5x
+          # headroom over the worst request actually seen.
+          #
+          # Raise this only together with concurrent span processing; until then
+          # the ceiling is a latency budget, not a capacity one.
           # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
           # This was never set, so it took the schema default of 1MB -- two orders
           # of magnitude below what the client will send. A request over it is
@@ -249,6 +288,13 @@ services:
           # ~30 tool definitions every turn -- which is exactly how a
           # fifteen-character request reached 139 spans and was refused 413.
           max_spans: 512
+          # Spans are de-identified in concurrent waves of this width, so
+          # de-identification costs roughly ceil(spans/8) Detect round-trips
+          # instead of one per span. Set explicitly rather than left to the
+          # schema default because this used to be DEAD CONFIG -- declared,
+          # documented as a DoS control, shipped in the partner schema, and
+          # referenced nowhere in the handler. Must stay <= keepalive_pool_size
+          # (16) or waves will contend for connections.
           max_concurrency: 8
           deidentify:
             entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
@@ -353,7 +399,7 @@ services:
     url: http://localhost:32001
     routes:
       - name: models
-        paths: ["/claude/v1/models", "/probe/v1/models"]
+        paths: ["/ai/v1/models", "/probe/v1/models"]
         strip_path: true
         protocols: ["http", "https"]
     plugins:

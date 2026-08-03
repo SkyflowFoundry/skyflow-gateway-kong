@@ -196,7 +196,7 @@ plugins:
 What the config does:
 
 - `vault_id` / `cluster_id` / `env` — which Skyflow vault and environment to call.
-- `credentials.api_key` — the Skyflow credential, as a Kong secret reference.
+- `credentials.sts` — the delegating service-account ID plus the expected IdP issuer and audience. Not a secret: the gateway holds no Skyflow credential, and vault access requires a live caller IdP token exchanged per request (RFC 8693).
 - `profile: openai` — targets OpenAI Chat Completions fields; use `anthropic`, `mcp`, or
   `generic` (with `request_json_paths`) for other payload shapes.
 - `deidentify.entities` — the entity types to detect (empty = Skyflow's default set).

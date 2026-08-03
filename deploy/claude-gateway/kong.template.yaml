@@ -1,3 +1,20 @@
+# ============================================================================
+# STALE -- DO NOT DEPLOY FROM THIS DIRECTORY.
+#
+# This is the pre-STS, pre-Konnect deployment path. It will NOT load against the
+# current plugin: `credentials.service_account_json` below was removed from
+# schema.lua when the gateway became STS-delegation-only, so validation rejects
+# it outright. That failure is at least loud.
+#
+# What is NOT loud, and is the real reason for this banner: the entity list here
+# is the OLD 8-entity list. Deploying from this file would silently stop
+# detecting LOCATION, ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER and
+# DRIVER_LICENSE -- exactly the gap that let a bank account number and a home
+# address reach a model provider in cleartext through the sister gateway.
+#
+# The live path is deploy/konnect/ (Konnect-managed control plane).
+# The self-hosted fallback is deploy/aws/ (declarative, no control plane).
+# ============================================================================
 # Declarative config template for the Claude Code -> Kong -> Skyflow -> LLM
 # gateway.
 #
@@ -62,7 +79,7 @@ services:
               local upstream = model:find("^claude") and "/_claude_upstream_anthropic"
                                                      or "/_claude_upstream"
               kong.service.request.set_path(upstream .. tail)
-              kong.log.info("skyflow-gateway: model=", model, " -> ", upstream)
+              kong.log.info("kong-ai-gateway: model=", model, " -> ", upstream)
       - name: skyflow-deidentify
         config:
           vault_id: __SKYFLOW_VAULT_ID__

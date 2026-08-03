@@ -260,30 +260,71 @@ curl -s localhost:8000/ai/chat -H 'content-type: application/json' \
 > anything not in it — each `deck/*.yaml` is a full desired state. Sync one at a
 > time.
 
-### Deploying to a paid Dedicated Cloud Gateway
+### Option 4 — streamed custom plugin (recommended for existing Konnect users)
 
-Same two files, uploaded via Konnect (schema **and** handler, since Kong runs the
-data plane for you). See [`deployment`](docs/using/deployment.md).
+The plugin runs on a data plane whose **image you never touch**. `handler.lua` and
+`schema.lua` are uploaded to the control plane and pushed to every node over the
+existing cluster connection, so installing and upgrading the plugin is an API call
+(or a form in Gateway Manager) rather than a build-push-deploy cycle. This is also
+the only way a custom Lua plugin can run on a Dedicated Cloud Gateway, where the
+image is not yours to build.
+
+Config lives in [`deploy/streaming/`](deploy/streaming/). Three data-plane
+settings make it work, and two are non-obvious:
+
+| Setting | Why |
+| --- | --- |
+| `KONG_CUSTOM_PLUGIN_STREAMING_ENABLED=on` | Defaults to **off**. Without it the control plane strips streamed plugins from the config and reports issue **P309** — and the node keeps serving its last good config, which for a privacy gateway can mean proxying with no de-identification at all. |
+| `KONG_UNTRUSTED_LUA=lax` | Streamed code runs in the untrusted-Lua sandbox, which defaults to `strict` and forbids `require()`. Measured against 3.15.0.2: `strict` **fails**, `lax` **works**, `on` works but removes the sandbox entirely. `sandbox` plus `untrusted_lua_sandbox_requires` fails despite the documentation. |
+| `KONG_PLUGINS=bundled` | Must **not** name `skyflow-deidentify`. Listing it makes Kong demand the code locally at boot and the node dies before the stream arrives. |
+
+Because the handler is sandboxed, globals the sandbox withholds are nil at
+runtime even though the Lua is valid — `setmetatable` cost a production outage
+this way. `make globals` scans both streamed files for that class of bug.
+
+```bash
+# upload the plugin code once per control plane (Gateway Manager →
+# Plugins → New plugin → Create custom plugin → Streamed custom plugin,
+# or the equivalent API call):
+#   POST /v2/control-planes/{cp}/core-entities/custom-plugins
+#        { "name": ..., "schema": <schema.lua>, "handler": <handler.lua> }
+
+cd deploy/streaming
+export DECK_KONNECT_TOKEN=kpat_... DECK_KONNECT_ADDR=https://us.api.konghq.com
+deck gateway sync kong.yaml --konnect-control-plane-name <your-cp>
+```
+
+> Streaming and the older `plugin-schemas` endpoint are **mutually exclusive**. If
+> a control plane already has a registered plugin schema (Option 3), remove it
+> before uploading, or the upload conflicts.
+
+Konnect config edits reach running data planes in about ten seconds with no
+restart. Plugin *code* changes need a config change alongside them to trigger the
+push.
 
 ## Repository layout
 
 ```text
 plugin/kong/plugins/skyflow-deidentify/
 ├── schema.lua      # config contract — require-free (Konnect upload constraint)
-├── handler.lua     # self-contained: auth (API key / SA-JWT + ctx) + Skyflow Detect
+├── handler.lua     # self-contained: auth (STS delegation) + Skyflow Detect
 │                   #   client + JSONPath-lite body targeting + de-id + re-id
 └── *.rockspec      # self-managed / local installs only
 
 deploy/
 ├── local-dbless/       # Option 1: offline harness (Kong + mock Skyflow + mock LLM)
 ├── claude-gateway/     # Option 2: Claude Code -> Kong -> Skyflow -> OpenAI (real vault)
-└── konnect-hybrid/     # Option 3: self-managed DP on Konnect + deck configs
-    └── deck/           # real-vault.yaml, ai-gateway.yaml, kong.yaml, VERIFY-DETECT.md
+├── konnect-hybrid/     # Option 3: self-managed DP on Konnect + deck configs
+│   └── deck/           # real-vault.yaml, ai-gateway.yaml, kong.yaml, VERIFY-DETECT.md
+└── streaming/          # Option 4: streamed custom plugin — no plugin code in the image
+    ├── Dockerfile      #   data plane carrying only the three streaming settings
+    └── kong.yaml       #   services, routes and plugin config (deck)
 
 demo/                   # on-camera steps for recording the walkthrough (see demo/README.md)
 
 spec/
-├── offline/pure_algorithms_test.lua   # runs under luajit — no Kong/Docker (make unit-pure)
+├── offline/pure_algorithms_test.lua   # runs under `resty` in the Kong image (make unit-pure)
+├── offline/no_undefined_globals.sh    # undefined + sandbox-forbidden globals (make globals)
 └── skyflow-deidentify/                # schema + access + response specs (Pongo/busted)
 
 docs/                    # design spec (see Documentation map below)

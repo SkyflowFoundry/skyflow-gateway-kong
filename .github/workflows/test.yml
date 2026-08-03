@@ -1,0 +1,146 @@
+name: test
+
+# Neither of the two gateway repos ran its tests in CI until this file existed:
+# this repo linted markdown, and the sister repo had no workflows at all. Several
+# defects reached production as a result, including one that discarded a complete
+# model response.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  offline-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Run under `resty` inside the SAME Kong image the data plane runs, not
+      # under bare luajit. The Makefile used to invoke `luajit`, which is absent
+      # on most machines -- and on a box that has it WITHOUT lua-cjson, the codec
+      # test silently skipped and the suite still exited 0. The runtime has to
+      # match production or the tests assert against a different library set.
+      - name: offline unit tests
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w \
+            --entrypoint resty kong/kong-gateway:3.15.0.2 \
+            spec/offline/pure_algorithms_test.lua
+
+      # The outage guard. A local function that is CALLED but never DEFINED
+      # resolves as a nil global and kills every request at runtime -- which is
+      # exactly what took the gateway down: a refactor moved run_waves to module
+      # scope and took run_span's definition with it, leaving the call site.
+      # The whole offline suite passed throughout, because run_waves is tested
+      # with an injected fake and nothing exercises the access phase.
+      - name: no undefined globals
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w \
+            --entrypoint sh kong/kong-gateway:3.15.0.2 \
+            -c 'cd /w && ./spec/offline/no_undefined_globals.sh'
+
+      # A test that cannot fail is worse than a missing one. Reintroduce the
+      # `tools: [] -> {}` bug that 400'd every Claude Desktop title-generation
+      # request and assert the suite NOTICES. The previous version of that test
+      # asserted on the cjson library rather than on the handler's codec and
+      # passed with the bug reinstated.
+      - name: mutation check -- the suite must catch the codec regression
+        run: |
+          mkdir -p /tmp/mut && cp -r plugin spec /tmp/mut/
+          cd /tmp/mut
+          sed -i 's/body_json\.decode/cjson.decode/g; s/body_json\.encode/cjson.encode/g' \
+            plugin/kong/plugins/skyflow-deidentify/handler.lua
+          if docker run --rm -v "$PWD:/w" -w /w \
+               --entrypoint resty kong/kong-gateway:3.15.0.2 \
+               spec/offline/pure_algorithms_test.lua; then
+            echo "::error::the suite PASSED with the tools:[] codec bug reinstated -- it is not testing the handler's codec"
+            exit 1
+          fi
+          echo "ok: the suite fails when the codec fix is reverted"
+
+  # The `secrets` context is NOT available in a job-level `if:` -- using it there
+  # makes the whole workflow unparseable ("This run likely failed because of a
+  # workflow file issue", 0s, no jobs). So test the secret inside a step, publish
+  # the answer as an output, and let config-validity depend on that. This job also
+  # WARNS when the gate is off, because a job that silently does not appear is
+  # easy to read as a job that passed.
+  config-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: is Konnect config validation enabled?
+        id: check
+        env:
+          KONNECT_PAT: ${{ secrets.KONNECT_PAT }}
+        run: |
+          if [ -n "${KONNECT_PAT:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Konnect config validation is ENABLED"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Konnect config not validated::No KONNECT_PAT secret, so deploy/*/kong.yaml was NOT validated against a control plane. Add a KONNECT_PAT repository secret to enable this check."
+          fi
+
+  config-validity:
+    runs-on: ubuntu-latest
+    needs: config-gate
+    # Requires a Konnect PAT with read access to the control planes. Without it
+    # every run died with "HTTP status 401 (message: Unauthorized)" -- and because
+    # the decK install was ALSO broken, the job never reached that point, so a red
+    # X here read as "tooling broken" rather than "this check has never run".
+    # Skipping loudly beats failing opaquely.
+    if: >-
+      ${{ github.event_name == 'push'
+          && github.repository_owner == 'SkyflowFoundry'
+          && needs.config-gate.outputs.enabled == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      # deck's release assets carry the VERSION in the filename
+      # (deck_1.65.1_linux_amd64.tar.gz), so the /releases/latest/download/
+      # shortcut 404s -- and piping a 404 body into tar failed the job with
+      # "gzip: stdin: not in gzip format", which reads as a corrupt download
+      # rather than a wrong URL. Resolve the tag, then build the real name.
+      - name: install decK
+        run: |
+          set -euo pipefail
+          # jq, not `grep -m1`: grep exits on the first match and closes the pipe,
+          # curl dies with EPIPE ("curl: (23) Failure writing output to
+          # destination"), and pipefail turns that into a failed step that looks
+          # like a broken download. jq consumes all of its input.
+          tag=$(curl -fsSL https://api.github.com/repos/Kong/deck/releases/latest | jq -r .tag_name)
+          ver="${tag#v}"
+          echo "installing decK $ver"
+          # Download to a file rather than piping into tar: a pipe conflates
+          # download errors with extraction errors (a 404 body surfaced as
+          # "gzip: stdin: not in gzip format") and tar closing the pipe early
+          # surfaces as the equally opaque "curl: (23) Failure writing output".
+          curl -fsSL -o /tmp/deck.tar.gz \
+            "https://github.com/Kong/deck/releases/download/${tag}/deck_${ver}_linux_amd64.tar.gz"
+          tar -xzf /tmp/deck.tar.gz -C /usr/local/bin deck
+          deck version
+      # `deck gateway diff` does NOT validate plugin config -- it accepted a
+      # bogus field and reported "Updated: 1", which the control plane then
+      # rejected. `validate` is online by default and catches it. Do NOT pass
+      # --online-entities-list to narrow scope: with `Services` it silently
+      # passed the same bad field.
+      - name: validate config against the control plane
+        env:
+          DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_PAT }}
+          DECK_KONNECT_ADDR: https://us.api.konghq.com
+        run: |
+          cd deploy/konnect
+          deck gateway validate kong.yaml \
+            --konnect-control-plane-name skyflow-kong-gateway
+
+      # The streamed deployment is the one actually serving traffic, so it needs
+      # the same gate. Its control plane is separate: streaming and the older
+      # plugin-schemas endpoint are mutually exclusive, so the two configs cannot
+      # share one.
+      - name: validate the streamed config against its control plane
+        env:
+          DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_PAT }}
+          DECK_KONNECT_ADDR: https://us.api.konghq.com
+        run: |
+          cd deploy/streaming
+          deck gateway validate kong.yaml \
+            --konnect-control-plane-name skyflow-gateway

@@ -4,8 +4,14 @@
 --
 -- Konnect custom-plugin upload constraints honored here:
 --   * NO `require()` statements (typedefs are inlined below).
---   * Self-contained: custom_entity_check fns use only the entity table + basic
---     Lua (no os.*, no globals, no requires).
+--   * NO custom validation functions -- neither of Kong's two per-entity
+--     escape hatches appears here. Konnect's plugin-streaming upload rejects a
+--     schema containing them, and streaming is what lets the control plane
+--     distribute this plugin's CODE rather than us baking it into every
+--     data-plane image. Note the check is a SUBSTRING match on the schema text,
+--     not a parse: even a comment naming those functions fails the upload, which
+--     is why this note describes them instead. Rules that Kong's built-in entity
+--     checkers cannot express live in handler.lua -- see entity_checks below.
 --   * Pairs with a self-contained handler.lua; no extra modules/DAOs/migrations.
 --
 -- See docs/contributing/plugin-spec.md §4.3 for the field reference and docs/using/operations.md for the
@@ -24,68 +30,90 @@ local STRATEGIES    = { "mapping_only", "reidentify_text", "detokenize" }
 local STREAMING     = { "buffer", "passthrough" }
 local PROTOCOLS     = { "http", "https", "grpc", "grpcs", "ws", "wss" }
 
--- Exactly one of api_key | token | service_account_json.
---   * service_account_json: full Skyflow SA credentials JSON; the handler
---     mints RS256 JWT-bearer tokens from it (cached per SA/scope/ctx).
---   * role_ids: scoped tokens -- restrict the bearer to a subset of the SA's
---     roles ("role:<id>" scope on the token exchange).
---   * ctx claim (context-aware authorization): Skyflow accepts arbitrary JSON
---     (vault policies traverse it as $ctx.a.b). Assembled in layers, later
---     layers winning:
---       context_json    -- raw JSON string, any shape; the ctx base
---       context         -- static attr(.path) -> string; dot-paths nest
---       context_headers -- attr(.path) -> request header (client-supplied)
---       context_kong    -- attr(.path) -> gateway-derived fact (trusted,
---                          merged last so clients can never override it)
-local KONG_CTX_SOURCES = {
-  "consumer_id", "consumer_username", "consumer_custom_id",
-  "route_name", "service_name", "client_ip",
-}
-
+-- Credentials: STS delegation (RFC 8693) and nothing else. See the record
+-- below for why there is no api_key / service_account_json / ctx machinery.
 local credentials = {
   type = "record",
   required = true,
   fields = {
-    { api_key = { type = "string", referenceable = true, encrypted = true } },
-    { token   = { type = "string", referenceable = true, encrypted = true } },
-    { service_account_json = { type = "string", referenceable = true, encrypted = true } },
-    { role_ids = { type = "array", elements = { type = "string" } } },
-    { context_json = { type = "string", referenceable = true, encrypted = true } },
-    { context  = { type = "map", keys = { type = "string" }, values = { type = "string" } } },
-    { context_headers = { type = "map", keys = { type = "string" }, values = { type = "string" } } },
-    { context_kong = { type = "map", keys = { type = "string" },
-                       values = { type = "string", one_of = KONG_CTX_SOURCES } } },
-  },
-  entity_checks = {
-    { only_one_of = { "api_key", "token", "service_account_json" } },
-    -- role_ids/context* shape the minted bearer; with a static api_key/token
-    -- they would be silently ignored -- reject that config.
-    { custom_entity_check = {
-        field_sources = { "service_account_json", "role_ids", "context_json",
-                          "context", "context_headers", "context_kong" },
-        fn = function(entity)
-          local has_sa = type(entity.service_account_json) == "string"
-                         and entity.service_account_json ~= ""
-          local function nonempty(t) return type(t) == "table" and next(t) ~= nil end
-          local uses_sa_opts =
-            (type(entity.role_ids) == "table" and #entity.role_ids > 0)
-            or (type(entity.context_json) == "string" and entity.context_json ~= "")
-            or nonempty(entity.context)
-            or nonempty(entity.context_headers)
-            or nonempty(entity.context_kong)
-          if uses_sa_opts and not has_sa then
-            return nil, "role_ids/context_json/context/context_headers/context_kong "
-                        .. "require credentials.service_account_json"
-          end
-          -- Cheap shape check; full JSON validation happens at runtime (and
-          -- fails closed). Skip when the value is a {vault://...} reference.
-          if type(entity.context_json) == "string" and entity.context_json ~= ""
-             and not entity.context_json:match("^%s*{") then
-            return nil, "context_json must be a JSON object (or a secret reference)"
-          end
-          return true
-        end,
+    -- STS delegation (RFC 8693) is the ONLY credential path. There is
+    -- deliberately no api_key, no static bearer token, and no
+    -- service_account_json: a gateway holding a Skyflow credential is a gateway
+    -- worth attacking, and gateway-asserted identity is a weaker claim than a
+    -- signed one. The caller's IdP token is the credential.
+    --
+    -- There is also no context/context_headers/context_kong/role_ids here.
+    -- Skyflow SILENTLY IGNORES context supplied by the caller of an exchange, so
+    -- `ctx` is exclusively the IdP's claims. Attributes like tenant, role, and
+    -- purpose belong in the IdP token -- Entra app roles and claims-mapping
+    -- policies put them there, IdP-signed, which is strictly better than this
+    -- gateway asserting them.
+    { sts = {
+        type = "record",
+        required = true,
+        fields = {
+          -- the Skyflow service account the caller delegates through; it must be
+          -- listed in the account's STS configuration for this issuer
+          { service_account_id = { type = "string", required = true } },
+          -- where the caller's token arrives (Claude Desktop's gateway OIDC mode
+          -- sends it as `Authorization: Bearer <id_token>`)
+          { token_header = { type = "string", default = "authorization" } },
+          { token_uri = { type = "string",
+                          default = "https://manage.skyflowapis.com/v1/auth/sts/token" } },
+          -- local fail-fast checks; Skyflow still verifies the signature against
+          -- the issuer's JWKS, so these are defense in depth and cost no network
+          -- hop when a token is obviously for somewhere else
+          { expected_issuer = { type = "string" } },
+          { expected_audience = { type = "string" } },
+        },
     } },
+  },
+}
+
+-- Binary attachments (image / document content blocks). The text path cannot
+-- touch base64 bytes, so without this they reach the provider unmodified.
+--
+--   mode=deidentify (default) -- send the file to Detect's V2 file API and
+--     swap in the redacted bytes. Verified for png/jpg/gif/bmp/tif/pdf.
+--   mode=strip        -- replace every attachment with a text marker
+--   mode=block        -- refuse any request carrying an attachment
+--   mode=passthrough  -- forward untouched (explicit opt-out; NOT the default,
+--                        because silently forwarding what cannot be inspected
+--                        is the one behaviour this plugin should never have)
+--
+-- `unsupported` covers formats Detect cannot process at all -- webp is the
+-- notable one, since Anthropic accepts it and Detect does not -- plus URL and
+-- file_id sources whose bytes the gateway never sees.
+local MEDIA_MODES        = { "deidentify", "strip", "block", "passthrough" }
+local UNSUPPORTED_MODES  = { "strip", "block" }
+local MASKING_METHODS    = { "BLACKBOX", "BLUR" }
+local PDF_MODES          = { "OCR", "TEXT_LAYER" }
+
+local media = {
+  type = "record",
+  fields = {
+    { mode = { type = "string", one_of = MEDIA_MODES, default = "deidentify" } },
+    { unsupported = { type = "string", one_of = UNSUPPORTED_MODES, default = "strip" } },
+    { masking_method = { type = "string", one_of = MASKING_METHODS, default = "BLACKBOX" } },
+    -- Entity scope for attachments. Empty = ALL, which is intentionally
+    -- broader than deidentify.entities: an image cannot be skimmed before it
+    -- egresses, and ALL measurably detects more (6 vs 4 on a test card image).
+    { entities = { type = "array", elements = { type = "string" }, default = {} } },
+    -- Non-text objects to redact. MUST be specific types -- `ALL` blacks out
+    -- every detected object including plain text runs, so the provider gets a
+    -- solid black rectangle. FACE+SIGNATURE keeps the image legible while
+    -- covering what entity detection cannot see.
+    { redact_object_types = { type = "array",
+                              elements = { type = "string",
+                                           one_of = { "FACE", "SIGNATURE", "LOGO", "LICENSE_PLATE" } },
+                              default = { "FACE", "SIGNATURE" } } },
+    -- OCR rasterizes (right for scans); TEXT_LAYER edits the PDF's text layer
+    -- and keeps it selectable.
+    { pdf_processing_mode = { type = "string", one_of = PDF_MODES, default = "OCR" } },
+    { poll_interval_ms = { type = "integer", default = 500, between = { 100, 5000 } } },
+    -- Guard on base64 length. A PDF takes ~10s, so a large attachment can eat
+    -- the whole request deadline; refuse early rather than time out mid-flight.
+    { max_file_bytes = { type = "integer", default = 8388608, between = { 0, 67108864 } } },
   },
 }
 
@@ -108,6 +136,19 @@ local deidentify = {
     { restrict_regex = { type = "array", elements = { type = "string" }, default = {} } },
     { shift_dates = shift_dates },
     { batch_mode = { type = "string", one_of = { "per_span", "joined" }, default = "per_span" } },
+    -- Explain the placeholders to the model. On by default: a model that has not
+    -- been told what [NAME_a1b2c3] is tends to editorialise about redaction
+    -- ("all names have been removed, so I cannot provide those details") instead
+    -- of just using the placeholder -- which wastes a token the gateway would
+    -- happily have re-identified on the way back. Set enabled=false to send the
+    -- caller's prompt untouched, or `text` to replace the wording entirely.
+    { token_preamble = {
+        type = "record",
+        fields = {
+          { enabled = { type = "boolean", default = true } },
+          { text    = { type = "string" } },
+        },
+    } },
   },
 }
 
@@ -122,6 +163,26 @@ local reidentify = {
     -- real values first (trust-the-client deployments).
     { tool_inputs = { type = "string", one_of = { "tokenized", "plain_text" },
                       default = "tokenized" } },
+    -- Per-tool override of the above, because one global setting is wrong in
+    -- both directions for an agent harness. The destination of a tool call is
+    -- what decides the policy, and the tool NAME is the only thing that reveals
+    -- it -- Claude Desktop names MCP tools `mcp__<server>__<tool>` and built-ins
+    -- bare (`Read`, `Edit`, `Bash`).
+    --
+    -- A tool that runs on the caller's own machine needs REAL values: left
+    -- tokenized, an Edit call writes the vault token into the user's actual
+    -- file, which is corruption rather than protection. A tool that ships its
+    -- arguments to a third party (Slack, Gmail, web search) must stay tokenized
+    -- or the gateway has been bypassed.
+    --
+    -- Keys are exact tool names, or a `*`-suffixed prefix (`mcp__workspace__*`).
+    -- Exact beats prefix; longest prefix wins; no match falls back to
+    -- `tool_inputs`. A map of plain strings on purpose: Konnect's custom-plugin
+    -- validator rejects per-entity validation functions.
+    { tool_inputs_by_tool = { type = "map", keys = { type = "string" },
+                              values = { type = "string",
+                                         one_of = { "tokenized", "plain_text" } },
+                              default = {} } },
     { entity_treatment = { type = "map", keys = { type = "string" },
                            values = { type = "string", one_of = TREATMENTS }, default = {} } },
     { default_treatment = { type = "string", one_of = TREATMENTS, default = "plain_text" } },
@@ -162,6 +223,7 @@ return {
 
           ----------------------------------------------------------------- behavior
           { deidentify = deidentify },
+          { media = media },
           { reidentify = reidentify },
 
           ----------------------------------------------------------------- resilience
@@ -185,18 +247,18 @@ return {
           } } },
         },
 
+        -- Only Kong's built-in entity checkers below -- no per-entity custom
+        -- validation function, because the plugin-streaming upload refuses a
+        -- schema that contains one. Two rules that used to live here needed
+        -- arbitrary Lua and so moved into handler.lua:
+        --   * deadline_ms >= timeout_ms is now CLAMPED at request time rather
+        --     than rejected, which is strictly better -- a deadline shorter
+        --     than one attempt's timeout is a typo, not an intent, and
+        --     self-correcting beats refusing to boot.
+        --   * profile 'generic' needing request_json_paths (or content_type
+        --     text) is checked once per request and fails closed with the same
+        --     message.
         entity_checks = {
-          { custom_entity_check = {
-              field_sources = { "timeout_ms", "deadline_ms" },
-              fn = function(entity)
-                if entity.deadline_ms and entity.timeout_ms
-                   and entity.deadline_ms < entity.timeout_ms then
-                  return nil, "deadline_ms must be >= timeout_ms"
-                end
-                return true
-              end,
-          } },
-
           { conditional = {
               if_field = "reidentify.strategy", if_match = { eq = "mapping_only" },
               then_field = "deidentify.token_format", then_match = { ne = "ENTITY_ONLY" },
@@ -207,18 +269,6 @@ return {
           { conditional = {
               if_field = "reidentify.strategy", if_match = { eq = "reidentify_text" },
               then_field = "deidentify.token_format", then_match = { eq = "VAULT_TOKEN" },
-          } },
-
-          { custom_entity_check = {
-              field_sources = { "profile", "request_json_paths", "content_type" },
-              fn = function(entity)
-                if entity.profile == "generic"
-                   and entity.content_type ~= "text"
-                   and (not entity.request_json_paths or #entity.request_json_paths == 0) then
-                  return nil, "profile 'generic' requires request_json_paths or content_type=text"
-                end
-                return true
-              end,
           } },
         },
     } },
