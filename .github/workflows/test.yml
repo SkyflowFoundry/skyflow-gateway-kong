@@ -63,10 +63,29 @@ jobs:
     if: ${{ github.event_name == 'push' && github.repository_owner == 'SkyflowFoundry' }}
     steps:
       - uses: actions/checkout@v4
+      # deck's release assets carry the VERSION in the filename
+      # (deck_1.65.1_linux_amd64.tar.gz), so the /releases/latest/download/
+      # shortcut 404s -- and piping a 404 body into tar failed the job with
+      # "gzip: stdin: not in gzip format", which reads as a corrupt download
+      # rather than a wrong URL. Resolve the tag, then build the real name.
       - name: install decK
         run: |
-          curl -sL https://github.com/Kong/deck/releases/latest/download/deck_linux_amd64.tar.gz \
-            | tar -xz -C /usr/local/bin deck
+          set -euo pipefail
+          # jq, not `grep -m1`: grep exits on the first match and closes the pipe,
+          # curl dies with EPIPE ("curl: (23) Failure writing output to
+          # destination"), and pipefail turns that into a failed step that looks
+          # like a broken download. jq consumes all of its input.
+          tag=$(curl -fsSL https://api.github.com/repos/Kong/deck/releases/latest | jq -r .tag_name)
+          ver="${tag#v}"
+          echo "installing decK $ver"
+          # Download to a file rather than piping into tar: a pipe conflates
+          # download errors with extraction errors (a 404 body surfaced as
+          # "gzip: stdin: not in gzip format") and tar closing the pipe early
+          # surfaces as the equally opaque "curl: (23) Failure writing output".
+          curl -fsSL -o /tmp/deck.tar.gz \
+            "https://github.com/Kong/deck/releases/download/${tag}/deck_${ver}_linux_amd64.tar.gz"
+          tar -xzf /tmp/deck.tar.gz -C /usr/local/bin deck
+          deck version
       # `deck gateway diff` does NOT validate plugin config -- it accepted a
       # bogus field and reported "Updated: 1", which the control plane then
       # rejected. `validate` is online by default and catches it. Do NOT pass
@@ -80,3 +99,16 @@ jobs:
           cd deploy/konnect
           deck gateway validate kong.yaml \
             --konnect-control-plane-name skyflow-kong-gateway
+
+      # The streamed deployment is the one actually serving traffic, so it needs
+      # the same gate. Its control plane is separate: streaming and the older
+      # plugin-schemas endpoint are mutually exclusive, so the two configs cannot
+      # share one.
+      - name: validate the streamed config against its control plane
+        env:
+          DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_PAT }}
+          DECK_KONNECT_ADDR: https://us.api.konghq.com
+        run: |
+          cd deploy/streaming
+          deck gateway validate kong.yaml \
+            --konnect-control-plane-name skyflow-gateway
