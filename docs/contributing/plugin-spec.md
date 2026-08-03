@@ -105,7 +105,7 @@ are never stored in plaintext in the DB and never appear in `GET /plugins`.
 | `timeout_ms` | integer | `5000` | Per-attempt connect/send/read timeout to Skyflow. |
 | `deadline_ms` | integer | `8000` | Total budget incl. retries. |
 | `retries` | integer | `2` | Max retries for idempotent/ retryable Skyflow errors. |
-| `max_concurrency` | integer | `8` | Parallel Detect calls for `per_span` batching. |  <!-- wired into the concurrent span runner (run_waves); waves of this width -->
+| `max_concurrency` | integer | `8` | Parallel Detect calls for `per_span` batching. Wired into the concurrent span runner (`run_waves`), which issues waves of this width. Must stay `<= keepalive_pool_size` or waves contend for connections. |
 | `keepalive_pool_size` | integer | `16` | `lua-resty-http` pool size per worker. |
 | `keepalive_idle_ms` | integer | `60000` | Keepalive idle timeout. |
 | `on_skyflow_error` | string (enum) | `deny` | `deny`\|`allow` (de-identify failure posture). |
