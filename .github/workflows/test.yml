@@ -57,10 +57,42 @@ jobs:
           fi
           echo "ok: the suite fails when the codec fix is reverted"
 
+  # The `secrets` context is NOT available in a job-level `if:` -- using it there
+  # makes the whole workflow unparseable ("This run likely failed because of a
+  # workflow file issue", 0s, no jobs). So test the secret inside a step, publish
+  # the answer as an output, and let config-validity depend on that. This job also
+  # WARNS when the gate is off, because a job that silently does not appear is
+  # easy to read as a job that passed.
+  config-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: is Konnect config validation enabled?
+        id: check
+        env:
+          KONNECT_PAT: ${{ secrets.KONNECT_PAT }}
+        run: |
+          if [ -n "${KONNECT_PAT:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Konnect config validation is ENABLED"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Konnect config not validated::No KONNECT_PAT secret, so deploy/*/kong.yaml was NOT validated against a control plane. Add a KONNECT_PAT repository secret to enable this check."
+          fi
+
   config-validity:
     runs-on: ubuntu-latest
-    # Konnect credentials are only present on pushes to the canonical repo.
-    if: ${{ github.event_name == 'push' && github.repository_owner == 'SkyflowFoundry' }}
+    needs: config-gate
+    # Requires a Konnect PAT with read access to the control planes. Without it
+    # every run died with "HTTP status 401 (message: Unauthorized)" -- and because
+    # the decK install was ALSO broken, the job never reached that point, so a red
+    # X here read as "tooling broken" rather than "this check has never run".
+    # Skipping loudly beats failing opaquely.
+    if: >-
+      ${{ github.event_name == 'push'
+          && github.repository_owner == 'SkyflowFoundry'
+          && needs.config-gate.outputs.enabled == 'true' }}
     steps:
       - uses: actions/checkout@v4
       # deck's release assets carry the VERSION in the filename
