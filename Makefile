@@ -2,7 +2,10 @@
 # See docs/05 (implementation plan) and docs/06 (testing).
 
 PLUGIN := skyflow-deidentify
-VERSION := 0.2.0-1
+# Must match `version` in the rockspec, or `make pack` builds a path to a file
+# that does not exist. It said 0.2.0-1 while the rockspec had moved to 0.3.0-1.
+VERSION := 0.3.0-1
+ROCKSPEC := plugin/kong/plugins/$(PLUGIN)/$(PLUGIN)-$(VERSION).rockspec
 
 .PHONY: help lint lint-md unit-pure globals test unit integration e2e sandbox-smoke pack clean
 
@@ -19,8 +22,10 @@ help:
 	@echo "  sandbox-smoke  OPTIONAL manual smoke vs a real Skyflow sandbox (needs creds)"
 	@echo "  pack           luarocks pack the plugin rock"
 
+# `*.rockspec` used to be globbed at the repo ROOT, where there is none -- the
+# pattern reached luacheck unexpanded and it failed on a literal "*.rockspec".
 lint:
-	luacheck plugin spec *.rockspec
+	luacheck plugin spec $(ROCKSPEC)
 
 # Markdown lint (config in .markdownlint.jsonc). `make lint-md FIX=1` to auto-fix.
 # Version pinned so local and CI (.github/workflows/markdownlint.yml) match.
@@ -57,14 +62,34 @@ unit:
 integration:
 	pongo run -- spec/skyflow-deidentify/02-access_spec.lua spec/skyflow-deidentify/03-response_spec.lua
 
+# There is no compose file at the repo root and scripts/demo.sh does not exist,
+# so this target could never have run. The offline harness lives in
+# deploy/local-dbless; drive that, and assert the de-identified result rather
+# than only bringing the stack up.
+COMPOSE := docker compose -f deploy/local-dbless/docker-compose.yml
+# The plugin is STS-only, so every request needs a caller identity token. The
+# harness leaves expected_issuer/expected_audience unset, so an unsigned fixture
+# JWT with no `exp` satisfies the precheck -- no IdP, no keys. Header
+# {"alg":"none"}, payload {"sub":"demo-user",...}. Not a credential.
+DEMO_JWT := eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJkZW1vLXVzZXIiLCJlbWFpbCI6ImRlbW9AZXhhbXBsZS5jb20iLCJuYW1lIjoiRGVtbyBVc2VyIn0.sig
 e2e:
-	docker compose up -d
-	./scripts/demo.sh   # runs the worked example from docs/03 §3.9
-	docker compose down
+	$(COMPOSE) up -d --wait
+	@out=$$(curl -s localhost:8010/ai/chat -H 'content-type: application/json' \
+	  -H 'authorization: Bearer $(DEMO_JWT)' \
+	  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply to Jane Doe at jane@acme.com"}]}'); \
+	echo "client sees: $$out"; \
+	sent=$$(docker logs skyflow-mock-llm-local 2>&1 | grep -oE 'MOCK-LLM RECEIVED.*' | tail -1); \
+	echo "upstream saw: $$sent"; \
+	fail=0; \
+	echo "$$sent" | grep -q 'NAME_' || { echo "FAIL: the name reached the upstream in the clear"; fail=1; }; \
+	echo "$$out"  | grep -q 'Jane Doe' || { echo "FAIL: the client did not get a re-identified response"; fail=1; }; \
+	$(COMPOSE) down >/dev/null 2>&1; \
+	[ $$fail -eq 0 ] && echo "ok: tokenized on egress, restored to the client" || exit 1
 
-# Guarded: requires SKYFLOW_VAULT_ID / SKYFLOW_CLUSTER_ID / SKYFLOW_API_KEY.
+# Guarded: requires SKYFLOW_VAULT_ID / SKYFLOW_CLUSTER_ID /
+# SKYFLOW_SERVICE_ACCOUNT_ID. There is no API key: the plugin is STS-only.
 sandbox-smoke:
-	@test -n "$$SKYFLOW_VAULT_ID" || (echo "set SKYFLOW_VAULT_ID/CLUSTER_ID/API_KEY" && exit 1)
+	@test -n "$$SKYFLOW_VAULT_ID" || (echo "set SKYFLOW_VAULT_ID / SKYFLOW_CLUSTER_ID / SKYFLOW_SERVICE_ACCOUNT_ID" && exit 1)
 	pongo run -- --tags=sandbox
 
 pack:

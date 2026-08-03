@@ -137,7 +137,10 @@ services:
           # referenced nowhere in the handler. Must stay <= keepalive_pool_size
           # (16) or waves will contend for connections.
           max_concurrency: 8
-          response_json_paths: ["$.content[*].text"]
+          # response_json_paths deliberately UNSET: "$.content[*].text" is already
+          # the anthropic profile default, and the two MERGE -- so listing it here
+          # made every assistant text block detokenize twice. effective_paths()
+          # now dedupes; only add paths the profile does not already cover.
           deidentify:
             entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
                        ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER, DRIVER_LICENSE]

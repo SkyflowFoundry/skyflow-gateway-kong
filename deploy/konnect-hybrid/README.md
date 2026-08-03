@@ -128,7 +128,8 @@ the nested-proxy routes (`/ai/chat` front + `/_ai_upstream` internal):
 
 ```bash
 export DECK_OPENAI_API_KEY=sk-...
-export DECK_SKYFLOW_VAULT_ID=... DECK_SKYFLOW_CLUSTER_ID=... DECK_SKYFLOW_API_KEY=...
+export DECK_SKYFLOW_VAULT_ID=... DECK_SKYFLOW_CLUSTER_ID=...
+export DECK_SKYFLOW_SERVICE_ACCOUNT_ID=...   # STS-only: no API key
 deck gateway sync --konnect-token "$KONNECT_PAT" \
   --konnect-control-plane-name skyflow-hybrid \
   deck/real-vault.yaml            # canonical; the demo expects this on the CP

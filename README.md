@@ -127,10 +127,12 @@ The only parties that ever see raw values are the client, Kong worker memory
 - **Docker** + Docker Compose — for every path below.
 - For the Konnect path, additionally: a **Konnect account**
   ([free sign-up](https://konghq.com/products/kong-konnect/register)),
-  the [`deck`](https://docs.konghq.com/deck/) CLI, a **Skyflow vault** + a
-  credential with the Detect de-identify/re-identify permissions (an API key, or
-  service-account credentials JSON for JWT auth + context-aware policies), and
-  (for a real LLM) an **OpenAI API key**.
+  the [`deck`](https://docs.konghq.com/deck/) CLI, a **Skyflow vault**, and a
+  **service account** configured for RFC 8693 token exchange with the Detect
+  de-identify/re-identify permissions. The plugin is STS-only and holds no
+  Skyflow credential of its own: it exchanges the caller's own identity token for
+  a short-lived Skyflow bearer, so there is no API key to configure. For a real
+  LLM you also need an **OpenAI** or **Anthropic** API key for `ai-proxy`.
 
 ### Option 1 — 60-second local demo (no accounts, no keys)
 
@@ -138,9 +140,20 @@ A fully self-contained harness: db-less Kong + a mock Skyflow + a gzip mock LLM.
 Proves the whole de-id → `ai-proxy` → LLM → re-id round-trip offline.
 
 ```bash
-docker compose -f deploy/local-dbless/docker-compose.yml up -d
+make e2e     # brings the stack up, asserts both directions, tears it down
+```
+
+Or drive it by hand. The plugin is STS-only, so every request needs a caller
+identity token; the harness leaves `expected_issuer`/`expected_audience` unset so
+an unsigned fixture JWT is enough — still no accounts and no keys:
+
+```bash
+docker compose -f deploy/local-dbless/docker-compose.yml up -d --wait
+
+JWT=eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJkZW1vLXVzZXIiLCJlbWFpbCI6ImRlbW9AZXhhbXBsZS5jb20iLCJuYW1lIjoiRGVtbyBVc2VyIn0.sig
 
 curl -s localhost:8010/ai/chat -H 'content-type: application/json' \
+  -H "authorization: Bearer $JWT" \
   -d '{"messages":[{"role":"user","content":"Reply to Jane Doe at jane@acme.com"}]}' | jq .
 ```
 
@@ -245,7 +258,8 @@ docker compose up -d
 # 2. upload plugin/kong/plugins/skyflow-deidentify/schema.lua to the control
 #    plane once (Konnect UI → Custom Plugins), then push routes + plugin config:
 export KONNECT_PAT=kpat_...
-export DECK_SKYFLOW_VAULT_ID=... DECK_SKYFLOW_CLUSTER_ID=... DECK_SKYFLOW_API_KEY=...
+export DECK_SKYFLOW_VAULT_ID=... DECK_SKYFLOW_CLUSTER_ID=...
+export DECK_SKYFLOW_SERVICE_ACCOUNT_ID=...   # STS-only: no API key
 export DECK_OPENAI_API_KEY=sk-...
 deck gateway sync --konnect-token "$KONNECT_PAT" \
   --konnect-control-plane-name skyflow-hybrid \

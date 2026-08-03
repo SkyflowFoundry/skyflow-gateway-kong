@@ -7,7 +7,12 @@ re-id round-trip and reproduces Kong #14380.
 ## Run
 
 ```bash
-docker compose -f deploy/local-dbless/docker-compose.yml up -d
+docker compose -f deploy/local-dbless/docker-compose.yml up -d --wait
+
+# STS-only: every request needs a caller identity token. This harness leaves
+# expected_issuer/expected_audience unset, so an unsigned fixture JWT (alg=none,
+# no exp) satisfies the precheck. Not a credential.
+JWT=eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJkZW1vLXVzZXIiLCJlbWFpbCI6ImRlbW9AZXhhbXBsZS5jb20iLCJuYW1lIjoiRGVtbyBVc2VyIn0.sig
 ```
 
 Proxy is on host port **8010** (the Konnect DP demo uses 8000).
@@ -18,14 +23,14 @@ Proxy is on host port **8010** (the Konnect DP demo uses 8000).
 P='{"messages":[{"role":"user","content":"Reply to Jane Doe at jane@acme.com"}]}'
 
 # 1) baseline — de-id -> mock LLM -> re-id, no ai-proxy.  => 200, PII restored
-curl -s localhost:8010/vault/chat  -H 'content-type: application/json' -d "$P" | jq .
+curl -s localhost:8010/vault/chat  -H "authorization: Bearer $JWT" -H 'content-type: application/json' -d "$P" | jq .
 
 # 2) the BUG — de-id + ai-proxy + re-id on ONE route.     => 500
 #    {"error":{"message":"no response body found when transforming response"}}
-curl -s localhost:8010/broken/chat -H 'content-type: application/json' -d "$P" | jq .
+curl -s localhost:8010/broken/chat -H "authorization: Bearer $JWT" -H 'content-type: application/json' -d "$P" | jq .
 
 # 3) the FIX — nested proxy (de-id/re-id front -> ai-proxy route).  => 200, PII restored
-curl -s localhost:8010/ai/chat     -H 'content-type: application/json' -d "$P" | jq .
+curl -s localhost:8010/ai/chat     -H "authorization: Bearer $JWT" -H 'content-type: application/json' -d "$P" | jq .
 ```
 
 Proof the LLM only ever sees tokens:

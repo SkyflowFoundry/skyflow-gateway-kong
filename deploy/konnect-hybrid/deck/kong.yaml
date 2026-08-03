@@ -30,7 +30,9 @@ services:
           # point the plugin at the mock Skyflow in the compose network
           skyflow_base_url_override: "http://mock-skyflow:8080"
           credentials:
-            api_key: "demo-key"
+            sts:
+              service_account_id: "demo-service-account"
+              token_uri: "http://mock-skyflow:8080/v1/auth/sts/token"
           profile: openai
           deidentify:
             entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]
