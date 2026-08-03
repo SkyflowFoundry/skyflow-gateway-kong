@@ -1061,6 +1061,15 @@ local function read_request_body()
   if raw ~= nil then return raw end
   local path = ngx.req.get_body_file()
   if not path then return nil end
+  -- `io` is a sandboxed global too: absent when this plugin is STREAMED from the
+  -- control plane. Without the fallback a body spooled to disk cannot be read, so
+  -- say so rather than returning a bare nil that reads as "no body".
+  if not io or not io.open then
+    kong.log.err("skyflow: request body was spooled to disk but `io` is unavailable ",
+                 "(streamed plugin sandbox); raise client_body_buffer_size so bodies ",
+                 "stay in memory")
+    return nil
+  end
   local f = io.open(path, "rb")
   if not f then return nil end
   local data = f:read("*a")
@@ -1547,7 +1556,13 @@ local function completion_to_sse(doc, want_usage)
   -- OpenAI's contract for stream_options.include_usage: a FINAL chunk with an
   -- empty choices array and the usage object. Only sent when the client asked.
   if want_usage and type(doc.usage) == "table" then
-    local empty_choices = cjson.array_mt and setmetatable({}, cjson.array_mt) or {}
+    -- cjson.empty_array, NOT setmetatable({}, cjson.array_mt): `setmetatable` is a
+    -- GLOBAL, and streamed plugin code runs in the untrusted-Lua sandbox where it
+    -- is nil. Under `lax` that produced
+    --   "attempt to call global 'setmetatable' (a nil value)"
+    -- on the response leg, so every request de-identified fine, reached the
+    -- provider, and then 502'd on the way back. The sentinel needs no metatable.
+    local empty_choices = cjson.empty_array or {}
     out = out .. "data: " .. cjson.encode({
       id = doc.id, object = "chat.completion.chunk", created = doc.created,
       model = doc.model, choices = empty_choices, usage = doc.usage,
@@ -1570,7 +1585,7 @@ end
 local function anthropic_message_to_sse(doc)
   -- cjson niceties guarded for non-Kong runtimes (offline tests stub cjson):
   -- array_mt makes the empty content encode as [], null keeps explicit nulls.
-  local empty_array = cjson.array_mt and setmetatable({}, cjson.array_mt) or {}
+  local empty_array = cjson.empty_array or {}   -- sandbox-safe; see note above
   local null = cjson.null
   local function ev(name, data)
     return "event: " .. name .. "\ndata: " .. cjson.encode(data) .. "\n\n"
