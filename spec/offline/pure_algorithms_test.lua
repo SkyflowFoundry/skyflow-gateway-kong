@@ -663,6 +663,22 @@ local enumspans = T.collect_spans({ tools = { { name = "t",
   T.effective_paths(optin, "request"))
 eq(#enumspans, 0, "tool enums/defaults are intentionally left alone")
 
+-- A path that duplicates one already in the profile base must not double the
+-- work. The DEPLOYED config did exactly this: response_json_paths was set to
+-- "$.content[*].text", which is already the anthropic response default, so every
+-- assistant text block was collected twice and sent to Detect twice -- double
+-- latency and double cost on the response leg, with identical output.
+local dupconf = { profile = "anthropic", request_json_paths = {},
+                  response_json_paths = { "$.content[*].text" } }
+eq(#T.effective_paths(dupconf, "response"), 1, "a redundant path is deduped, not appended")
+local dupdoc = { content = { { type = "text", text = "one" }, { type = "text", text = "two" } } }
+eq(#T.collect_spans(dupdoc, T.effective_paths(dupconf, "response")), 2,
+   "two text blocks yield two spans, not four")
+-- and deduping must not break genuine extension
+local extconf = { profile = "anthropic", request_json_paths = {},
+                  response_json_paths = { "$.content[*].text", "$.content[*].thinking" } }
+eq(#T.effective_paths(extconf, "response"), 2, "a genuinely new path is still added")
+
 -- 20. SSE emitter fidelity. This emitter is an ALLOWLIST, so every content type
 -- Anthropic adds was silently discarded -- invisible content loss, and history
 -- corruption when the client replays a turn missing blocks.

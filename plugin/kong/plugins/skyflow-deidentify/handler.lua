@@ -225,9 +225,21 @@ local function effective_paths(conf, phase)
   local override = (phase == "request") and conf.request_json_paths or conf.response_json_paths
   if override and #override > 0 then
     if conf.profile == "generic" then return override end
-    local merged = {}
-    for _, s in ipairs(base) do merged[#merged + 1] = s end
-    for _, s in ipairs(override) do merged[#merged + 1] = s end
+    -- Dedupe. collect_spans walks each path independently and appends, so a path
+    -- listed twice collects every matching span twice -- and then every span is
+    -- sent to Detect twice, doubling response-leg latency and cost for no effect.
+    -- This is not hypothetical: the deployed config set
+    -- `response_json_paths: ["$.content[*].text"]`, which is ALREADY the anthropic
+    -- response default, so every assistant text block was detokenized twice.
+    -- Merging is the documented way to extend a profile, so the merge has to be
+    -- idempotent rather than trusting operators to know the base set by heart.
+    local merged, seen = {}, {}
+    for _, s in ipairs(base) do
+      if not seen[s] then seen[s] = true; merged[#merged + 1] = s end
+    end
+    for _, s in ipairs(override) do
+      if not seen[s] then seen[s] = true; merged[#merged + 1] = s end
+    end
     return merged
   end
   return base
