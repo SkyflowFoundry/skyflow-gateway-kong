@@ -1480,6 +1480,29 @@ local function run_access(conf, ctx)
                                 .. "(profile 'generic' requires request_json_paths)" } }
   end
 
+  -- The RESPONSE-leg twin of the check above, and it was missing.
+  --
+  -- `generic` has no built-in response paths, so with re-identification enabled
+  -- and `response_json_paths` unset the response leg collects zero spans. Zero
+  -- spans is indistinguishable from "the response had no text in it", so it takes
+  -- the benign branch and returns the body untouched -- meaning the CLIENT gets
+  -- vault tokens, permanently, and nothing anywhere says why. Unlike the request
+  -- leg this is not a data leak, but it is the same silent-misconfiguration class:
+  -- a feature reported as enabled that never runs.
+  --
+  -- Checked HERE rather than in the response phase so it fails before the provider
+  -- call, not after paying for one. Two ANDed conditions is why it is not a schema
+  -- entity check -- same reason as above.
+  if conf.profile == "generic" and conf.reidentify.enabled
+     and (not conf.response_json_paths or #conf.response_json_paths == 0) then
+    kong.log.err("skyflow: profile 'generic' with reidentify.enabled requires ",
+                 "response_json_paths; nothing would ever be re-identified")
+    return { deny = true, status = 500,
+             body = { message = "request blocked: gateway misconfigured "
+                                .. "(profile 'generic' with re-identification "
+                                .. "enabled requires response_json_paths)" } }
+  end
+
   local will_reemit = conf.reidentify.enabled
                       and conf.reidentify.streaming ~= "passthrough"
 
