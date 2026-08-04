@@ -143,19 +143,6 @@ jobs:
           DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_PAT }}
           DECK_KONNECT_ADDR: https://us.api.konghq.com
         run: |
-          cd deploy/konnect
-          deck gateway validate kong.yaml \
-            --konnect-control-plane-name skyflow-kong-gateway
-
-      # The streamed deployment is the one actually serving traffic, so it needs
-      # the same gate. Its control plane is separate: streaming and the older
-      # plugin-schemas endpoint are mutually exclusive, so the two configs cannot
-      # share one.
-      - name: validate the streamed config against its control plane
-        env:
-          DECK_KONNECT_TOKEN: ${{ secrets.KONNECT_PAT }}
-          DECK_KONNECT_ADDR: https://us.api.konghq.com
-        run: |
           cd deploy/streaming
           deck gateway validate kong.yaml \
             --konnect-control-plane-name skyflow-gateway

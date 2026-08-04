@@ -25,15 +25,15 @@ plane is yours.
 
 - **Full step-by-step** (create a hybrid control plane, get the data-plane cert,
   start the container, upload the schema, sync config, demo):
-  [`deploy/konnect-hybrid/README.md`](../../deploy/konnect-hybrid/README.md).
+  [`deploy/streaming/`](../../deploy/streaming).
 - **Try it offline first**, no Konnect account or keys needed:
-  [`deploy/local-dbless/`](../../deploy/local-dbless) brings up Kong + a mock
+  [`test/offline-harness/`](../../test/offline-harness) brings up Kong + a mock
   Skyflow + a mock LLM and runs the full de-id → `ai-proxy` → re-id round-trip.
 
 In short: mount the two files into the data plane and add them to `KONG_PLUGINS`:
 
 ```bash
-# docker-compose (see deploy/konnect-hybrid/docker-compose.yml)
+# docker-compose (see test/offline-harness/docker-compose.yml)
 KONG_PLUGINS: bundled,skyflow-deidentify
 volumes:
   - ./plugin:/kong-plugins:ro

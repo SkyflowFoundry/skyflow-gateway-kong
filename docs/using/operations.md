@@ -78,7 +78,7 @@ services:
 ```
 
 A ready-to-run version is in
-[`deploy/konnect-hybrid/deck/real-vault.yaml`](../../deploy/konnect-hybrid/deck/real-vault.yaml).
+[`deploy/streaming/kong.yaml`](../../deploy/streaming/kong.yaml).
 
 ### Admin API
 

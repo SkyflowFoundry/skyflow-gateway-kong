@@ -5,7 +5,7 @@
 # Skyflow, so you can reproduce the #14380 conflict and verify the nested-proxy
 # fix without touching the Konnect control plane.
 #
-#   docker compose -f deploy/local-dbless/docker-compose.yml up -d
+#   docker compose -f test/offline-harness/docker-compose.yml up -d
 #   curl -s localhost:8010/ai/chat -H 'content-type: application/json' \
 #     -d '{"messages":[{"role":"user","content":"Reply to Jane Doe at jane@acme.com"}]}' | jq .
 #
@@ -44,7 +44,7 @@ services:
     image: openresty/openresty:alpine
     container_name: skyflow-mock-local
     volumes:
-      - ../konnect-hybrid/mock-skyflow/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./mock-skyflow/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     expose:
       - "8080"
 

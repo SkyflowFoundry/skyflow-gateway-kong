@@ -55,7 +55,7 @@ make sandbox-smoke # OPTIONAL: against a real Skyflow sandbox (needs SKYFLOW_* c
 
 `make test` needs only Docker — no Skyflow account — so the functional suite runs
 hermetically. For an end-to-end loop that includes `ai-proxy` with zero
-Konnect/OpenAI credentials, use [`deploy/local-dbless/`](../../deploy/local-dbless).
+Konnect/OpenAI credentials, use [`test/offline-harness/`](../../test/offline-harness).
 
 ## CI
 

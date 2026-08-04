@@ -187,8 +187,8 @@ rewrite of the gzip body → `500 "no response body found"`). So they run on two
 routes: a **front route** does de-id + re-id and proxies (loopback to Kong's own
 port) to an **internal route** that runs `ai-proxy` alone. Two independent
 buffered cycles, no collision. Ready-to-run in
-[`deploy/konnect-hybrid/deck/real-vault.yaml`](../../deploy/konnect-hybrid/deck/real-vault.yaml);
-reproduced + verified offline in [`deploy/local-dbless/`](../../deploy/local-dbless).
+[`deploy/streaming/kong.yaml`](../../deploy/streaming/kong.yaml);
+reproduced + verified offline in [`test/offline-harness/`](../../test/offline-harness).
 
 ### T2 — Standalone proxy to any upstream (MCP / generic)
 

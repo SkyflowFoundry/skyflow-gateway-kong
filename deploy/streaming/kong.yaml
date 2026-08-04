@@ -1,6 +1,6 @@
 # Kong AI Gateway secured by Skyflow -- STREAMING-NATIVE deployment.
 #
-# What makes this different from deploy/konnect/: the plugin CODE is not in the
+# What makes this the only supported path: the plugin CODE is not in the
 # image. schema.lua and handler.lua are uploaded to the control plane and streamed
 # to every data plane, so BOTH the config and the plugin itself are pushed from
 # Konnect. That is the only arrangement that works on a gateway whose image you do

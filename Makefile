@@ -86,9 +86,9 @@ integration:
 
 # There is no compose file at the repo root and scripts/demo.sh does not exist,
 # so this target could never have run. The offline harness lives in
-# deploy/local-dbless; drive that, and assert the de-identified result rather
+# test/offline-harness; drive that, and assert the de-identified result rather
 # than only bringing the stack up.
-COMPOSE := docker compose -f deploy/local-dbless/docker-compose.yml
+COMPOSE := docker compose -f test/offline-harness/docker-compose.yml
 # The plugin is STS-only, so every request needs a caller identity token. The
 # harness leaves expected_issuer/expected_audience unset, so an unsigned fixture
 # JWT with no `exp` satisfies the precheck -- no IdP, no keys. Header
