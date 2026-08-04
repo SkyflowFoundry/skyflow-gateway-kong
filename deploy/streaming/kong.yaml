@@ -154,7 +154,7 @@ services:
           # and Detect spend for byte-identical output. effective_paths() now
           # dedupes, so this line was also redundant; only add paths the profile
           # does not already cover.
-          deidentify:
+          deidentify: &deidentify_common
             entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
                        ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER, DRIVER_LICENSE]
             token_format: VAULT_TOKEN
@@ -317,10 +317,13 @@ services:
           # referenced nowhere in the handler. Must stay <= keepalive_pool_size
           # (16) or waves will contend for connections.
           max_concurrency: 8
-          deidentify:
-            entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
-                       ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER, DRIVER_LICENSE]
-            token_format: VAULT_TOKEN
+          # Aliased, not restated. Kong does NOT merge plugin scopes -- it SELECTS the
+          # most specific instance and uses it whole -- so both services need the
+          # complete config on the wire and the only place to remove the duplication
+          # is here. Restating it is how the entity lists drift apart, and a drifted
+          # entity list on the probe route means the probe stops demonstrating what
+          # the real route actually does.
+          deidentify: *deidentify_common
           media:
             mode: deidentify
             unsupported: strip
