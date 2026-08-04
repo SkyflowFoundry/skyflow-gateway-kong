@@ -293,7 +293,7 @@ default detector set.
 - **Retries** apply only to idempotent operations and respect a total
   `config.deadline_ms` so a slow Skyflow can't blow the request budget.
 
-## 3.9 Worked end-to-end example (OpenAI profile, de-identify + re-identify)
+## 3.9 Worked end-to-end example (OpenAI-shaped body, de-identify + re-identify)
 
 **Client → Kong**
 

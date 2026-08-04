@@ -47,7 +47,6 @@ local ENTITY_TYPES = {
 }
 
 local TOKEN_FORMATS = { "VAULT_TOKEN", "ENTITY_ONLY", "ENTITY_UNQ_COUNTER" }
-local PROFILES      = { "openai", "anthropic", "mcp", "generic" }
 local ENVS          = { "PROD", "SANDBOX", "DEV", "STAGE" }
 local TREATMENTS    = { "plain_text", "masked", "redacted" }
 -- mapping_only is the strategy implemented in this build; reidentify_text /
@@ -370,7 +369,14 @@ return {
           { token_skew_seconds = { type = "integer", default = 300, between = { 0, 3600 } } },
 
           ----------------------------------------------------------------- targeting
-          { profile = { type = "string", one_of = PROFILES, default = "openai" } },
+          -- The wire format (OpenAI / Anthropic / MCP) is detected per request
+          -- from the body shape in handler.lua rather than configured here. A
+          -- hand-set format is a silent failure waiting to happen: the two chat
+          -- shapes overlap at `$.messages[*].content`, so the wrong value scans
+          -- the user's typed message and nothing else, sending the system prompt,
+          -- every tool_result and the end-user id to the provider in the clear
+          -- without erroring. `request_json_paths` MERGES with the detected base
+          -- set, and is REQUIRED for a body shape that is not recognised.
           { request_json_paths  = { type = "array", elements = { type = "string" }, default = {} } },
           { response_json_paths = { type = "array", elements = { type = "string" }, default = {} } },
           { content_type = { type = "string", one_of = { "auto", "json", "text" }, default = "auto" } },
@@ -411,9 +417,11 @@ return {
         --     than rejected, which is strictly better -- a deadline shorter
         --     than one attempt's timeout is a typo, not an intent, and
         --     self-correcting beats refusing to boot.
-        --   * profile 'generic' needing request_json_paths (or content_type
-        --     text) is checked once per request and fails closed with the same
-        --     message.
+        --   * an unrecognised wire format needing request_json_paths (or
+        --     content_type text) is checked once per request, after the body is
+        --     parsed, and fails closed with the same message. It could never
+        --     have been a schema rule anyway: the shape is not known at config
+        --     time.
         entity_checks = {
           { conditional = {
               if_field = "reidentify.strategy", if_match = { eq = "mapping_only" },

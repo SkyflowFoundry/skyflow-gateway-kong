@@ -50,7 +50,7 @@ local inflate_gzip = ok_gzip and kgzip and kgzip.inflate_gzip or nil
 local kong = kong
 local ngx  = ngx
 
-local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.3.0" }
+local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.4.0" }
 
 --==========================================================================--
 -- Pure helpers (no Kong/ngx deps) — exercised offline via SkyflowAIDataControl._test
@@ -220,38 +220,118 @@ local PROFILE_PATHS = {
   generic = { request = {}, response = {} },
 }
 
-local function effective_paths(conf, phase)
-  local base = (PROFILE_PATHS[conf.profile] or PROFILE_PATHS.generic)[phase] or {}
-  local override = (phase == "request") and conf.request_json_paths or conf.response_json_paths
-  if override and #override > 0 then
-    if conf.profile == "generic" then
-      -- Dedupe here too. This branch used to return `override` verbatim, so a
-      -- path listed twice under profile=generic collected every span twice, spent
-      -- twice at Detect, and counted twice against max_spans -- a premature 413.
-      local seen, out = {}, {}
-      for _, s in ipairs(override) do
-        if not seen[s] then seen[s] = true; out[#out + 1] = s end
+-- Wire-format detection.
+--
+-- This used to be a `profile` enum on the config, and that field was a liability.
+-- The OpenAI and Anthropic request shapes OVERLAP at `$.messages[*].content`, so
+-- pointing an Anthropic route at `profile: openai` did not error and did not look
+-- broken -- it silently scanned ONE of four sensitive spans. Measured on a real
+-- Claude Desktop body: the system prompt, every tool_result (where agent traffic
+-- carries most of its sensitive data -- file contents, command output) and the
+-- end-user identifier all reached the provider in clear text, with nothing in the
+-- logs to say so. One innocuous-looking dropdown, silently set to leak.
+--
+-- The shapes are cheap to tell apart, so we detect instead of asking an operator
+-- to get it right. Returns a LIST of candidate formats, because the honest answer
+-- is sometimes "could be either": unioning two path sets over-scans (paths that
+-- do not match simply yield no spans, so there is no span amplification on a real
+-- single-format body) whereas guessing one under-scans. Over-scan is a wasted
+-- lookup; under-scan is a leak. An empty list means "no shape recognised", which
+-- is what `profile: generic` used to mean and carries the same requirement that
+-- the operator supply explicit JSON paths.
+local function detect_formats(doc, phase)
+  if type(doc) ~= "table" then return {} end
+
+  if phase == "response" then
+    -- Response shapes are disjoint, so this never needs the union treatment.
+    if type(doc.choices) == "table" then return { "openai" } end
+    if doc.type == "message" and type(doc.content) == "table" then return { "anthropic" } end
+    if doc.result ~= nil or doc.jsonrpc ~= nil then return { "mcp" } end
+    if type(doc.content) == "table" then return { "anthropic" } end
+    return {}
+  end
+
+  -- MCP is JSON-RPC. `jsonrpc` is mandatory in the spec and appears in no LLM
+  -- chat body, so it is an exact discriminator.
+  if doc.jsonrpc ~= nil or (doc.method ~= nil and type(doc.params) == "table") then
+    return { "mcp" }
+  end
+
+  -- Keys that exist in exactly one of the two chat APIs.
+  if doc.anthropic_version ~= nil or doc.system ~= nil then return { "anthropic" } end
+  if doc.frequency_penalty ~= nil or doc.presence_penalty ~= nil
+     or doc.logit_bias ~= nil or doc.response_format ~= nil
+     or doc.max_completion_tokens ~= nil
+     or doc.input ~= nil or doc.prompt ~= nil then
+    return { "openai" }
+  end
+
+  -- Content-block types. `tool_result`/`tool_use`/`image` are Anthropic-only and
+  -- are exactly the blocks a wrong profile was dropping, so they are checked
+  -- first; `image_url` and the `system`/`tool` roles are OpenAI-only.
+  if type(doc.messages) == "table" then
+    for _, m in ipairs(doc.messages) do
+      if type(m) == "table" then
+        if m.role == "system" or m.role == "tool" or m.tool_calls ~= nil then
+          return { "openai" }
+        end
+        if type(m.content) == "table" then
+          for _, blk in ipairs(m.content) do
+            if type(blk) == "table" then
+              local t = blk.type
+              if t == "tool_result" or t == "tool_use" or t == "image" then
+                return { "anthropic" }
+              elseif t == "image_url" then
+                return { "openai" }
+              end
+            end
+          end
+        end
       end
-      return out
     end
-    -- Dedupe. collect_spans walks each path independently and appends, so a path
-    -- listed twice collects every matching span twice -- and then every span is
-    -- sent to Detect twice, doubling response-leg latency and cost for no effect.
-    -- This is not hypothetical: the deployed config set
-    -- `response_json_paths: ["$.content[*].text"]`, which is ALREADY the anthropic
-    -- response default, so every assistant text block was detokenized twice.
-    -- Merging is the documented way to extend a profile, so the merge has to be
-    -- idempotent rather than trusting operators to know the base set by heart.
-    local merged, seen = {}, {}
-    for _, s in ipairs(base) do
+
+    -- Still ambiguous: a minimal `{model, messages:[{role,content}]}` turn is
+    -- legal in both APIs. The model name resolves nearly all of these in
+    -- practice, since both vendors namespace their own.
+    if type(doc.model) == "string" then
+      if doc.model:find("^claude") then return { "anthropic" } end
+      if doc.model:find("^gpt") or doc.model:find("^o%d") or doc.model:find("^text%-")
+         or doc.model:find("^davinci") then
+        return { "openai" }
+      end
+    end
+
+    -- Genuinely undecidable. Scan the union rather than picking a side.
+    return { "anthropic", "openai" }
+  end
+
+  return {}
+end
+
+local function effective_paths(conf, phase, formats)
+  -- Union the base sets of every candidate format. Dedupe throughout:
+  -- collect_spans walks each path independently and appends, so a path listed
+  -- twice collects every matching span twice -- and then every span is sent to
+  -- Detect twice, doubling latency and cost for no effect, and counting twice
+  -- against max_spans for a premature 413. This is not hypothetical: the
+  -- deployed config set `response_json_paths: ["$.content[*].text"]`, which is
+  -- ALREADY the anthropic response default, so every assistant text block was
+  -- detokenized twice. Merging is the documented way to extend the built-in set,
+  -- so the merge has to be idempotent rather than trusting operators to know the
+  -- base set by heart.
+  local merged, seen = {}, {}
+  for _, fmt in ipairs(formats or {}) do
+    for _, s in ipairs((PROFILE_PATHS[fmt] or PROFILE_PATHS.generic)[phase] or {}) do
       if not seen[s] then seen[s] = true; merged[#merged + 1] = s end
     end
+  end
+  local override = (phase == "request") and conf.request_json_paths or conf.response_json_paths
+  if override and #override > 0 then
     for _, s in ipairs(override) do
       if not seen[s] then seen[s] = true; merged[#merged + 1] = s end
     end
-    return merged
   end
-  return base
+  return merged
 end
 
 -- Mask all but the last 4 characters of a value.
@@ -417,10 +497,20 @@ local DEFAULT_TOKEN_PREAMBLE =
   .. "what one stands for."
 
 -- Prepend the preamble to whatever system prompt the caller already sent,
--- handling every shape the two profiles use: absent, a plain string, or an
+-- handling every shape the two formats use: absent, a plain string, or an
 -- Anthropic array of content blocks.
-local function inject_token_preamble(doc, text, profile)
-  if profile == "openai" or profile == "mcp" then
+--
+-- `formats` is detect_formats()'s list. When it is ambiguous the two injection
+-- shapes are NOT equally safe, so this does not just pick the first entry: an
+-- OpenAI-style `role: "system"` message is ILLEGAL in the Anthropic API and earns
+-- a hard 400, whereas a top-level `system` string is valid Anthropic and simply
+-- ignored by OpenAI. So ambiguity resolves to the Anthropic shape: the worst case
+-- is a preamble the model never reads (degraded answer quality), not a request
+-- the provider refuses.
+local function inject_token_preamble(doc, text, formats)
+  local fmt = formats and formats[1] or nil
+  if formats and #formats > 1 then fmt = "anthropic" end
+  if fmt == "openai" or fmt == "mcp" then
     -- MCP bodies carry their messages at `params.messages`, not at the top
     -- level (see PROFILE_PATHS.mcp). Requiring doc.messages made this a silent
     -- no-op for every MCP request: the placeholders were injected nowhere and
@@ -435,7 +525,7 @@ local function inject_token_preamble(doc, text, profile)
       -- caller believes the model was briefed, and silence is why this went
       -- unnoticed.
       kong.log.warn("skyflow: token preamble not injected -- no message array on ",
-                    "this ", tostring(profile), " request shape")
+                    "this ", tostring(fmt), " request shape")
       return
     end
     local first = msgs[1]
@@ -447,7 +537,7 @@ local function inject_token_preamble(doc, text, profile)
     return
   end
 
-  -- anthropic / generic: top-level `system`
+  -- anthropic, and the fallback for an unrecognised shape: top-level `system`
   local sys = doc.system
   if sys == nil then
     doc.system = text
@@ -1468,40 +1558,6 @@ local function run_access(conf, ctx)
   -- hangs or gets JSON. The /probe route (reidentify disabled) is exactly that
   -- case, so it must keep streaming straight through -- showing the caller the
   -- tokenized SSE the provider produced, which is that route's whole purpose.
-  -- Config rule that used to be a schema entity check (see schema.lua on why it
-  -- moved). A `generic` profile with neither JSON paths nor text content type
-  -- has nothing to look at, so it would de-identify precisely nothing while
-  -- reporting success -- the exact silent-passthrough this plugin must not do.
-  if conf.profile == "generic" and conf.content_type ~= "text"
-     and (not conf.request_json_paths or #conf.request_json_paths == 0) then
-    kong.log.err("skyflow: profile 'generic' requires request_json_paths or content_type=text")
-    return { deny = true, status = 500,
-             body = { message = "request blocked: gateway misconfigured "
-                                .. "(profile 'generic' requires request_json_paths)" } }
-  end
-
-  -- The RESPONSE-leg twin of the check above, and it was missing.
-  --
-  -- `generic` has no built-in response paths, so with re-identification enabled
-  -- and `response_json_paths` unset the response leg collects zero spans. Zero
-  -- spans is indistinguishable from "the response had no text in it", so it takes
-  -- the benign branch and returns the body untouched -- meaning the CLIENT gets
-  -- vault tokens, permanently, and nothing anywhere says why. Unlike the request
-  -- leg this is not a data leak, but it is the same silent-misconfiguration class:
-  -- a feature reported as enabled that never runs.
-  --
-  -- Checked HERE rather than in the response phase so it fails before the provider
-  -- call, not after paying for one. Two ANDed conditions is why it is not a schema
-  -- entity check -- same reason as above.
-  if conf.profile == "generic" and conf.reidentify.enabled
-     and (not conf.response_json_paths or #conf.response_json_paths == 0) then
-    kong.log.err("skyflow: profile 'generic' with reidentify.enabled requires ",
-                 "response_json_paths; nothing would ever be re-identified")
-    return { deny = true, status = 500,
-             body = { message = "request blocked: gateway misconfigured "
-                                .. "(profile 'generic' with re-identification "
-                                .. "enabled requires response_json_paths)" } }
-  end
 
   local will_reemit = conf.reidentify.enabled
                       and conf.reidentify.streaming ~= "passthrough"
@@ -1518,7 +1574,41 @@ local function run_access(conf, ctx)
       end
       return { ok = true }
     end
-    spans = collect_spans(doc, effective_paths(conf, "request"))
+    ctx.formats = detect_formats(doc, "request")
+
+    -- No recognised wire format and no explicit paths means there is nothing to
+    -- look at, so we would de-identify precisely nothing while reporting success
+    -- -- the exact silent passthrough this plugin must not do. This replaces two
+    -- schema entity checks on the old `profile: generic`; it has to live here
+    -- rather than in the schema because the shape is only known once the body is
+    -- parsed. Two ANDed conditions, so it was never expressible as a field rule.
+    if #ctx.formats == 0 and (not conf.request_json_paths or #conf.request_json_paths == 0) then
+      kong.log.err("skyflow: unrecognised request wire format; set request_json_paths ",
+                   "or content_type=text for this route")
+      return { deny = true, status = 500,
+               body = { message = "request blocked: gateway misconfigured "
+                                  .. "(unrecognised request format and no "
+                                  .. "request_json_paths configured)" } }
+    end
+
+    -- The RESPONSE-leg twin, checked HERE so it fails before we pay for a
+    -- provider call rather than after. With no recognised format there are no
+    -- built-in response paths, so re-identification would collect zero spans --
+    -- indistinguishable from "the response had no text", so it takes the benign
+    -- branch and hands the CLIENT raw vault tokens, permanently, with nothing
+    -- anywhere saying why. Not a data leak, but the same silent-misconfiguration
+    -- class: a feature reported as enabled that never runs.
+    if #ctx.formats == 0 and conf.reidentify.enabled
+       and (not conf.response_json_paths or #conf.response_json_paths == 0) then
+      kong.log.err("skyflow: unrecognised request wire format with reidentify.enabled ",
+                   "requires response_json_paths; nothing would ever be re-identified")
+      return { deny = true, status = 500,
+               body = { message = "request blocked: gateway misconfigured "
+                                  .. "(re-identification enabled but no "
+                                  .. "response_json_paths for an unrecognised format)" } }
+    end
+
+    spans = collect_spans(doc, effective_paths(conf, "request", ctx.formats))
   else
     spans = { { whole = true, text = raw } }
   end
@@ -1686,7 +1776,7 @@ local function run_access(conf, ctx)
       if pre == nil or pre.enabled ~= false then
         local text = (pre and pre.text ~= nil and pre.text ~= "" and pre.text)
                      or DEFAULT_TOKEN_PREAMBLE
-        inject_token_preamble(doc, text, conf.profile)
+        inject_token_preamble(doc, text, ctx.formats)
       end
       -- Re-identification must buffer the whole response, which is impossible over
       -- a streamed (SSE) response: a vault token like [NAME_xjv74g] gets split
@@ -2175,7 +2265,15 @@ function SkyflowAIDataControl:response(conf)
         end
       end
 
-      local spans = collect_spans(doc, effective_paths(conf, "response"))
+      -- Sniff the RESPONSE shape rather than reusing the request's. ai-proxy
+      -- rewrites the body via from_format(), so the two are only the same family
+      -- when the route's ai-proxy route_type agrees with what the client sent --
+      -- true for a correctly wired route, but not something to bet the response
+      -- leg on. Fall back to the request-leg detection when the response carries
+      -- no discriminator of its own (e.g. an empty or error-shaped body).
+      local rformats = detect_formats(doc, "response")
+      if #rformats == 0 then rformats = ctx.formats or {} end
+      local spans = collect_spans(doc, effective_paths(conf, "response", rformats))
       if #spans == 0 and not tool_changed then
         -- Nothing to re-identify (e.g. an empty response). If the client is
         -- streaming we STILL must hand back SSE, not the raw JSON completion, or
@@ -2260,6 +2358,7 @@ SkyflowAIDataControl._test = {
   parse_path        = parse_path,
   collect_spans     = collect_spans,
   effective_paths   = effective_paths,
+  detect_formats    = detect_formats,
   tool_policy       = tool_policy,
   classify_client_error = classify_client_error,
   doc_to_sse        = doc_to_sse,

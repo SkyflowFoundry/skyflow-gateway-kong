@@ -120,7 +120,6 @@ services:
               token_header: authorization
               expected_issuer: "https://login.microsoftonline.com/5b772553-7aad-487a-91a9-3b93382ac28b/v2.0"
               expected_audience: "9ff1c091-fc74-4dae-929b-9cd58382b621"
-          profile: anthropic
           # FAIL-CLOSED: over the limit the request is rejected with 413 rather
           # than partially de-identified.
           #
@@ -161,11 +160,11 @@ services:
           # (16) or waves will contend for connections.
           max_concurrency: 8
           # response_json_paths is deliberately UNSET. "$.content[*].text" was
-          # listed here, but that is already the anthropic profile's response
+          # listed here, but that is already the detected anthropic format's response
           # default and the two MERGE -- so every assistant text block was
           # collected twice and detokenized twice, doubling response-leg latency
           # and Detect spend for byte-identical output. effective_paths() now
-          # dedupes, so this line was also redundant; only add paths the profile
+          # dedupes, so this line was also redundant; only add paths the detected format
           # does not already cover.
           deidentify: &deidentify_common
             entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
@@ -284,7 +283,6 @@ services:
               token_header: authorization
               expected_issuer: "https://login.microsoftonline.com/5b772553-7aad-487a-91a9-3b93382ac28b/v2.0"
               expected_audience: "9ff1c091-fc74-4dae-929b-9cd58382b621"
-          profile: anthropic
           # FAIL-CLOSED: over the limit the request is rejected with 413 rather
           # than partially de-identified.
           #

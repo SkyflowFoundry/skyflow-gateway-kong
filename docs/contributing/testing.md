@@ -50,7 +50,7 @@ This keeps unit + integration tests **hermetic, deterministic, and fast**.
 | `01-schema_spec.lua` | `schema.lua` | valid full config; missing `vault_id`/`cluster_id`; **exactly-one-of** credentials (none / two ⇒ invalid); `mapping_only` + `ENTITY_ONLY` ⇒ invalid; `deadline_ms < timeout_ms` ⇒ invalid; `generic` without paths ⇒ invalid; referenceable+encrypted credential fields accept `{vault://…}`. |
 | `04-auth_spec.lua` | `auth.lua` | api_key path sets header; SA-JWT builds correct claims & RS256-signs; token cached & reused; refresh at `expiry−skew`; **single-flight** under concurrent misses (one mint); 401 ⇒ one forced refresh+retry. |
 | `client_spec.lua` | `client.lua` | request body matches [`skyflow-integration §3.3`](skyflow-integration.md#33-de-identify-operation); timeout/5xx/429 ⇒ `retryable`; 403 ⇒ non-retryable + clear error; non-JSON ⇒ error; deadline halts retries; keepalive reused. |
-| `05-body_spec.lua` | `body.lua` | each profile extracts the right spans (incl. OpenAI array-content form, MCP `arguments.*`, Anthropic `system`); JSONPath subset (`$.a.b`, `[*]`, `[n]`, string-leaf recursion); non-string leaves skipped; replace is exact & order-independent; `text` content-type whole-body; malformed JSON ⇒ error. |
+| `05-body_spec.lua` | `body.lua` | each detected wire format extracts the right spans (incl. OpenAI array-content form, MCP `arguments.*`, Anthropic `system`); JSONPath subset (`$.a.b`, `[*]`, `[n]`, string-leaf recursion); non-string leaves skipped; replace is exact & order-independent; `text` content-type whole-body; malformed JSON ⇒ error. |
 | `mapping_spec.lua` | `mapping.lua` | put/get round-trip; entity counts; isolation (a new ctx is empty); never serializes values to a shared store. |
 
 ## 6.4 Integration tests (Pongo + `spec.helpers`)
@@ -59,12 +59,12 @@ Run real Kong with the plugin enabled, pointed at the **mock Skyflow** Service.
 
 | Spec | Scenario | Assertions |
 | ---- | -------- | ---------- |
-| `02-access_spec.lua` | de-identify only, `openai` profile | upstream (echo) receives **tokenized** `messages[*].content`; original PII absent from upstream-seen body; `Content-Length` correct; client still gets a 200. |
+| `02-access_spec.lua` | de-identify only, OpenAI-shaped body | upstream (echo) receives **tokenized** `messages[*].content`; original PII absent from upstream-seen body; `Content-Length` correct; client still gets a 200. |
 | | fail-closed | mock returns `500`/timeout, `on_skyflow_error=deny` ⇒ client gets **502**, upstream **never called** with raw body. |
 | | fail-open | same fault, `allow` ⇒ original body forwarded, warn logged. |
 | | dry_run | body **unchanged** upstream, but detection metrics/logs present. |
 | | non-JSON / oversized | `on_parse_error` posture respected. |
-| | `mcp` profile | JSON-RPC `params.arguments.*` tokenized; non-string params untouched. |
+| | MCP-shaped body | JSON-RPC `params.arguments.*` tokenized; non-string params untouched. |
 | `03-response_spec.lua` | re-identify `reidentify_text` | response `choices[*].message.content` restored; `entity_treatment` (name plain, card masked) honored. |
 | | `detokenize` strategy | targeted fields detokenized; redaction levels respected. |
 | | `mapping_only` | no second Skyflow call (mock asserts zero `/reidentify` hits); tokens from the request restored; foreign tokens left intact. |

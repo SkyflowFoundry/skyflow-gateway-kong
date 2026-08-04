@@ -58,8 +58,9 @@ Benefits of de-identifying traffic with the Skyflow De-identify plugin:
 When you enable this plugin on a route, it acts in two Kong request-lifecycle phases:
 
 - **`access`** — runs before the request is proxied upstream. The plugin reads the request
-  body, extracts the target text spans (selected by a **profile** — `openai`, `anthropic`,
-  `mcp`, or `generic` — or by explicit JSONPath selectors), calls Skyflow **De-identify**
+  body, extracts the target text spans (selected by the **wire format detected from the
+  body** — OpenAI, Anthropic, or MCP — plus any explicit JSONPath selectors), calls
+  Skyflow **De-identify**
   (`POST /v1/detect/deidentify/string`), and rewrites the outbound body so the upstream
   receives only tokens (e.g. `[NAME_aB3xQ]`). A request-scoped token→value map is stashed
   for the response phase.
@@ -147,7 +148,7 @@ only Kong-bundled runtime libraries, which is what Konnect's custom-plugin uploa
   reference; the credential fields are referenceable and stored encrypted.
 
 **De-identify only (the model never sees raw PII).** In the following example, the plugin
-tokenizes the chat prompt (`messages[*].content`, via the `openai` profile) before Kong
+tokenizes the chat prompt (`messages[*].content`, via the auto-detected OpenAI shape) before Kong
 proxies the request. Re-identification is off, so the tokens are what the caller sees too —
 useful for a strict egress posture.
 
@@ -161,7 +162,6 @@ plugins:
       credentials:
         sts:
           service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
-      profile: openai
       deidentify:
         entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]
         token_format: VAULT_TOKEN
@@ -181,7 +181,6 @@ plugins:
       credentials:
         sts:
           service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
-      profile: openai
       deidentify:
         entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]
         token_format: VAULT_TOKEN
@@ -199,8 +198,9 @@ What the config does:
 
 - `vault_id` / `cluster_id` / `env` — which Skyflow vault and environment to call.
 - `credentials.sts` — the delegating service-account ID plus the expected IdP issuer and audience. Not a secret: the gateway holds no Skyflow credential, and vault access requires a live caller IdP token exchanged per request (RFC 8693).
-- `profile: openai` — targets OpenAI Chat Completions fields; use `anthropic`, `mcp`, or
-  `generic` (with `request_json_paths`) for other payload shapes.
+- The wire format (OpenAI / Anthropic / MCP) is detected per request from the body shape,
+  so all three take this same config. `request_json_paths` **merges** extra selectors into
+  the detected set, and is **required** for a body shape the plugin does not recognise.
 - `deidentify.entities` — the entity types to detect (empty = Skyflow's default set).
 - `deidentify.token_format: VAULT_TOKEN` — reversible, deterministic tokens.
 - `reidentify.enabled: true` + `strategy: reidentify_text` — restore originals in the
@@ -211,6 +211,8 @@ What the config does:
 > **Configuration constraints** (enforced by the schema): `reidentify.strategy =
 > reidentify_text` requires `deidentify.token_format = VAULT_TOKEN`; `mapping_only`
 > requires a token format other than `ENTITY_ONLY`; `deadline_ms` must be `>= timeout_ms`;
-> the `generic` profile requires `request_json_paths` or `content_type: text`. See
+> and an unrecognised body shape requires `request_json_paths` or `content_type: text`
+> (this last one is enforced per request in the handler, since the shape is not known at
+> config time). See
 > [`skyflow-ai-data-control.schema.json`](skyflow-ai-data-control.schema.json) for the full field
 > reference.

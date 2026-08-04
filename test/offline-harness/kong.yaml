@@ -44,7 +44,6 @@ services:
             sts:
               service_account_id: "demo-service-account"
               token_uri: "http://mock-skyflow:8080/v1/auth/sts/token"
-          profile: openai
           # The local mock
           # tokenizes by lookup table (ignores entity_types), so this list is for
           # parity; the healthcare values live in mock-skyflow/nginx.conf.

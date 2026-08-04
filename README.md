@@ -89,8 +89,9 @@ make e2e
    `/v2/control-planes/{cp}/core-entities/custom-plugins`).
 
 4. **Attach it** to the route carrying model traffic and fill in the form: vault
-   id, cluster id, account id, `profile: anthropic` or `openai`, and a
-   `credentials.sts.service_account_id`. Everything else has a safe default.
+   id, cluster id, account id, and a `credentials.sts.service_account_id`.
+   Everything else has a safe default. The wire format (OpenAI / Anthropic / MCP)
+   is detected per request from the body, so the same config serves all three.
 
 Then confirm it is really in the path — an unauthenticated request must be
 refused, because there is no caller identity to exchange:

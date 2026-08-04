@@ -37,7 +37,6 @@ services:
           credentials:
             sts:
               service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
-          profile: openai
           deidentify:
             entities: [NAME, SSN, CREDIT_CARD, EMAIL_ADDRESS, PHONE_NUMBER]
             token_format: VAULT_TOKEN
@@ -65,7 +64,6 @@ services:
           cluster_id: "${SKYFLOW_CLUSTER_ID}"
           credentials:
             sts: { service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}" }
-          profile: openai
           deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
           reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
           on_skyflow_error: deny
@@ -90,7 +88,6 @@ curl -X POST http://localhost:8001/routes/chat/plugins \
   --data config.vault_id=$SKYFLOW_VAULT_ID \
   --data config.cluster_id=$SKYFLOW_CLUSTER_ID \
   --data config.credentials.sts.service_account_id=$SKYFLOW_STS_SERVICE_ACCOUNT_ID \
-  --data config.profile=mcp \
   --data 'config.deidentify.entities=NAME,EMAIL_ADDRESS'
 ```
 
@@ -106,7 +103,6 @@ config:
   cluster_id: { valueFrom: { secretKeyRef: { name: skyflow, key: cluster_id } } }
   credentials:
     sts: { service_account_id: "{vault://k8s/skyflow/service-account-id}" }
-  profile: openai
   deidentify: { entities: [NAME, EMAIL_ADDRESS], token_format: VAULT_TOKEN }
 # annotate the Ingress/HTTPRoute/Service: konghq.com/plugins: skyflow-ai-data-control
 ```
@@ -195,7 +191,7 @@ migration, no schema/DAO state.
 | ------- | ------------ | ------ |
 | 502 on de-identify | Skyflow unreachable/slow (fail-closed) | check egress/DNS/TLS to the vault cluster; raise `timeout_ms`/`deadline_ms`; verify region. |
 | 403 from Skyflow | the API key's role lacks the Detect permission | grant Detect de-identify (and reidentify, if you re-identify). |
-| Upstream still sees PII | de-identify not on the request path, or wrong profile/paths | with `ai-proxy`, use the nested-proxy layout (de-identify on the front route; see the nested-proxy example above); verify `profile`/`request_json_paths`. |
+| Upstream still sees PII | de-identify not on the request path, or an unrecognised body shape | with `ai-proxy`, use the nested-proxy layout (de-identify on the front route; see the nested-proxy example above). If the log says `unrecognised request wire format`, set `request_json_paths` for that route. |
 | Re-identify not happening | `reidentify.enabled=false`, streamed + `passthrough`, or `mapping_only` missing tokens | enable it; use `buffer`; check the token source. |
 | Credential visible concern | — | credentials are `encrypted`+`referenceable`; confirm `GET /plugins` returns no raw secret. |
 | High latency | no keepalive / serial batching | raise `keepalive_pool_size`; use `per_span` concurrency or `mapping_only`; co-locate near the vault region. |
