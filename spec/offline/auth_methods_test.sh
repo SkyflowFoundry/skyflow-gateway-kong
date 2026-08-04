@@ -74,16 +74,35 @@ case_check "method=jwt_credential, no jwt_credential record" reject \
             method: jwt_credential
             sts: { service_account_id: sa }'
 
-echo "== THE ASYMMETRY: ctx only under jwt_credential"
-case_check "ctx fields accepted under jwt_credential" accept \
+echo "== ctx is DERIVED, never configured -- under every method"
+# The plugin derives ctx itself, so there is nothing to configure ANYWHERE -- not
+# even under jwt_credential. context_headers in particular was a spoofing vector:
+# it lifted caller-controlled request headers into the claim set the vault trusts
+# for policy decisions.
+case_check "context_json rejected on jwt_credential (the plugin derives ctx)" reject \
 '          credentials:
             method: jwt_credential
             jwt_credential:
               service_account_json: "{}"
-              context_json: "{\"tenant\":\"acme\"}"
-              context_headers: { x-purpose: purpose }
-              context_kong: true
+              context_json: "{\"tenant\":\"acme\"}"'
+case_check "context_headers rejected on jwt_credential (caller-forgeable)" reject \
+'          credentials:
+            method: jwt_credential
+            jwt_credential:
+              service_account_json: "{}"
+              context_headers: { x-purpose: purpose }'
+case_check "role_ids rejected on jwt_credential (roles are the vault's business)" reject \
+'          credentials:
+            method: jwt_credential
+            jwt_credential:
+              service_account_json: "{}"
               role_ids: [r1]'
+case_check "ttl_seconds rejected on jwt_credential (Skyflow caps it server-side)" reject \
+'          credentials:
+            method: jwt_credential
+            jwt_credential:
+              service_account_json: "{}"
+              ttl_seconds: 600'
 case_check "context_json rejected on sts (Skyflow ignores it)" reject \
 '          credentials:
             method: sts

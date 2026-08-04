@@ -70,9 +70,9 @@ flowchart LR
   carries who is asking, so vault policies grant, mask or withhold
   re-identification per caller (`$ctx.<attr>`) rather than the gateway deciding.
   Under `sts` that identity is the caller's own IdP-signed token; under
-  `jwt_credential` the gateway mints an assertion and can stamp a `ctx` claim from
-  config, request headers and trusted gateway-derived facts, with `role_ids`
-  scoping the bearer. See [Authentication](#authentication).
+  `jwt_credential` the gateway mints an assertion and stamps a `ctx` claim it
+  derives itself from route, service, consumer and client IP — no configuration,
+  and nothing the caller can forge. See [Authentication](#authentication).
 - **Agent tool containment** — real agent traffic (Claude Code verified live)
   works end-to-end: Anthropic-native streaming, tool calls, tool results. Tool
   inputs stay **tokenized by default** (`reidentify.tool_inputs`), so files an
@@ -100,20 +100,29 @@ is asking, and therefore in what your vault policies can enforce.
 plane yields nothing reusable, and the identity in Skyflow's audit trail is a
 person's rather than a machine's.
 
-**The `ctx` asymmetry is enforced by the schema, not by documentation.** The
-`context_json`, `context_headers`, `context_kong` and `role_ids` fields are
-declared *only* on the `jwt_credential` record, so setting them under another
-method is a config-time error rather than a silent no-op:
+**`ctx` is never configured — it is derived.** There is no ctx knob under any
+method, and the schema rejects one:
 
-- Under **`sts`**, Skyflow ignores context supplied by the caller of an exchange —
-  `ctx` is exclusively the IdP's claims. Put tenant, role and purpose in the IdP
-  token (Entra app roles, claims-mapping policies); IdP-signed beats
-  gateway-asserted.
+- Under **`jwt_credential`**, the plugin stamps `ctx` itself from facts it derives
+  at request time: route, service, consumer, client IP. Those are the only context
+  the caller cannot forge. `service_account_json` is the single field on this
+  record.
+- Under **`sts`**, `ctx` is the IdP's signed claims. Skyflow ignores context
+  supplied by the caller of an exchange, so there is nothing for the gateway to
+  add. Put tenant, role and purpose in the IdP token — Entra app roles and
+  claims-mapping policies — where they are IdP-signed.
 - Under **`bearer_token`** there is no assertion to carry claims at all.
 
-The failure this prevents is the quiet one: a vault policy keyed on
-`$ctx.purpose` that reads as configured and never fires, because nothing was ever
-populating `purpose`.
+An earlier draft let operators map request **headers** into ctx claims. That
+inverted the trust model: it fed caller-controlled values into the claim set the
+vault uses for policy decisions, so anyone able to reach the gateway could assert
+their own tenant or purpose. Removed rather than documented.
+
+Two limits worth stating plainly. Under `jwt_credential` there is no caller
+identity, so `ctx` describes the **gateway**, never the person — per-user vault
+policy requires `sts`. And the failure this design prevents is the quiet one: a
+policy keyed on `$ctx.purpose` that reads as configured and never fires because
+nothing populates `purpose`.
 
 ## Why Skyflow (vs. Kong's built-in AI Sanitizer)
 

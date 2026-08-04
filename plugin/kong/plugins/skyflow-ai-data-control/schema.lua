@@ -107,21 +107,46 @@ local credentials = {
     { jwt_credential = {
         type = "record",
         fields = {
-          -- the full service-account credentials JSON from Skyflow. Reference a
-          -- vault entry rather than pasting it: {vault://env/SKYFLOW_SA_JSON}
+          -- The ONLY field. Everything else the exchange needs is either inside
+          -- this JSON (clientID, keyID, tokenURI, privateKey) or derived by the
+          -- plugin at request time.
+          --
+          -- `referenceable` so the UI offers "look up key in vault" and the
+          -- credential can live in a secret store rather than in plugin config:
+          --   {vault://env/SKYFLOW_SA_JSON}
           { service_account_json = { type = "string", referenceable = true } },
-          -- ttl for the minted bearer; Skyflow caps this server-side
-          { ttl_seconds = { type = "integer", default = 3600, between = { 60, 86400 } } },
 
-          -- ctx machinery. Deliberately declared HERE and nowhere else: the
-          -- schema itself is what makes ctx unsettable under sts and
-          -- bearer_token, so no entity_check is needed and no operator can
-          -- configure a claim set that would be silently discarded.
-          { context_json = { type = "string" } },
-          { context_headers = { type = "map", keys = { type = "string" },
-                                values = { type = "string" }, default = {} } },
-          { context_kong = { type = "boolean", default = false } },
-          { role_ids = { type = "array", elements = { type = "string" }, default = {} } },
+          -- Deliberately NO ctx configuration. The plugin stamps `ctx` itself
+          -- from facts it derives at request time -- route, service, consumer,
+          -- client IP -- which are the only context under this method that the
+          -- caller cannot forge.
+          --
+          -- What was here before, and why each is gone:
+          --
+          --   context_headers  A map of request header -> claim name. This is a
+          --                    spoofing vector, not a feature: it lifts a value
+          --                    the CALLER controls into a claim the vault then
+          --                    trusts for policy decisions. Anyone able to reach
+          --                    the gateway could set their own tenant or purpose.
+          --   context_json     Static claims. If an attribute is constant for a
+          --                    deployment it belongs in the service account's own
+          --                    Skyflow configuration, where the vault owns it,
+          --                    not restated in gateway config that can drift.
+          --   context_kong     A boolean gating the gateway-derived facts. There
+          --                    is no good reason to turn trustworthy context OFF,
+          --                    so it is now unconditional.
+          --   role_ids         Scoped the minted bearer to specific Skyflow roles.
+          --                    Role assignment is the service account's business,
+          --                    configured vault-side; duplicating it here meant two
+          --                    places to keep in sync and a silent over-grant when
+          --                    they disagreed.
+          --   ttl_seconds      Skyflow caps bearer lifetime server-side anyway, so
+          --                    this only ever narrowed it. Fixed at a sensible
+          --                    value in the handler.
+          --
+          -- NOTE the limit this method has regardless: there is no caller identity
+          -- under jwt_credential, so `ctx` describes the GATEWAY, never the person.
+          -- Per-user vault policy requires method=sts.
         },
     } },
 
