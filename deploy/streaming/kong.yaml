@@ -7,8 +7,8 @@
 # not control (Konnect Dedicated Cloud Gateways), and it turns a plugin change
 # into an API call rather than a build-push-deploy.
 #
-# Requires three data-plane settings; see deploy/streaming/Dockerfile for why each
-# one matters and what breaks without it:
+# Requires three data-plane settings; see deploy/streaming/data-plane-env.md for
+# why each matters and what breaks without it:
 #   KONG_CUSTOM_PLUGIN_STREAMING_ENABLED=on
 #   KONG_UNTRUSTED_LUA=lax          <- streamed handlers run sandboxed; `strict`
 #                                      forbids require() and rejects the config
