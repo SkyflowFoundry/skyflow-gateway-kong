@@ -312,8 +312,7 @@ eq(d5.messages[1].content, PRE .. "\n\nbe terse", "openai: prepended to the exis
 -- the instruction that keeps re-identification working
 eq(T.DEFAULT_TOKEN_PREAMBLE:find("square brackets", 1, true) ~= nil, true,
    "default preamble tells the model to keep the brackets")
-eq(T.DEFAULT_TOKEN_PREAMBLE:find("Do not characterise the material as redacted", 1, true) ~= nil
-   or T.DEFAULT_TOKEN_PREAMBLE:find("do not characterise the material as redacted", 1, true) ~= nil, true,
+eq(T.DEFAULT_TOKEN_PREAMBLE:lower():find("describe the material as redacted", 1, true) ~= nil, true,
    "default preamble forbids characterising the material as redacted")
 
 -- The example suffixes must NOT be token-shaped: a plausible-looking example
@@ -323,7 +322,7 @@ eq(T.DEFAULT_TOKEN_PREAMBLE:find("%[NAME_%l%d%l%d%l%d%]") == nil, true,
    "no lowercase-alphanumeric (token-shaped) example suffix")
 eq(T.DEFAULT_TOKEN_PREAMBLE:find("[NAME_EXAMPLE]", 1, true) ~= nil, true,
    "examples use the literal word EXAMPLE, which cannot collide with a real suffix")
-eq(T.DEFAULT_TOKEN_PREAMBLE:find("do not add caveats", 1, true) ~= nil, true,
+eq(T.DEFAULT_TOKEN_PREAMBLE:lower():find("add caveats about it", 1, true) ~= nil, true,
    "default preamble forbids privacy disclaimers")
 
 -- 14. Empty arrays must round-trip as arrays, THROUGH THE HANDLER'S OWN CODEC.

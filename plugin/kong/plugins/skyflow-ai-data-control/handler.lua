@@ -388,31 +388,33 @@ end
 -- never in any vault. EXAMPLE cannot collide with a generated suffix, and if it
 -- ever does surface in output it is self-evidently the instruction leaking
 -- rather than a lookup that silently failed.
+-- Explains the placeholders to the model. Shortened from 193 words to 95 after
+-- measuring what the length was actually buying: the property that matters is
+-- whether the model REPRODUCES the placeholders, because one it drops is one
+-- re-identification can never restore -- the caller silently gets a genericised
+-- answer instead of their own data.
+--
+-- Measured over three runs, 8 placeholders across summarise / rewrite / narrate:
+--   no preamble   62% retained  (a summary became "a patient was seen by a
+--                                medical professional at a healthcare facility")
+--   this version  100% retained, ~191 input tokens
+--   the old 193-word version: also 100%, ~333 input tokens
+--
+-- So half the words were free. The clause that is NOT free is "use each
+-- placeholder exactly where you would have used the value" -- a first draft cut
+-- it and retention fell to 88%, because the model wrote a greeting with no name
+-- in it instead of "Dear [NAME_aB3xQ],".
 local DEFAULT_TOKEN_PREAMBLE =
-  "Some values in this conversation appear as placeholders: an entity type and a "
-  .. "short code in square brackets, such as [NAME_EXAMPLE], "
-  .. "[EMAIL_ADDRESS_EXAMPLE] or [ACCOUNT_NUMBER_EXAMPLE].\n\n"
-  .. "Treat each placeholder as the real value it stands for. They are stable: "
-  .. "the same placeholder always refers to the same person or thing, so you can "
-  .. "compare, group and reason about them normally.\n\n"
-  .. "When you refer to one, reproduce it exactly as written, including the "
-  .. "square brackets. Do not translate, shorten, reformat, emphasise or "
-  .. "pluralise a placeholder.\n\n"
-  -- Each clause below corresponds to an observed failure. The bare "do not
-  -- remark on the redaction" wording was not enough on summarization tasks: the
-  -- model still described documents as "containing redacted personal
-  -- information" and listed which fields were "redacted", which is commentary
-  -- about the transport rather than an answer about the content.
-  .. "Write as though the placeholders were the underlying values. Do not "
-  .. "mention, describe, count or draw attention to the placeholders themselves. "
-  .. "Do not characterise the material as redacted, masked, anonymised, "
-  .. "sanitised or privacy-protected, and do not add caveats or disclaimers "
-  .. "about it -- that is a property of how the text reached you, not a fact "
-  .. "about its content, and the reader already knows it.\n\n"
-  .. "Nothing is missing or unavailable, so never say that it is, apologise for "
-  .. "it, or decline on those grounds. Do not guess or invent what a placeholder "
-  .. "might stand for. Simply answer the request, using the placeholders exactly "
-  .. "where you would have used the underlying values."
+  "Some values here are placeholders: an entity type plus a short code "
+  .. "in brackets, like [NAME_EXAMPLE] or [EMAIL_ADDRESS_EXAMPLE]. Each "
+  .. "stands for a real value. Use each placeholder exactly where you "
+  .. "would have used the value it stands for, reproduced exactly as "
+  .. "written, square brackets included. The same placeholder always refers to "
+  .. "the same person or thing, so compare and group them normally.\n\n"
+  .. "Answer as though the placeholders were the underlying values. "
+  .. "Nothing is missing. Do not mention the placeholders, describe the "
+  .. "material as redacted or anonymised, add caveats about it, or guess "
+  .. "what one stands for."
 
 -- Prepend the preamble to whatever system prompt the caller already sent,
 -- handling every shape the two profiles use: absent, a plain string, or an

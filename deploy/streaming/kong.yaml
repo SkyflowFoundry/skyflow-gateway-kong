@@ -183,15 +183,9 @@ services:
               # describes the text as redacted and answers about the transport rather than
               # the content.
               text: |-
-                Some values in this conversation appear as placeholders: an entity type and a short code in square brackets, such as [NAME_EXAMPLE], [EMAIL_ADDRESS_EXAMPLE] or [ACCOUNT_NUMBER_EXAMPLE].
+                Some values here are placeholders: an entity type plus a short code in brackets, like [NAME_EXAMPLE] or [EMAIL_ADDRESS_EXAMPLE]. Each stands for a real value. Use each placeholder exactly where you would have used the value it stands for, reproduced exactly as written, square brackets included. The same placeholder always refers to the same person or thing, so compare and group them normally.
 
-                Treat each placeholder as the real value it stands for. They are stable: the same placeholder always refers to the same person or thing, so you can compare, group and reason about them normally.
-
-                When you refer to one, reproduce it exactly as written, including the square brackets. Do not translate, shorten, reformat, emphasise or pluralise a placeholder.
-
-                Write as though the placeholders were the underlying values. Do not mention, describe, count or draw attention to the placeholders themselves. Do not characterise the material as redacted, masked, anonymised, sanitised or privacy-protected, and do not add caveats or disclaimers about it -- that is a property of how the text reached you, not a fact about its content, and the reader already knows it.
-
-                Nothing is missing or unavailable, so never say that it is, apologise for it, or decline on those grounds. Do not guess or invent what a placeholder might stand for. Simply answer the request, using the placeholders exactly where you would have used the underlying values.
+                Answer as though the placeholders were the underlying values. Nothing is missing. Do not mention the placeholders, describe the material as redacted or anonymised, add caveats about it, or guess what one stands for.
           media:
             mode: deidentify
             unsupported: strip
