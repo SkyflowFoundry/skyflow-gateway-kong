@@ -484,6 +484,10 @@ end
 -- wholesale reset -- simple, and a re-mint is cheap relative to eviction logic.
 local TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 -- cache_key -> { token, exp }
 local TOKEN_CACHE_MAX = 256
+-- Lifetime of the service-account ASSERTION we sign. Not configurable: Skyflow
+-- caps the lifetime of the bearer it returns server-side, so a knob here could
+-- only ever narrow something the vault already governs.
+local JWT_ASSERTION_TTL = 3600
 
 
 
@@ -671,28 +675,44 @@ end
 -- Skyflow ignores anything we add, and under bearer_token there is no assertion
 -- to put claims in. See schema.lua for why that asymmetry is enforced by the
 -- shape of the config rather than by a check.
-local function build_ctx(jc)
+-- Takes no configuration on purpose. Every claim here is derived by the gateway
+-- at request time, which is precisely why it can be trusted: the caller cannot
+-- forge any of it.
+--
+-- The claim set is meant to represent the CONTEXT OF THE REQUEST honestly, which
+-- is deliberately two kinds of fact:
+--   who/where  kong_consumer (only when a Kong auth plugin verified the client),
+--              kong_client_ip, kong_request_id
+--   what it hit kong_route, kong_service
+-- Both are legitimate policy inputs -- "this caller may detokenize" and "requests
+-- through this route may detokenize" are both real rules -- and neither is
+-- caller-assertable. What is EXCLUDED is any value the caller simply claimed
+-- about itself in a header.
+--
+-- Verified against the live Skyflow token endpoint: a `ctx` claim in the
+-- service-account assertion is propagated verbatim into the minted bearer, so
+-- vault policies can key on $ctx.kong_route / $ctx.kong_service /
+-- $ctx.kong_consumer / $ctx.kong_client_ip. Without the claim, the bearer carries
+-- no ctx at all. An earlier version let operators map request HEADERS into
+-- claims, which inverted that -- it fed caller-controlled values into the claim
+-- set the vault uses for policy decisions, so anyone who could reach the gateway
+-- could assert their own tenant or purpose.
+local function build_ctx()
   local ctx = {}
-  if jc.context_json and jc.context_json ~= "" then
-    local parsed = cjson.decode(jc.context_json)
-    if type(parsed) == "table" then
-      for k, v in pairs(parsed) do ctx[k] = v end
-    end
-  end
-  for header, claim in pairs(jc.context_headers or {}) do
-    local v = kong.request.get_header(header)
-    if v ~= nil and v ~= "" then ctx[claim] = v end
-  end
-  if jc.context_kong then
-    -- Gateway-derived facts only. These are trustworthy in the sense that the
-    -- caller cannot forge them, unlike a header they control.
-    local consumer = kong.client.get_consumer()
-    if consumer then ctx.kong_consumer = consumer.username or consumer.id end
-    local route = kong.router.get_route()
-    if route then ctx.kong_route = route.name or route.id end
-    local service = kong.router.get_service()
-    if service then ctx.kong_service = service.name or service.id end
-    ctx.kong_client_ip = kong.client.get_forwarded_ip()
+  local consumer = kong.client.get_consumer()
+  if consumer then ctx.kong_consumer = consumer.username or consumer.id end
+  local route = kong.router.get_route()
+  if route then ctx.kong_route = route.name or route.id end
+  local service = kong.router.get_service()
+  if service then ctx.kong_service = service.name or service.id end
+  ctx.kong_client_ip = kong.client.get_forwarded_ip()
+  -- Correlation id. Skyflow's audit trail records that a field was detokenized;
+  -- this is what lets you tie that entry back to the specific gateway request
+  -- that caused it, which is the difference between "something detokenized this"
+  -- and "this request, from this caller, at this time, did".
+  if kong.request and kong.request.get_header then
+    ctx.kong_request_id = kong.request.get_header("x-kong-request-id")
+                          or (ngx.var and ngx.var.request_id)
   end
   return next(ctx) and ctx or nil
 end
@@ -725,12 +745,14 @@ local function jwt_credential_bearer(conf, deadline)
     token_uri = "https://manage.skyflowapis.com/v1/auth/sa/oauth/token"
   end
 
-  local ctx = build_ctx(jc)
+  local ctx = build_ctx()
   -- Cache on everything that changes the assertion, so a per-request ctx (from
   -- context_headers) does not silently reuse another caller's bearer.
+  -- Keyed on the assertion's own inputs. ctx is derived per request (route,
+  -- service, consumer, client IP), so a bearer minted for one route is never
+  -- reused on another.
   local cache_key = "jwt\n" .. tostring(sa.clientID) .. "\n"
-                    .. (ctx and cjson.encode(ctx) or "-") .. "\n"
-                    .. table.concat(jc.role_ids or {}, ",")
+                    .. (ctx and cjson.encode(ctx) or "-")
   local hit = TOKEN_CACHE[cache_key]
   if hit and hit.exp - (conf.token_skew_seconds or 300) > ngx.now() then
     return "Bearer " .. hit.token
@@ -749,10 +771,9 @@ local function jwt_credential_bearer(conf, deadline)
   local now = math.floor(ngx.now())
   local claims = {
     iss = sa.clientID, key = sa.keyID, aud = token_uri, sub = sa.clientID,
-    exp = now + (jc.ttl_seconds or 3600), iat = now,
+    exp = now + JWT_ASSERTION_TTL, iat = now,
   }
   if ctx then claims.ctx = ctx end
-  if jc.role_ids and #jc.role_ids > 0 then claims.role_ids = jc.role_ids end
 
   local signing_input = b64url_encode(cjson.encode({ alg = "RS256", typ = "JWT", kid = sa.keyID }))
                         .. "." .. b64url_encode(cjson.encode(claims))
@@ -785,7 +806,7 @@ local function jwt_credential_bearer(conf, deadline)
         return nil, "service-account token endpoint returned no accessToken"
       end
       local exp = jwt_exp(minted)
-      if exp == 0 then exp = now + (jc.ttl_seconds or 3600) end
+      if exp == 0 then exp = now + JWT_ASSERTION_TTL end
       if TOKEN_CACHE_N >= TOKEN_CACHE_MAX then TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 end
       if not TOKEN_CACHE[cache_key] then TOKEN_CACHE_N = TOKEN_CACHE_N + 1 end
       TOKEN_CACHE[cache_key] = { token = minted, exp = exp }

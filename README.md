@@ -52,6 +52,74 @@ flowchart LR
 
 ---
 
+## Contents
+
+- [Quickstart](#quickstart) — offline in one command, or on your own gateway in four steps
+- [What it does](#what-it-does)
+- [Authentication](#authentication) — `sts` / `jwt_credential` / `bearer_token`, and how `ctx` is derived
+- [Why Skyflow (vs. Kong's built-in AI Sanitizer)](#why-skyflow-vs-kongs-built-in-ai-sanitizer)
+- [Architecture](#architecture) — the nested-proxy pattern and why it is required
+- [Getting started](#getting-started) — prerequisites, offline harness, installing on Konnect
+- [Repository layout](#repository-layout)
+- [Roadmap](#roadmap)
+- [Documentation map](#documentation-map)
+
+## Quickstart
+
+**See it work offline, no accounts and no keys** — db-less Kong, a mock Skyflow and
+a mock LLM, asserting both directions:
+
+```bash
+make e2e
+# upstream saw: MOCK-LLM RECEIVED: Reply to [NAME_aB3xQ] at [EMAIL_ADDRESS_kp2]
+# ok: tokenized on egress, restored to the client
+```
+
+**Install it on your own Konnect gateway** — four steps, three of them in the UI:
+
+1. **Set three data-plane variables and restart.** The only step outside Gateway
+   Manager, and the only one needing a restart. Apply them wherever you manage
+   the container's environment — Helm values, an ECS task definition, App Runner.
+
+   ```bash
+   KONG_CUSTOM_PLUGIN_STREAMING_ENABLED=on   # defaults OFF; without it you get a P309
+   KONG_UNTRUSTED_LUA=lax                    # `strict` forbids require(); the plugin will not load
+   KONG_PLUGINS=bundled                      # must NOT name skyflow-ai-data-control
+   ```
+
+2. **Build the upload payload.** Konnect caps handler code at 102,400 bytes, so
+   this strips comments and verifies the stripped result still passes the suite.
+
+   ```bash
+   make bundle    # writes custom-plugin.json
+   ```
+
+3. **Upload it.** Gateway Manager → Plugins → *New plugin* → *Create custom
+   plugin* → **Streamed custom plugin**, and supply `handler.lua` + `schema.lua`
+   (or `POST` the `custom-plugin.json` from step 2 to
+   `/v2/control-planes/{cp}/core-entities/custom-plugins`).
+
+4. **Attach it** to the route carrying model traffic and fill in the form: vault
+   id, cluster id, account id, `profile: anthropic` or `openai`, and a
+   `credentials.sts.service_account_id`. Everything else has a safe default.
+
+Then confirm it is really in the path — an unauthenticated request must be
+refused, because there is no caller identity to exchange:
+
+```bash
+curl -s -X POST https://<your-gateway>/ai/v1/messages \
+  -H 'content-type: application/json' \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
+# → request blocked: no caller identity token in 'authorization'
+```
+
+> The check that actually proves the product is the *egress* payload, not the
+> response you get back — the client sees restored cleartext by design, so a
+> working gateway and a broken one look identical from there. See
+> [Getting started](#getting-started).
+
+---
+
 ## What it does
 
 - **Control data at runtime, on the way in** — detects and tokenizes PII/PHI/secrets in the
@@ -70,9 +138,9 @@ flowchart LR
   carries who is asking, so vault policies grant, mask or withhold
   re-identification per caller (`$ctx.<attr>`) rather than the gateway deciding.
   Under `sts` that identity is the caller's own IdP-signed token; under
-  `jwt_credential` the gateway mints an assertion and can stamp a `ctx` claim from
-  config, request headers and trusted gateway-derived facts, with `role_ids`
-  scoping the bearer. See [Authentication](#authentication).
+  `jwt_credential` the gateway mints an assertion and stamps a `ctx` claim it
+  derives itself from route, service, consumer and client IP — no configuration,
+  and nothing the caller can forge. See [Authentication](#authentication).
 - **Agent tool containment** — real agent traffic (Claude Code verified live)
   works end-to-end: Anthropic-native streaming, tool calls, tool results. Tool
   inputs stay **tokenized by default** (`reidentify.tool_inputs`), so files an
@@ -100,20 +168,29 @@ is asking, and therefore in what your vault policies can enforce.
 plane yields nothing reusable, and the identity in Skyflow's audit trail is a
 person's rather than a machine's.
 
-**The `ctx` asymmetry is enforced by the schema, not by documentation.** The
-`context_json`, `context_headers`, `context_kong` and `role_ids` fields are
-declared *only* on the `jwt_credential` record, so setting them under another
-method is a config-time error rather than a silent no-op:
+**`ctx` is never configured — it is derived.** There is no ctx knob under any
+method, and the schema rejects one:
 
-- Under **`sts`**, Skyflow ignores context supplied by the caller of an exchange —
-  `ctx` is exclusively the IdP's claims. Put tenant, role and purpose in the IdP
-  token (Entra app roles, claims-mapping policies); IdP-signed beats
-  gateway-asserted.
+- Under **`jwt_credential`**, the plugin stamps `ctx` itself from facts it derives
+  at request time: route, service, consumer, client IP. Those are the only context
+  the caller cannot forge. `service_account_json` is the single field on this
+  record.
+- Under **`sts`**, `ctx` is the IdP's signed claims. Skyflow ignores context
+  supplied by the caller of an exchange, so there is nothing for the gateway to
+  add. Put tenant, role and purpose in the IdP token — Entra app roles and
+  claims-mapping policies — where they are IdP-signed.
 - Under **`bearer_token`** there is no assertion to carry claims at all.
 
-The failure this prevents is the quiet one: a vault policy keyed on
-`$ctx.purpose` that reads as configured and never fires, because nothing was ever
-populating `purpose`.
+An earlier draft let operators map request **headers** into ctx claims. That
+inverted the trust model: it fed caller-controlled values into the claim set the
+vault uses for policy decisions, so anyone able to reach the gateway could assert
+their own tenant or purpose. Removed rather than documented.
+
+Two limits worth stating plainly. Under `jwt_credential` there is no caller
+identity, so `ctx` describes the **gateway**, never the person — per-user vault
+policy requires `sts`. And the failure this design prevents is the quiet one: a
+policy keyed on `$ctx.purpose` that reads as configured and never fires because
+nothing populates `purpose`.
 
 ## Why Skyflow (vs. Kong's built-in AI Sanitizer)
 
