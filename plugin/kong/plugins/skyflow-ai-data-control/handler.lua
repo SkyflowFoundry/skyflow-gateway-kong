@@ -224,7 +224,16 @@ local function effective_paths(conf, phase)
   local base = (PROFILE_PATHS[conf.profile] or PROFILE_PATHS.generic)[phase] or {}
   local override = (phase == "request") and conf.request_json_paths or conf.response_json_paths
   if override and #override > 0 then
-    if conf.profile == "generic" then return override end
+    if conf.profile == "generic" then
+      -- Dedupe here too. This branch used to return `override` verbatim, so a
+      -- path listed twice under profile=generic collected every span twice, spent
+      -- twice at Detect, and counted twice against max_spans -- a premature 413.
+      local seen, out = {}, {}
+      for _, s in ipairs(override) do
+        if not seen[s] then seen[s] = true; out[#out + 1] = s end
+      end
+      return out
+    end
     -- Dedupe. collect_spans walks each path independently and appends, so a path
     -- listed twice collects every matching span twice -- and then every span is
     -- sent to Detect twice, doubling response-leg latency and cost for no effect.
@@ -556,6 +565,14 @@ local function precheck_caller_token(token, sts)
     end
     if not ok then return nil, "caller token audience mismatch", "identity" end
   end
+  -- A subject is REQUIRED, because the STS bearer cache is keyed on it. Defaulting
+  -- a missing subject to a placeholder collapsed every subject-less caller into
+  -- one slot, so caller B was handed the bearer minted from caller A's identity --
+  -- B's vault operations audited as A, and evaluated against A's ctx.
+  if not claims.sub and not claims.oid then
+    return nil, "caller identity token has no subject (sub/oid); refusing to "
+                .. "exchange a token that cannot be attributed", "identity"
+  end
   return claims
 end
 
@@ -665,8 +682,7 @@ local function bearer_token_value(conf)
   if not b or not b.api_key or b.api_key == "" then
     return nil, "credentials.bearer_token.api_key is required for method=bearer_token", "config"
   end
-  if b.scheme == "none" then return b.api_key end
-  return (b.scheme or "Bearer") .. " " .. b.api_key
+  return "Bearer " .. b.api_key
 end
 
 -- Build the `ctx` claim for a gateway-minted assertion.
@@ -710,9 +726,13 @@ local function build_ctx()
   -- this is what lets you tie that entry back to the specific gateway request
   -- that caused it, which is the difference between "something detokenized this"
   -- and "this request, from this caller, at this time, did".
-  if kong.request and kong.request.get_header then
-    ctx.kong_request_id = kong.request.get_header("x-kong-request-id")
-                          or (ngx.var and ngx.var.request_id)
+  -- kong.request.get_id(), NOT the x-kong-request-id HEADER. Reading the header
+  -- took a value the CALLER controls and put it in the claim set the vault trusts
+  -- -- flatly contradicting the rule stated above, forging the audit correlation
+  -- id, and letting a client steer this function's cache key. get_id() returns
+  -- the id Kong itself assigned.
+  if kong.request and kong.request.get_id then
+    ctx.kong_request_id = kong.request.get_id()
   end
   return next(ctx) and ctx or nil
 end
@@ -736,7 +756,13 @@ local function jwt_credential_bearer(conf, deadline)
                 .. "for method=jwt_credential", "config"
   end
   local sa = cjson.decode(jc.service_account_json)
-  if type(sa) ~= "table" or not sa.privateKey or not sa.clientID then
+  -- type(privateKey) == "string" is load-bearing, not defensive noise:
+  -- resty.openssl.pkey.new(table) GENERATES a fresh 2048-bit key instead of
+  -- erroring. A malformed credential therefore produced a perfectly well-formed
+  -- assertion that Skyflow could not verify -- an opaque 4xx -- while burning
+  -- ~64ms of event-loop-blocking keygen per request.
+  if type(sa) ~= "table" or type(sa.privateKey) ~= "string" or sa.privateKey == ""
+     or type(sa.clientID) ~= "string" then
     return nil, "service_account_json is not a Skyflow service-account credential "
                 .. "(expected clientID, keyID, tokenURI, privateKey)", "config"
   end
@@ -748,11 +774,29 @@ local function jwt_credential_bearer(conf, deadline)
   local ctx = build_ctx()
   -- Cache on everything that changes the assertion, so a per-request ctx (from
   -- context_headers) does not silently reuse another caller's bearer.
-  -- Keyed on the assertion's own inputs. ctx is derived per request (route,
-  -- service, consumer, client IP), so a bearer minted for one route is never
-  -- reused on another.
-  local cache_key = "jwt\n" .. tostring(sa.clientID) .. "\n"
-                    .. (ctx and cjson.encode(ctx) or "-")
+  -- Cache key: everything that changes the assertion, EXCLUDING the per-request
+  -- correlation id.
+  --
+  -- kong_request_id is unique per request, so including it made the key unique per
+  -- request and the cache could never hit: every single request signed a 2048-bit
+  -- RS256 assertion and did a live HTTPS exchange with Skyflow, continuously
+  -- refilling and wiping the 256-slot cache, and making token_skew_seconds dead
+  -- config. Measured: 3 token-endpoint POSTs across 3 request ids, where 1 was
+  -- correct.
+  --
+  -- The key also covers the CREDENTIAL. Without that, rotating
+  -- service_account_json (or fixing a broken one) kept serving the bearer minted
+  -- from the previous key until the entry aged out.
+  local ctx_key = {}
+  if ctx then
+    for k, v in pairs(ctx) do
+      if k ~= "kong_request_id" then ctx_key[#ctx_key + 1] = k .. "=" .. tostring(v) end
+    end
+    table.sort(ctx_key)
+  end
+  local cache_key = "jwt\n" .. tostring(sa.clientID) .. "\n" .. tostring(sa.keyID) .. "\n"
+                    .. b64url_encode(tostring(sa.privateKey)):sub(1, 24) .. "\n"
+                    .. table.concat(ctx_key, "&")
   local hit = TOKEN_CACHE[cache_key]
   if hit and hit.exp - (conf.token_skew_seconds or 300) > ngx.now() then
     return "Bearer " .. hit.token
@@ -806,7 +850,10 @@ local function jwt_credential_bearer(conf, deadline)
         return nil, "service-account token endpoint returned no accessToken"
       end
       local exp = jwt_exp(minted)
-      if exp == 0 then exp = now + JWT_ASSERTION_TTL end
+      -- Conservative fallback, matching the STS path. Assuming the assertion's
+      -- own TTL would cache a short-lived bearer well past its real expiry and
+      -- serve it until it started 401ing.
+      if exp == 0 then exp = math.floor(ngx.now()) + 300 end
       if TOKEN_CACHE_N >= TOKEN_CACHE_MAX then TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 end
       if not TOKEN_CACHE[cache_key] then TOKEN_CACHE_N = TOKEN_CACHE_N + 1 end
       TOKEN_CACHE[cache_key] = { token = minted, exp = exp }
@@ -1531,9 +1578,6 @@ local function run_access(conf, ctx)
              body = { message = "request blocked: too many fields to de-identify (max_spans)" } }
   end
 
-  if conf.deidentify.batch_mode == "joined" then
-    kong.log.warn("skyflow: deidentify.batch_mode='joined' is not implemented; using per_span")
-  end
 
   -- De-identify every span, CONCURRENTLY, in waves of conf.max_concurrency.
   --

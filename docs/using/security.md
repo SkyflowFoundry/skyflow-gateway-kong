@@ -28,7 +28,7 @@ threat model, data handling, secrets, governance, and compliance.
 | **MITM to Skyflow** | Network interception | TLS to `*.vault.skyflowapis.com`; certificate verification on (never `ssl_verify=false` in prod). |
 | **DoS / amplification** | Huge bodies, many spans | `max_body_size`, `max_spans`, `max_concurrency`, `deadline_ms`; oversized ⇒ configured posture. |
 | **PII reaches upstream before tokenization** | Plugin not on the request path | De-identify runs in `access`; with `ai-proxy` the nested-proxy topology keeps de-identify on the front route so the internal `ai-proxy` route only ever sees tokens. |
-| **Credential compromise** | Gateway host compromised | Nothing to steal: the gateway holds no Skyflow credential. Access requires a live caller IdP token, and the vault enforces that caller's own entitlements. |
+| **Credential compromise** | Gateway host compromised | Nothing to steal under the default `method: sts`; `jwt_credential` and `bearer_token` do place one on the gateway. Access requires a live caller IdP token, and the vault enforces that caller's own entitlements. |
 
 ## Data handling & residency
 
@@ -45,43 +45,47 @@ threat model, data handling, secrets, governance, and compliance.
 
 - Credentials are schema-typed `encrypted` + `referenceable`, so they're never
   stored in plaintext and never returned by the Admin API.
-- There is no Skyflow credential to provide. STS delegation (RFC 8693) is the only credential path: the caller's enterprise IdP token is exchanged for a short-lived Skyflow bearer whose `ctx` is their signed claims. The gateway holds **no** Skyflow credential -- no API key, no service account, no private key -- so there is nothing here for an attacker who compromises the host to steal.
-  reference — Kong **Secrets Management** (`{vault://env/...}`, HashiCorp Vault,
-  AWS/GCP SM) or a Konnect control-plane secret.
-- Nothing to rotate at the gateway. Revoking the caller's IdP session, or the STS issuer trust in the Skyflow account, removes access.
-  needed.
+- **Under the default `method: sts` there is no Skyflow credential to provide.**
+  The caller's enterprise IdP token is exchanged (RFC 8693) for a short-lived
+  Skyflow bearer whose `ctx` is their signed claims, so the gateway holds no API
+  key, no service account and no private key — nothing for an attacker who
+  compromises the host to steal, and nothing to rotate at the gateway. Revoking
+  the caller's IdP session, or the STS issuer trust in the Skyflow account,
+  removes access.
+- **The other two methods do put a credential on the gateway**, and it must be a
+  secret reference — Kong **Secrets Management** (`{vault://env/...}`, HashiCorp
+  Vault, AWS/GCP SM) or a Konnect control-plane secret — never inline.
+  `jwt_credential` holds an RSA private key; `bearer_token` holds a long-lived
+  API key whose compromise is indistinguishable from legitimate use, because the
+  vault sees no caller identity under that method.
 
-### Service-account JWT auth (recommended)
+### Choosing an auth method
 
-`credentials.sts` names the delegating service account and the expected issuer and audience; it contains no secret.
-JSON. The gateway signs an RS256 JWT assertion in-process (Kong-bundled
-`resty.openssl`; the private key never leaves the data plane) and exchanges it
-for a short-lived bearer (~60 min), cached per worker and re-minted
-`token_skew_seconds` before expiry. Two levers shape each bearer:
+`credentials.method` is one of `sts` (default), `jwt_credential`, `bearer_token`.
+They differ in what the vault learns about who is asking, which is what your vault
+policies can act on.
 
-- **Scoped tokens** — `credentials.role_ids` restricts the bearer to a subset of
-  the SA's roles (`scope: "role:<id> ..."` on the exchange).
-- **Context-aware authorization** — the assertion's `ctx` claim accepts
-  arbitrary JSON (vault policies traverse it as `$ctx.a.b`) and is assembled in
-  layers, later layers winning:
-  1. `credentials.context_json` — raw JSON string, any shape (nested objects,
-     booleans, numbers); the ctx base. Referenceable like other secrets.
-  2. `credentials.context` — static `attr → string` map; dot-delimited attrs
-     nest (`org.unit → ctx.org.unit`).
-  3. `credentials.context_headers` — `attr → request header`, resolved per
-     request. **Client-supplied** — treat as untrusted unless an upstream
-     gateway strips/sets the header.
-  4. `credentials.context_kong` — `attr → gateway-derived fact`
-     (`consumer_id`/`consumer_username`/`consumer_custom_id`/`route_name`/
-     `service_name`/`client_ip`), resolved via the PDK. **Trusted and merged
-     last**, so a client header can never override these attributes.
+| Method | Credential on the gateway | Identity the vault sees | `ctx` |
+| --- | --- | --- | --- |
+| `sts` | none | the caller's own IdP-signed token | the IdP's claims |
+| `jwt_credential` | RSA private key | asserted by the gateway | derived by the plugin |
+| `bearer_token` | long-lived API key | none | none |
 
-  Skyflow embeds the merged object in the bearer, so vault policies can
-  condition access per caller: `ALLOW READ ON ... WHERE table.owner =
-  $ctx.caller.user`. Distinct resolved contexts mint distinct cached bearers,
-  and the full context is audit-logged by Skyflow (the audit event's Context
-  ID). To make enforcement mandatory, set `enforceContextID: true` on the
-  service account — token exchange then fails unless `ctx` is present.
+`jwt_credential` takes exactly one field, `service_account_json`. There is no ctx
+configuration under any method: the plugin derives `ctx` itself from
+`kong_consumer` (present only when a Kong auth plugin verified the client),
+`kong_client_ip`, `kong_request_id`, `kong_route` and `kong_service`. Verified
+against the live Skyflow token endpoint — the claim is propagated verbatim into
+the minted bearer, so vault policies can key on `$ctx.kong_route` and friends.
+
+An earlier build let operators map request **headers** into `ctx`. That was
+removed rather than documented: it fed values the caller controls into the claim
+set the vault trusts for policy decisions, so anyone able to reach the gateway
+could assert their own tenant or purpose.
+
+Note the ceiling: under `jwt_credential` there is no caller identity at all, so
+`ctx` describes the gateway, never the person. Per-user vault policy requires
+`sts`.
 
 ## Governance & RBAC (delegated to Skyflow)
 
@@ -107,7 +111,7 @@ and audited:
 
 > Per-caller policy context (scoped tokens carrying consumer/department `ctx` for
 > attribute-based re-identification decisions) is available via service-account
-> JWT auth — see [Service-account JWT auth](#service-account-jwt-auth-recommended).
+> JWT auth — see [Choosing an auth method](#choosing-an-auth-method).
 
 ## Compliance posture
 

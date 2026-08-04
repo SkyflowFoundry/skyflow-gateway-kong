@@ -18,7 +18,7 @@ local function base()
   return {
     vault_id   = "vault123",
     cluster_id = "ebfc9bee",
-    credentials = { api_key = "sky-test-key" },
+    credentials = { sts = { service_account_id = "sa-test" } },
   }
 end
 
@@ -35,73 +35,67 @@ describe(PLUGIN_NAME .. ": schema", function()
     assert.is_falsy(ok)
   end)
 
-  describe("credentials (exactly one of)", function()
-    it("rejects when none provided", function()
-      local c = base(); c.credentials = {}
+  describe("credentials.method", function()
+    -- The plugin used to be STS-only, then gained a `method` enum. These cases
+    -- pin the two properties that matter and that a reader cannot infer from the
+    -- field list: each method demands its own credential, and ctx is not
+    -- configurable ANYWHERE.
+    it("defaults to sts", function()
+      local c = base()
+      local entity = validate(c)
+      assert.is_truthy(entity)
+      assert.equals("sts", entity.credentials.method)
+    end)
+
+    it("rejects method=bearer_token without an api_key", function()
+      local c = base()
+      c.credentials = { method = "bearer_token", bearer_token = {} }
       assert.is_falsy(validate(c))
     end)
 
-    it("rejects when two provided", function()
+    it("accepts method=bearer_token with an api_key", function()
       local c = base()
-      c.credentials = { api_key = "k", token = "t" }
-      assert.is_falsy(validate(c))
-    end)
-
-    it("accepts service_account_json alone", function()
-      local c = base()
-      c.credentials = { service_account_json = '{"clientID":"x"}' }
+      c.credentials = { method = "bearer_token", bearer_token = { api_key = "sky-k" } }
       assert.is_truthy(validate(c))
     end)
 
-    it("accepts SA-JWT options alongside service_account_json", function()
+    it("rejects method=jwt_credential without service_account_json", function()
       local c = base()
-      c.credentials = {
-        service_account_json = '{"clientID":"x"}',
-        role_ids = { "role-a", "role-b" },
-        context_json = '{"org":{"id":"org_1"},"pci":true}',
-        context  = { tenant = "acme", ["org.unit"] = "payments" },
-        context_headers = { ["caller.user"] = "X-Consumer-Username" },
-        context_kong = { ["caller.route"] = "route_name", ip = "client_ip" },
-      }
+      c.credentials = { method = "jwt_credential", jwt_credential = {} }
+      assert.is_falsy(validate(c))
+    end)
+
+    it("accepts method=jwt_credential with only service_account_json", function()
+      local c = base()
+      c.credentials = { method = "jwt_credential",
+                        jwt_credential = { service_account_json = '{"clientID":"x"}' } }
       assert.is_truthy(validate(c))
     end)
 
-    it("rejects a non-object context_json", function()
+    it("rejects method=sts without a service_account_id", function()
       local c = base()
-      c.credentials = { service_account_json = '{"clientID":"x"}', context_json = "[1,2]" }
+      c.credentials = { method = "sts", sts = {} }
       assert.is_falsy(validate(c))
     end)
 
-    it("rejects unknown context_kong sources", function()
-      local c = base()
-      c.credentials = { service_account_json = '{"clientID":"x"}',
-                        context_kong = { user = "not_a_source" } }
-      assert.is_falsy(validate(c))
+    -- ctx is DERIVED by the handler (route, service, consumer, client IP,
+    -- request id), never configured. context_headers in particular was removed
+    -- because it fed caller-controlled headers into the claim set the vault
+    -- trusts for policy decisions.
+    it("rejects ctx configuration on jwt_credential", function()
+      for _, field in ipairs({ "context_json", "context_headers", "context_kong",
+                               "role_ids", "ttl_seconds" }) do
+        local c = base()
+        c.credentials = { method = "jwt_credential",
+                          jwt_credential = { service_account_json = '{"clientID":"x"}' } }
+        c.credentials.jwt_credential[field] = "x"
+        assert.is_falsy(validate(c), field .. " must be rejected")
+      end
     end)
 
-    it("rejects context_json/context_kong without service_account_json", function()
+    it("rejects a top-level api_key (it lives under bearer_token)", function()
       local c = base()
-      c.credentials = { api_key = "k", context_json = '{"a":1}' }
-      assert.is_falsy(validate(c))
-
-      c = base()
-      c.credentials = { api_key = "k", context_kong = { r = "route_name" } }
-      assert.is_falsy(validate(c))
-    end)
-
-    it("rejects role_ids without service_account_json", function()
-      local c = base()
-      c.credentials = { api_key = "k", role_ids = { "role-a" } }
-      assert.is_falsy(validate(c))
-    end)
-
-    it("rejects context/context_headers without service_account_json", function()
-      local c = base()
-      c.credentials = { token = "t", context = { tenant = "acme" } }
-      assert.is_falsy(validate(c))
-
-      c = base()
-      c.credentials = { api_key = "k", context_headers = { user = "X-U" } }
+      c.credentials = { api_key = "sky-k" }
       assert.is_falsy(validate(c))
     end)
   end)

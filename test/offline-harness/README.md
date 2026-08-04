@@ -9,7 +9,7 @@ re-id round-trip and reproduces Kong #14380.
 ```bash
 docker compose -f test/offline-harness/docker-compose.yml up -d --wait
 
-# STS-only: every request needs a caller identity token. This harness leaves
+# The default method is STS, so every request needs a caller identity token. This harness leaves
 # expected_issuer/expected_audience unset, so an unsigned fixture JWT (alg=none,
 # no exp) satisfies the precheck. Not a credential.
 JWT=eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJkZW1vLXVzZXIiLCJlbWFpbCI6ImRlbW9AZXhhbXBsZS5jb20iLCJuYW1lIjoiRGVtbyBVc2VyIn0.sig

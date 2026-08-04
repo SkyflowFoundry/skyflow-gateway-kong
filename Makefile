@@ -89,7 +89,7 @@ integration:
 # test/offline-harness; drive that, and assert the de-identified result rather
 # than only bringing the stack up.
 COMPOSE := docker compose -f test/offline-harness/docker-compose.yml
-# The plugin is STS-only, so every request needs a caller identity token. The
+# The default auth method is STS, so every request needs a caller identity token. The
 # harness leaves expected_issuer/expected_audience unset, so an unsigned fixture
 # JWT with no `exp` satisfies the precheck -- no IdP, no keys. Header
 # {"alg":"none"}, payload {"sub":"demo-user",...}. Not a credential.
@@ -109,7 +109,7 @@ e2e:
 	[ $$fail -eq 0 ] && echo "ok: tokenized on egress, restored to the client" || exit 1
 
 # Guarded: requires SKYFLOW_VAULT_ID / SKYFLOW_CLUSTER_ID /
-# SKYFLOW_SERVICE_ACCOUNT_ID. There is no API key: the plugin is STS-only.
+# SKYFLOW_SERVICE_ACCOUNT_ID. No API key: the default method is STS.
 sandbox-smoke:
 	@test -n "$$SKYFLOW_VAULT_ID" || (echo "set SKYFLOW_VAULT_ID / SKYFLOW_CLUSTER_ID / SKYFLOW_SERVICE_ACCOUNT_ID" && exit 1)
 	pongo run -- --tags=sandbox

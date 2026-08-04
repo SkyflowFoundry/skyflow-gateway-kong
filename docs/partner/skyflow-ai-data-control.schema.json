@@ -37,27 +37,8 @@
         },
         "credentials": {
           "type": "object",
-          "description": "Credentials. STS delegation (RFC 8693) is the ONLY path: the caller's enterprise IdP token is exchanged for a short-lived Skyflow bearer whose ctx is their signed claims. The gateway holds NO Skyflow credential -- no API key, no service account, no private key -- so compromising it yields no vault access.",
-          "properties": {
-            "token": {
-              "type": "string",
-              "description": "Static Skyflow bearer token. Referenceable and encrypted."
-            },
-            "role_ids": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "Optional Skyflow role IDs to scope the minted token."
-            },
-            "context": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "string"
-              },
-              "description": "Optional context key/value map for context-aware Skyflow policies."
-            }
-          }
+          "description": "Credentials. `method` selects one of sts (default), jwt_credential, bearer_token. Under sts the gateway holds NO Skyflow credential: the caller's enterprise IdP token is exchanged (RFC 8693) for a short-lived bearer whose ctx is their signed claims. jwt_credential places an RSA private key on the gateway; bearer_token a long-lived API key with no caller identity. ctx is derived by the plugin under every method and is not configurable.",
+          "properties": {}
         },
         "token_skew_seconds": {
           "type": "integer",

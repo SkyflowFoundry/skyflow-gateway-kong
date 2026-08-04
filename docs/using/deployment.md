@@ -60,9 +60,18 @@ Attach `skyflow-ai-data-control` to a Route/Service with your Skyflow vault deta
 See [operations.md](operations.md) for ready-to-copy decK, Admin API, KIC, and
 Konnect config, including the nested-proxy layout for composing with `ai-proxy`.
 
-Provide no Skyflow credential. STS delegation (RFC 8693) is the only credential path: the caller's enterprise IdP token is exchanged for a short-lived Skyflow bearer whose `ctx` is their signed claims. The gateway holds **no** Skyflow credential -- no API key, no service account, no private key -- so there is nothing here for an attacker who compromises the host to steal.
-reidentify) permission — supply it as a secret reference such as
-Configure `credentials.sts.service_account_id`, `expected_issuer` and `expected_audience` instead; none of them is a secret.
+Choose an auth method. `credentials.method` defaults to **`sts`**, the only one
+where the gateway holds no Skyflow credential at all: the caller's enterprise IdP
+token is exchanged (RFC 8693) for a short-lived Skyflow bearer whose `ctx` is
+their signed claims. Configure `credentials.sts.service_account_id`,
+`expected_issuer` and `expected_audience`; none of those is a secret, so nothing
+on the data plane is worth stealing.
+
+The other two methods do put a credential on the gateway, and should be supplied
+as a secret reference (`{vault://env/...}`, HashiCorp Vault, AWS/GCP Secrets
+Manager, or a Konnect control-plane secret) rather than inline:
+`jwt_credential.service_account_json` (an RSA private key) or
+`bearer_token.api_key`. See [security.md](security.md).
 
 ## Validate
 

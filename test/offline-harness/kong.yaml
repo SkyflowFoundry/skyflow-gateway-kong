@@ -34,7 +34,7 @@ services:
           vault_id: demo-vault
           cluster_id: demo
           skyflow_base_url_override: "http://mock-skyflow:8080"
-          # `credentials.api_key` was removed when the plugin became STS-only, and
+          # `credentials.api_key` moved under `credentials.bearer_token` when the auth
           # this file kept it -- so Kong aborted at startup with
           # "in 'api_key': unknown field" and the 60-second demo could not run at
           # all. expected_issuer/expected_audience are deliberately UNSET here so
