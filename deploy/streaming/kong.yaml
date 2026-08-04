@@ -35,13 +35,15 @@
 #   Provider credentials ARE gateway-held (Anthropic + OpenAI); the `model` in the
 #   request body selects which internal upstream handles the call.
 #
-# file-log appears three times, not once, and they are NOT redundant:
-#   ai-front     -> the skyflow entity counts for the request
-#   up-anthropic -> the ai.proxy egress payload, i.e. what the provider actually
-#                   received. This is the audit trail that proves tokens-only.
-#   up-openai    -> the same for the OpenAI leg
-# A single global instance would also log /healthz every 10s and lose the
-# distinction, so this stays explicit.
+# file-log sits on the two FRONT services (ai-front, probe-front) and nowhere
+# else: one record per external request, carrying route, status, the full latency
+# breakdown, upstream_status and the skyflow entity counts. Not global, because
+# that would also log /healthz on every poll.
+#
+# It is deliberately NOT on the internal up-* services. Every external request
+# traverses two routes in the nested-proxy layout, so an instance there logged
+# each request a second time without adding anything the front record does not
+# already have.
 _format_version: "3.0"
 
 services:
@@ -130,6 +132,11 @@ services:
       # Flow log to stdout -> CloudWatch: route, status, latency, and the
       # skyflow entity counts. No request/response bodies -- the gateway's own
       # logs stay PII-free by construction.
+      #
+      # On the FRONT services only. Every external request traverses two routes
+      # in the nested-proxy layout, so an instance on the internal services too
+      # logged each request twice for one line's worth of information: the front
+      # record already carries upstream_status and the full latency breakdown.
       - name: file-log
         config: { path: /dev/stdout }
       - name: skyflow-ai-data-control
@@ -288,6 +295,11 @@ services:
           # Its own salt, so the two instances do not share cache entries.
           cache_tokens_salt: "khZCI80onoxKLsLdrRzRoQ6M9LWnxbGQ"
 
+      # /probe carried no logging, so requests to it left no trace at all --
+      # awkward for the route whose entire purpose is diagnosing this pipeline.
+      - name: file-log
+        config: { path: /dev/stdout }
+
       - name: pre-function
         config:
           access:
@@ -401,11 +413,6 @@ services:
       - name: ip-restriction
         config: { allow: ["127.0.0.1/32"], status: 403,
                   message: "internal route: not externally reachable" }
-      # log_payloads here records the TOKENIZED payloads -- the exact bytes that
-      # egress to the provider and what it answers. Safe to log precisely
-      # because de-identification already happened on the front route.
-      - name: file-log
-        config: { path: /dev/stdout }
       - name: ai-proxy
         config:
           llm_format: anthropic
@@ -436,8 +443,6 @@ services:
       - name: ip-restriction
         config: { allow: ["127.0.0.1/32"], status: 403,
                   message: "internal route: not externally reachable" }
-      - name: file-log
-        config: { path: /dev/stdout }
       - name: ai-proxy
         config:
           llm_format: anthropic
