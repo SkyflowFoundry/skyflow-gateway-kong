@@ -1,4 +1,4 @@
--- kong.plugins.skyflow-deidentify.handler
+-- kong.plugins.skyflow-ai-data-control.handler
 --
 -- Konnect Dedicated Cloud Gateways build: a SINGLE self-contained handler with
 -- all logic inlined (no auth/client/body/mapping sub-modules), so it can be
@@ -50,10 +50,10 @@ local inflate_gzip = ok_gzip and kgzip and kgzip.inflate_gzip or nil
 local kong = kong
 local ngx  = ngx
 
-local SkyflowDeidentify = { PRIORITY = 775, VERSION = "0.3.0" }
+local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.3.0" }
 
 --==========================================================================--
--- Pure helpers (no Kong/ngx deps) — exercised offline via SkyflowDeidentify._test
+-- Pure helpers (no Kong/ngx deps) — exercised offline via SkyflowAIDataControl._test
 --==========================================================================--
 
 -- Parse a JSONPath-lite string into tokens. Supported: `$`, `.key`, `[*]`,
@@ -1646,7 +1646,7 @@ local function run_access(conf, ctx)
   return { ok = true }
 end
 
-function SkyflowDeidentify:access(conf)
+function SkyflowAIDataControl:access(conf)
   if not has_body() then return end
   local ctx = kong.ctx.plugin
   ctx.t0 = ngx.now()
@@ -1899,7 +1899,7 @@ local function reemit_tokenized_stream(ctx)
   return true
 end
 
-function SkyflowDeidentify:response(conf)
+function SkyflowAIDataControl:response(conf)
   if not conf.reidentify.enabled then return end
 
   local strat = conf.reidentify.strategy
@@ -2147,7 +2147,7 @@ function SkyflowDeidentify:response(conf)
   end
 end
 
-function SkyflowDeidentify:log(conf)
+function SkyflowAIDataControl:log(conf)
   if conf.log and conf.log.detections then
     local ctx = kong.ctx.plugin
     kong.log.set_serialize_value("skyflow.entities_by_type", ctx.entities_by_type or {})
@@ -2163,7 +2163,7 @@ function SkyflowDeidentify:log(conf)
 end
 
 -- Exposed for offline unit testing of the pure algorithms (no Kong runtime).
-SkyflowDeidentify._test = {
+SkyflowAIDataControl._test = {
   bearer_token_value = bearer_token_value,
   build_ctx = build_ctx,
   auth_value = auth_value,
@@ -2194,4 +2194,4 @@ SkyflowDeidentify._test = {
   DEFAULT_TOKEN_PREAMBLE = DEFAULT_TOKEN_PREAMBLE,
 }
 
-return SkyflowDeidentify
+return SkyflowAIDataControl

@@ -1,4 +1,4 @@
-# Partner plugin doc submission — `skyflow-deidentify`
+# Partner plugin doc submission — `skyflow-ai-data-control`
 
 > Filled-in submission for Kong's partner plugin doc template
 > (see [`partner-submission.md`](partner-submission.md) for the blank skeleton and
@@ -12,9 +12,9 @@ Format model: [https://developer.konghq.com/plugins/prisma-airs-intercept/](http
 ## Required collateral
 
 - **Logo icon (64×64 PNG/SVG)** — _TODO: Skyflow brand asset to be provided._ Not in repo.
-- **Plugin schema (JSON)** — [`skyflow-deidentify.schema.json`](skyflow-deidentify.schema.json)
+- **Plugin schema (JSON)** — [`skyflow-ai-data-control.schema.json`](skyflow-ai-data-control.schema.json)
   (generated from the plugin's `schema.lua`).
-- **Luarock** — `skyflow-deidentify` (`skyflow-deidentify-0.2.0-1`).
+- **Luarock** — `skyflow-ai-data-control` (`skyflow-ai-data-control-0.2.0-1`).
   Source: `git+https://github.com/SkyflowFoundry/skyflow-kong-poc.git`, tag `v0.2.0`.
   For Konnect, the plugin is uploaded as two self-contained files
   (`schema.lua` + `handler.lua`) rather than a rock.
@@ -23,7 +23,7 @@ Format model: [https://developer.konghq.com/plugins/prisma-airs-intercept/](http
 
 ### Introduction
 
-Use the **Skyflow De-identify** plugin (`skyflow-deidentify`) to put Kong in front of any
+Use the **Skyflow De-identify** plugin (`skyflow-ai-data-control`) to put Kong in front of any
 LLM, MCP server, or API and guarantee that **PII, PHI, secrets, and other regulated data
 are tokenized before they leave your trust boundary** — then transparently restored for
 authorized callers on the way back.
@@ -77,7 +77,7 @@ When you enable this plugin on a route, it acts in two Kong request-lifecycle ph
                    ▼                                           ▼          ▼
             Skyflow Detect                              Skyflow Detect  (no PII)
             /deidentify                                 /reidentify
-            * skyflow-deidentify phases
+            * skyflow-ai-data-control phases
 ```
 
 **Entities it interacts with.** The plugin attaches to Kong Routes and Services and talks
@@ -102,7 +102,7 @@ topology**: two routes, two independent buffered cycles.
   Client "Email Jane Doe at jane@acme.com"
     │
     ▼
-  /ai/chat            skyflow-deidentify only
+  /ai/chat            skyflow-ai-data-control only
     access  : de-identify (PII → tokens) ──▶ Skyflow Detect
     response: re-identify (tokens → PII) ◀── Skyflow Detect
     │  tokens only (loopback to 127.0.0.1:8000/_ai_upstream)   ▲ tokens only
@@ -118,14 +118,14 @@ SSE — so a token split across chunks is never leaked.
 
 ### Installation details
 
-Luarock name: `skyflow-deidentify` (`skyflow-deidentify-0.2.0-1`).
+Luarock name: `skyflow-ai-data-control` (`skyflow-ai-data-control-0.2.0-1`).
 
 **Self-managed Kong (OSS / Enterprise):**
 
 ```bash
-luarocks make        # builds the skyflow-deidentify rock
+luarocks make        # builds the skyflow-ai-data-control rock
 # then enable it on the node:
-export KONG_PLUGINS=bundled,skyflow-deidentify
+export KONG_PLUGINS=bundled,skyflow-ai-data-control
 ```
 
 Dependencies: `lua >= 5.1` and `lua-resty-http >= 0.17` (`resty.http` and `cjson` are
@@ -153,7 +153,7 @@ useful for a strict egress posture.
 
 ```yaml
 plugins:
-  - name: skyflow-deidentify
+  - name: skyflow-ai-data-control
     config:
       vault_id: "{vault_id}"
       cluster_id: "{cluster_id}"
@@ -173,7 +173,7 @@ above, but the plugin restores the original values in the response. `reidentify.
 
 ```yaml
 plugins:
-  - name: skyflow-deidentify
+  - name: skyflow-ai-data-control
     config:
       vault_id: "{vault_id}"
       cluster_id: "{cluster_id}"
@@ -210,5 +210,5 @@ What the config does:
 > reidentify_text` requires `deidentify.token_format = VAULT_TOKEN`; `mapping_only`
 > requires a token format other than `ENTITY_ONLY`; `deadline_ms` must be `>= timeout_ms`;
 > the `generic` profile requires `request_json_paths` or `content_type: text`. See
-> [`skyflow-deidentify.schema.json`](skyflow-deidentify.schema.json) for the full field
+> [`skyflow-ai-data-control.schema.json`](skyflow-ai-data-control.schema.json) for the full field
 > reference.

@@ -30,7 +30,7 @@ services:
       - name: r
         paths: ["/x"]
     plugins:
-      - name: skyflow-deidentify
+      - name: skyflow-ai-data-control
         config:
           vault_id: v
           cluster_id: c
@@ -38,7 +38,7 @@ services:
 $(printf '%s\n' "$creds")
 YAML
   if docker run --rm -v "$PWD:/w" -v "$WORK:/cfg" -w /w \
-       -e KONG_DATABASE=off -e KONG_PLUGINS=bundled,skyflow-deidentify \
+       -e KONG_DATABASE=off -e KONG_PLUGINS=bundled,skyflow-ai-data-control \
        -e KONG_LUA_PACKAGE_PATH='/w/plugin/?.lua;;' \
        --entrypoint kong "$IMAGE" config parse /cfg/kong.yaml >"$WORK/out" 2>&1
   then got=accept; else got=reject; fi

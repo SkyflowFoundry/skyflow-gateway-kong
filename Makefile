@@ -1,7 +1,7 @@
-# Developer ergonomics for the skyflow-deidentify Kong plugin.
+# Developer ergonomics for the skyflow-ai-data-control Kong plugin.
 # See docs/05 (implementation plan) and docs/06 (testing).
 
-PLUGIN := skyflow-deidentify
+PLUGIN := skyflow-ai-data-control
 # Must match `version` in the rockspec, or `make pack` builds a path to a file
 # that does not exist. It said 0.2.0-1 while the rockspec had moved to 0.3.0-1.
 VERSION := 0.3.0-1
@@ -79,10 +79,10 @@ test: lint unit-pure globals auth-methods bundle
 	pongo run
 
 unit:
-	busted --config=.busted spec/skyflow-deidentify
+	busted --config=.busted spec/skyflow-ai-data-control
 
 integration:
-	pongo run -- spec/skyflow-deidentify/02-access_spec.lua spec/skyflow-deidentify/03-response_spec.lua
+	pongo run -- spec/skyflow-ai-data-control/02-access_spec.lua spec/skyflow-ai-data-control/03-response_spec.lua
 
 # There is no compose file at the repo root and scripts/demo.sh does not exist,
 # so this target could never have run. The offline harness lives in

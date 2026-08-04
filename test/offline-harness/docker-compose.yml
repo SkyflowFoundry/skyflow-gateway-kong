@@ -21,7 +21,7 @@ services:
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /kong/kong.yaml
       KONG_ROUTER_FLAVOR: expressions
-      KONG_PLUGINS: bundled,skyflow-deidentify
+      KONG_PLUGINS: bundled,skyflow-ai-data-control
       KONG_LUA_PACKAGE_PATH: /kong-plugins/?.lua;;
       KONG_PROXY_LISTEN: 0.0.0.0:8000
       # Keep agent-sized request bodies in memory (see demo/act2 + konnect-hybrid).

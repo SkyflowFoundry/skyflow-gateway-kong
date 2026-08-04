@@ -1,4 +1,4 @@
--- kong.plugins.skyflow-deidentify.schema
+-- kong.plugins.skyflow-ai-data-control.schema
 --
 -- Konnect Dedicated Cloud Gateways build.
 --
@@ -284,7 +284,7 @@ local reidentify = {
 }
 
 return {
-  name = "skyflow-deidentify",
+  name = "skyflow-ai-data-control",
   fields = {
     -- protocols (inlined; equivalent to typedefs.protocols_http)
     { protocols = {

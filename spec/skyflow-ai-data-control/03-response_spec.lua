@@ -2,7 +2,7 @@
 -- See docs/contributing/testing.md §6.4 / §6.5. Cases are `pending` until Phase 4 (docs/contributing/development.md) lands.
 
 local helpers = require "spec.helpers"
-local PLUGIN_NAME = "skyflow-deidentify"
+local PLUGIN_NAME = "skyflow-ai-data-control"
 
 for _, strategy in helpers.each_strategy() do
   describe(PLUGIN_NAME .. ": response (re-identify) [#" .. strategy .. "]", function()

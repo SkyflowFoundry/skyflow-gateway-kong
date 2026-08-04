@@ -8,14 +8,14 @@ lifecycle see [`plugin-spec.md`](plugin-spec.md).
 
 ```text
 skyflow-kong-poc/
-├── plugin/kong/plugins/skyflow-deidentify/
+├── plugin/kong/plugins/skyflow-ai-data-control/
 │   ├── handler.lua      # ALL logic inlined: auth + Skyflow Detect client +
 │   │                    #   JSONPath-lite body targeting + de-identify + re-identify
 │   ├── schema.lua       # config contract — require-free (Konnect upload constraint)
 │   └── *.rockspec       # self-managed / local installs only
 ├── spec/
 │   ├── offline/pure_algorithms_test.lua   # luajit only — no Kong/Docker (make unit-pure)
-│   └── skyflow-deidentify/                 # busted/Pongo specs (schema, access, response)
+│   └── skyflow-ai-data-control/                 # busted/Pongo specs (schema, access, response)
 ├── deploy/
 │   ├── local-dbless/    # offline harness: db-less Kong + mock Skyflow + gzip mock LLM
 │   └── konnect-hybrid/  # self-managed data plane on Konnect + deck/ configs
@@ -33,7 +33,7 @@ skyflow-kong-poc/
 > self-contained files (see [`plugin-spec.md`](plugin-spec.md) and
 > [`../using/deployment.md`](../using/deployment.md)). The same two files also
 > work on self-managed nodes via the
-> [rockspec](../../plugin/kong/plugins/skyflow-deidentify).
+> [rockspec](../../plugin/kong/plugins/skyflow-ai-data-control).
 
 ## Dependencies
 

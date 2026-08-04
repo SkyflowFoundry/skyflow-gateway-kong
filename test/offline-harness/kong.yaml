@@ -1,9 +1,9 @@
 # Local db-less config. Three flows, all against the mocks:
 #
-#   /vault/chat       baseline (PROVEN): skyflow-deidentify de-id + re-id, upstream
+#   /vault/chat       baseline (PROVEN): skyflow-ai-data-control de-id + re-id, upstream
 #                     = mock-llm directly. No ai-proxy. Sanity check.
 #
-#   /broken/chat      REPRODUCES Kong #14380: skyflow-deidentify (de-id + re-id)
+#   /broken/chat      REPRODUCES Kong #14380: skyflow-ai-data-control (de-id + re-id)
 #                     and ai-proxy on ONE route. ai-proxy transforms the response
 #                     in header_filter while the plugin's :response() phase also
 #                     rewrites the buffered gzip body -> ai-proxy 500s with
@@ -29,7 +29,7 @@ services:
         protocols: ["http", "https"]
         strip_path: true
     plugins:
-      - name: skyflow-deidentify
+      - name: skyflow-ai-data-control
         config: &skyflow_deid_reid
           vault_id: demo-vault
           cluster_id: demo
@@ -57,7 +57,7 @@ services:
           on_skyflow_error: deny
 
   # -- REPRO of the #14380 conflict: ai-proxy + a response-phase re-identify on
-  #    ONE route. skyflow-deidentify does both de-id (access) AND re-id
+  #    ONE route. skyflow-ai-data-control does both de-id (access) AND re-id
   #    (response) here, so its response-phase body rewrite collides with
   #    ai-proxy's header_filter transform over the gzip body. => 500.
   - name: broken
@@ -68,7 +68,7 @@ services:
         protocols: ["http", "https"]
         strip_path: true
     plugins:
-      - name: skyflow-deidentify
+      - name: skyflow-ai-data-control
         config: *skyflow_deid_reid   # de-id + re-id on the SAME route as ai-proxy
       - name: ai-proxy
         config: &ai_proxy_mock
@@ -95,7 +95,7 @@ services:
         protocols: ["http", "https"]
         strip_path: true
     plugins:
-      - name: skyflow-deidentify
+      - name: skyflow-ai-data-control
         config: *skyflow_deid_reid   # identical to the proven /vault/chat plugin
 
   - name: ai-upstream

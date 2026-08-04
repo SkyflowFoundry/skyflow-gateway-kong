@@ -63,7 +63,7 @@ jobs:
           mkdir -p /tmp/mut && cp -r plugin spec /tmp/mut/
           cd /tmp/mut
           sed -i 's/body_json\.decode/cjson.decode/g; s/body_json\.encode/cjson.encode/g' \
-            plugin/kong/plugins/skyflow-deidentify/handler.lua
+            plugin/kong/plugins/skyflow-ai-data-control/handler.lua
           if docker run --rm -v "$PWD:/w" -w /w \
                --entrypoint resty kong/kong-gateway:3.15.0.2 \
                spec/offline/pure_algorithms_test.lua; then

@@ -6,9 +6,9 @@
 -- for `luarocks make` on self-managed nodes and for local Docker testing.
 --
 -- Build: luarocks make
--- Enable in Kong: KONG_PLUGINS=bundled,skyflow-deidentify
+-- Enable in Kong: KONG_PLUGINS=bundled,skyflow-ai-data-control
 
-package = "skyflow-deidentify"
+package = "skyflow-ai-data-control"
 version = "0.3.0-1"
 
 source = {
@@ -42,7 +42,7 @@ dependencies = {
 build = {
   type = "builtin",
   modules = {
-    ["kong.plugins.skyflow-deidentify.handler"] = "kong/plugins/skyflow-deidentify/handler.lua",
-    ["kong.plugins.skyflow-deidentify.schema"]  = "kong/plugins/skyflow-deidentify/schema.lua",
+    ["kong.plugins.skyflow-ai-data-control.handler"] = "kong/plugins/skyflow-ai-data-control/handler.lua",
+    ["kong.plugins.skyflow-ai-data-control.schema"]  = "kong/plugins/skyflow-ai-data-control/schema.lua",
   },
 }

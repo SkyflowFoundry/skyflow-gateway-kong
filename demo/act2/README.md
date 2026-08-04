@@ -6,7 +6,7 @@ OpenAI-compatible endpoint, reasoning over a file full of PHI, while OpenAI neve
 sees a single real value.
 
 ```
-opencode  ──▶  http://localhost:8000/ai/v1   ──▶  Kong (skyflow-deidentify)  ──▶  OpenAI
+opencode  ──▶  http://localhost:8000/ai/v1   ──▶  Kong (skyflow-ai-data-control)  ──▶  OpenAI
   reads         (OpenAI-compatible route)          de-id request / re-id response      sees only [TOKEN]s
 patient_intake.py
 ```
@@ -121,7 +121,7 @@ traffic". All are fixed; each is worth understanding.
 | 4 | Agent reads the wrong path, auto-rejects | opencode's system prompt carries the cwd `/Users/joe/…`; Skyflow tokenizes `joe` as a NAME. The model echoes the token in a tool_call path, and re-id only covered message **content**, not `tool_calls[].function.arguments`. | Handler re-identifies tool_call arguments too. (Alternatives considered: surname-only entities — leaks first names; skip the system prompt — needs role-targeting.) |
 | 5 | `skyflow de-identify failed: status 400` → 502 retry loop (looks like a hang) | Agent turns include messages with **empty** `content: ""` (an assistant turn that only made tool calls). Skyflow Detect 400s on empty text. | Handler skips empty-string spans in both the de-id and re-id loops. |
 
-All five live in `plugin/kong/plugins/skyflow-deidentify/handler.lua`. They are gated
+All five live in `plugin/kong/plugins/skyflow-ai-data-control/handler.lua`. They are gated
 so non-agent traffic (the Act 1 curls, the existing specs) is unaffected. **These
 changes are picked up on the local hybrid DP via `docker exec skyflow-kong-dp kong
 reload` (the plugin dir is mounted). For a Konnect deployment using the *uploaded*

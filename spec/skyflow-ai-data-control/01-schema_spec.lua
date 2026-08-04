@@ -1,8 +1,8 @@
--- Schema validation unit tests for skyflow-deidentify.
--- Run with busted (via Pongo): `pongo run spec/skyflow-deidentify/01-schema_spec.lua`
+-- Schema validation unit tests for skyflow-ai-data-control.
+-- Run with busted (via Pongo): `pongo run spec/skyflow-ai-data-control/01-schema_spec.lua`
 -- Mirrors docs/contributing/testing.md §6.3 and the entity checks in docs/contributing/plugin-spec.md §4.3.7.
 
-local PLUGIN_NAME = "skyflow-deidentify"
+local PLUGIN_NAME = "skyflow-ai-data-control"
 
 local validate
 do

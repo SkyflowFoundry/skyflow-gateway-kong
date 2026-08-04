@@ -40,13 +40,13 @@ We also use:
                    Skyflow Detect                            Skyflow Detect    (no PII)
                    /deidentify                               /reidentify
                                                              or /detokenize
-   * skyflow-deidentify phases
+   * skyflow-ai-data-control phases
 ```
 
 ## 2.2 Module decomposition
 
 ```
-kong.plugins.skyflow-deidentify
+kong.plugins.skyflow-ai-data-control
 ├── handler.lua   Orchestration. Implements the lifecycle phases above. Holds no
 │                 business logic beyond sequencing and PDK I/O.
 ├── schema.lua    Declarative configuration contract (validated by Kong core).
@@ -174,9 +174,9 @@ When `reidentify.enabled = false` (de-identify only — the most common posture)
 ### T1 — Nested proxy with AI Proxy (recommended for LLMs)
 
 ```
-client → [ /ai/chat: skyflow-deidentify (access: de-id) ]
+client → [ /ai/chat: skyflow-ai-data-control (access: de-id) ]
              → (loopback) → [ /_ai_upstream: ai-proxy ] → provider
-client ← [ /ai/chat: skyflow-deidentify (response: re-id) ]
+client ← [ /ai/chat: skyflow-ai-data-control (response: re-id) ]
              ← (loopback) ← [ /_ai_upstream: ai-proxy ] ← provider
 ```
 
@@ -193,7 +193,7 @@ reproduced + verified offline in [`test/offline-harness/`](../../test/offline-ha
 ### T2 — Standalone proxy to any upstream (MCP / generic)
 
 ```
-client → [ skyflow-deidentify ] → Kong Service/Route → upstream (MCP server, REST API)
+client → [ skyflow-ai-data-control ] → Kong Service/Route → upstream (MCP server, REST API)
 ```
 
 No AI Proxy; the plugin is the only AI/privacy plugin on the Route.

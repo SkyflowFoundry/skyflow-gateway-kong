@@ -1,11 +1,11 @@
 # Deployment
 
-How to get `skyflow-deidentify` running on Kong. Pick the path that matches how
+How to get `skyflow-ai-data-control` running on Kong. Pick the path that matches how
 you run Kong, then configure the plugin ([operations.md](operations.md)) and
 validate.
 
 The plugin ships as two files — `schema.lua` and `handler.lua` — under
-[`plugin/kong/plugins/skyflow-deidentify/`](../../plugin/kong/plugins/skyflow-deidentify).
+[`plugin/kong/plugins/skyflow-ai-data-control/`](../../plugin/kong/plugins/skyflow-ai-data-control).
 That's all you upload or mount; there are no databases, migrations, or extra
 modules.
 
@@ -34,7 +34,7 @@ In short: mount the two files into the data plane and add them to `KONG_PLUGINS`
 
 ```bash
 # docker-compose (see test/offline-harness/docker-compose.yml)
-KONG_PLUGINS: bundled,skyflow-deidentify
+KONG_PLUGINS: bundled,skyflow-ai-data-control
 volumes:
   - ./plugin:/kong-plugins:ro
 KONG_LUA_PACKAGE_PATH: /kong-plugins/?.lua;;
@@ -47,7 +47,7 @@ plane:
 
 1. Control plane → **Plugins → Custom Plugins → New**.
 2. Upload `schema.lua` **and** `handler.lua` from
-   [`plugin/kong/plugins/skyflow-deidentify/`](../../plugin/kong/plugins/skyflow-deidentify).
+   [`plugin/kong/plugins/skyflow-ai-data-control/`](../../plugin/kong/plugins/skyflow-ai-data-control).
 3. Konnect validates the schema and distributes the plugin to the cloud data
    planes automatically.
 
@@ -56,7 +56,7 @@ plane:
 
 ## Configure the plugin
 
-Attach `skyflow-deidentify` to a Route/Service with your Skyflow vault details.
+Attach `skyflow-ai-data-control` to a Route/Service with your Skyflow vault details.
 See [operations.md](operations.md) for ready-to-copy decK, Admin API, KIC, and
 Konnect config, including the nested-proxy layout for composing with `ai-proxy`.
 
