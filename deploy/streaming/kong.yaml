@@ -54,10 +54,46 @@ services:
         strip_path: true
         protocols: ["http", "https"]
     plugins:
-      # No client key-auth: the caller's IdP token IS the credential. A junk or
-      # misdirected token is rejected by the plugin's local iss/aud/exp
-      # precheck before any network hop, so anonymous traffic costs nothing.
+      # Gateway authentication. Without it, anyone who knows the hostname can
+      # spend the provider quota -- the plugin's own iss/aud/exp precheck
+      # protects the VAULT, not the upstream model call.
       #
+      # Deliberately the same Entra tenant the Skyflow plugin exchanges tokens
+      # with, so one login covers both concerns: the gateway authenticates the
+      # caller, and the plugin then uses that same token as the subject of its
+      # RFC 8693 exchange. No client_id/client_secret is needed -- bearer
+      # validation only, against the issuer's JWKS via discovery.
+      - name: openid-connect
+        config: &oidc_common
+          issuer: "https://login.microsoftonline.com/5b772553-7aad-487a-91a9-3b93382ac28b/v2.0"
+          # Bearer only. The default list also accepts session, authorization_code
+          # and password flows, which would let a browser redirect stand in for a
+          # token on a route that only ever serves API clients.
+          auth_methods: ["bearer"]
+          audience_required: ["9ff1c091-fc74-4dae-929b-9cd58382b621"]
+          # MUST be true, and this is the one line to get right. The plugin
+          # defaults ssl_verify to FALSE, while Konnect data planes enable
+          # tls_certificate_verify globally. That mismatch makes the DP reject the
+          # ENTIRE config and silently keep serving its last-good copy -- so the
+          # route looks unauthenticated and nothing in the control plane says why.
+          # The tell is a node config_hash that never moves.
+          ssl_verify: true
+          # No consumer entities are mapped, so requiring one would 403 every
+          # otherwise-valid token.
+          consumer_optional: true
+          # Leave the caller's Authorization header intact: the Skyflow plugin
+          # needs that same token as the subject of its STS exchange. Stripping it
+          # would authenticate the gateway and break de-identification.
+          hide_credentials: false
+          scopes: ["openid"]
+          # deck refuses to sync without this set explicitly, because a
+          # regenerated salt would invalidate every cached token on each sync.
+          # It is a cache-key salt, not a credential -- it never leaves the data
+          # plane and grants nothing on its own -- but each instance needs its
+          # OWN value so the two do not share cache entries. Generate per
+          # deployment: `openssl rand -base64 24 | tr -d /+= | head -c 32`.
+          cache_tokens_salt: "vHf0hwqAPsgEWKLtsTFa9Yqa2itwBec6"
+
       # Provider selected from the request body's `model` -- the standard
       # AI-gateway pattern. (Kong's free ai-proxy pins one provider per plugin
       # instance and ai-proxy-advanced is enterprise-only, so this bundled
@@ -243,6 +279,15 @@ services:
         strip_path: true
         protocols: ["http", "https"]
     plugins:
+      # Same gateway auth as /ai -- see the anchor on ai-front. The probe route is
+      # a diagnostic, not a bypass, so leaving it open would be an unauthenticated
+      # path to the same upstream and the same provider quota.
+      - name: openid-connect
+        config:
+          <<: *oidc_common
+          # Its own salt, so the two instances do not share cache entries.
+          cache_tokens_salt: "khZCI80onoxKLsLdrRzRoQ6M9LWnxbGQ"
+
       - name: pre-function
         config:
           access:
