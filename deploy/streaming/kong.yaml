@@ -102,6 +102,19 @@ services:
           cluster_id: ebfc9bee4242
           account_id: j58448d299cf4e42ac433948d9c70d94
           credentials:
+            # `method` is the ONLY thing that decides which of these is used.
+            # All three are populated so the selector can be demonstrated by
+            # changing one field in Gateway Manager -- there is no fallback and no
+            # precedence between them (see auth_value in handler.lua).
+            method: sts
+            # NEVER a literal secret in this file. Kong's env vault resolves these
+            # on the data plane, which gets them from AWS Secrets Manager via
+            # App Runner. The repo holds a reference; the value lives in one place.
+            # Requires KONG_VAULTS=bundled on the data plane.
+            bearer_token:
+              api_key: "{vault://env/SKYFLOW_BEARER_TOKEN}"
+            jwt_credential:
+              service_account_json: "{vault://env/SKYFLOW_SA_JSON}"
             sts:
               service_account_id: mab1f43f916b4ba082b500e1ab5be59f
               token_header: authorization
