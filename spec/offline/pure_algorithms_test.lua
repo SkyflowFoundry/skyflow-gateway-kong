@@ -103,6 +103,18 @@ local g = T.effective_paths({ profile = "generic", request_json_paths = { "$.x" 
 eq(g[1], "$.x", "generic uses override")
 eq(#g, 1, "generic override count")
 
+-- 5b. The `generic` profile has NO built-in paths on either leg, so it is the one
+-- profile that can be configured to do nothing while reporting success. Both legs
+-- must be guarded, and the RESPONSE leg was not: zero response spans is
+-- indistinguishable from "the response had no text", so it took the benign branch
+-- and handed the client vault tokens forever, silently.
+eq(#T.effective_paths({ profile = "generic", request_json_paths = { "$.x" },
+                        response_json_paths = {} }, "response"), 0,
+   "generic has no default response paths -- which is why the guard is needed")
+eq(#T.effective_paths({ profile = "anthropic", request_json_paths = {},
+                        response_json_paths = {} }, "response"), 1,
+   "a named profile does have one, so the guard must not fire for it")
+
 -- 6. sse_chunk: a content response becomes one chunk carrying the whole answer
 local c1 = T.sse_chunk({ id = "x", created = 7, model = "m",
   choices = { { message = { role = "assistant", content = "Hi Jane" }, finish_reason = "stop" } } })
