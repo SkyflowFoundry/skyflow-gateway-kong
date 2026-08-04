@@ -677,7 +677,23 @@ end
 -- shape of the config rather than by a check.
 -- Takes no configuration on purpose. Every claim here is derived by the gateway
 -- at request time, which is precisely why it can be trusted: the caller cannot
--- forge any of it. An earlier version let operators map request HEADERS into
+-- forge any of it.
+--
+-- The claim set is meant to represent the CONTEXT OF THE REQUEST honestly, which
+-- is deliberately two kinds of fact:
+--   who/where  kong_consumer (only when a Kong auth plugin verified the client),
+--              kong_client_ip, kong_request_id
+--   what it hit kong_route, kong_service
+-- Both are legitimate policy inputs -- "this caller may detokenize" and "requests
+-- through this route may detokenize" are both real rules -- and neither is
+-- caller-assertable. What is EXCLUDED is any value the caller simply claimed
+-- about itself in a header.
+--
+-- Verified against the live Skyflow token endpoint: a `ctx` claim in the
+-- service-account assertion is propagated verbatim into the minted bearer, so
+-- vault policies can key on $ctx.kong_route / $ctx.kong_service /
+-- $ctx.kong_consumer / $ctx.kong_client_ip. Without the claim, the bearer carries
+-- no ctx at all. An earlier version let operators map request HEADERS into
 -- claims, which inverted that -- it fed caller-controlled values into the claim
 -- set the vault uses for policy decisions, so anyone who could reach the gateway
 -- could assert their own tenant or purpose.
@@ -690,6 +706,14 @@ local function build_ctx()
   local service = kong.router.get_service()
   if service then ctx.kong_service = service.name or service.id end
   ctx.kong_client_ip = kong.client.get_forwarded_ip()
+  -- Correlation id. Skyflow's audit trail records that a field was detokenized;
+  -- this is what lets you tie that entry back to the specific gateway request
+  -- that caused it, which is the difference between "something detokenized this"
+  -- and "this request, from this caller, at this time, did".
+  if kong.request and kong.request.get_header then
+    ctx.kong_request_id = kong.request.get_header("x-kong-request-id")
+                          or (ngx.var and ngx.var.request_id)
+  end
   return next(ctx) and ctx or nil
 end
 
