@@ -1,6 +1,6 @@
 # Kong data plane that receives the plugin CODE from Konnect, not from this image.
 #
-#   docker build -f deploy/konnect/Dockerfile.streaming -t <tag> .
+#   docker build -f deploy/streaming/Dockerfile -t <tag> .
 #
 # The plugin is NOT baked in. schema.lua AND handler.lua are uploaded once to the
 # control plane and streamed to every data plane over the cluster connection:
@@ -43,10 +43,10 @@
 # comment mentioning them fails), and no DAOs, migrations or extra modules --
 # hence the single self-contained handler.
 #
-# Trade-off vs deploy/konnect/Dockerfile: that one bakes the plugin in and needs
-# no sandbox relaxation, so it stays the conservative default. Prefer this file
-# when the image is not yours to build, or when you want plugin rollout decoupled
-# from image rollout.
+# This is the only supported data-plane build. An earlier variant baked the
+# plugin into the image; it was removed, because an image containing our Lua is
+# an image the customer has to rebuild to take a plugin update.
+
 FROM kong/kong-gateway:3.15.0.2
 
 ENV KONG_ROLE=data_plane \
@@ -65,7 +65,7 @@ ENV KONG_ROLE=data_plane \
     KONG_PROXY_ACCESS_LOG=/dev/stdout \
     KONG_LUA_SSL_TRUSTED_CERTIFICATE=system
 
-# Sized to Claude Desktop's own 32MB ceiling; see deploy/konnect/Dockerfile.
+# Sized to Claude Desktop's own 32MB ceiling; see deploy/streaming/Dockerfile.
 ENV KONG_NGINX_HTTP_CLIENT_BODY_BUFFER_SIZE=32m \
     KONG_NGINX_HTTP_CLIENT_MAX_BODY_SIZE=32m
 

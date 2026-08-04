@@ -159,7 +159,8 @@ plugins:
       cluster_id: "{cluster_id}"
       env: PROD
       credentials:
-        api_key: "{vault://env/SKYFLOW_API_KEY}"
+        sts:
+          service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
       profile: openai
       deidentify:
         entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]
@@ -178,7 +179,8 @@ plugins:
       vault_id: "{vault_id}"
       cluster_id: "{cluster_id}"
       credentials:
-        api_key: "{vault://env/SKYFLOW_API_KEY}"
+        sts:
+          service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
       profile: openai
       deidentify:
         entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]

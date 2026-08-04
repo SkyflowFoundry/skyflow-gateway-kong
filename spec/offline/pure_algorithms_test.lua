@@ -263,12 +263,20 @@ eq(akind2, "identity", "audience mismatch is the caller's problem")
 eq(amsg, "caller token audience mismatch", "audience mismatch message")
 
 -- Entra sends aud as a list in some configurations; membership must count
-eq(type(pc('{"iss":"' .. ISS .. '","aud":["x","' .. AUD .. '"],"exp":100}')), "table",
+eq(type(pc('{"iss":"' .. ISS .. '","aud":["x","' .. AUD .. '"],"exp":100,"sub":"u1"}')), "table",
    "audience inside a list is accepted")
 
 -- an unconfigured check must not behave as "must be empty"
-eq(type(T.precheck_caller_token(jwt('{"iss":"https://anything/","exp":100}'), {})), "table",
+eq(type(T.precheck_caller_token(jwt('{"iss":"https://anything/","exp":100,"sub":"u1"}'), {})), "table",
    "unconfigured issuer/audience checks are skipped")
+
+-- A token with no subject is refused: the STS bearer cache is keyed on the
+-- subject, so a placeholder default collapsed every subject-less caller into one
+-- slot and handed caller B the bearer minted from caller A's identity.
+local _, sub_err, sub_kind = T.precheck_caller_token(jwt('{"iss":"x","exp":100}'), {})
+eq(sub_kind, "identity", "a subject-less token is an identity error")
+eq(tostring(sub_err):find("no subject", 1, true) ~= nil, true,
+   "and the message says why")
 
 -- 13. inject_token_preamble: every system-prompt shape the profiles use.
 -- The model must be told what [NAME_a1b2c3] IS, or it editorialises about

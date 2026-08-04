@@ -279,7 +279,7 @@ Proves the whole de-id → `ai-proxy` → LLM → re-id round-trip offline.
 make e2e     # brings the stack up, asserts both directions, tears it down
 ```
 
-Or drive it by hand. The plugin is STS-only, so every request needs a caller
+Or drive it by hand. The default auth method is `sts`, so every request needs a caller
 identity token; the harness leaves `expected_issuer`/`expected_audience` unset so
 an unsigned fixture JWT is enough — still no accounts and no keys:
 

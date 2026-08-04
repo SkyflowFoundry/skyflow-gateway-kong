@@ -158,12 +158,12 @@ local credentials = {
     { bearer_token = {
         type = "record",
         fields = {
+          -- The only field. Skyflow accepts exactly one shape --
+          -- `Authorization: Bearer <key>` -- so header_name and scheme were
+          -- removed: header_name was never read by the request builder at all, so
+          -- it silently lied about being honoured, and scheme's only real value
+          -- was the default.
           { api_key = { type = "string", referenceable = true } },
-          -- Skyflow expects `Authorization: Bearer <key>`; overridable for
-          -- deployments fronting a proxy that renames the header.
-          { header_name = { type = "string", default = "authorization" } },
-          { scheme = { type = "string", one_of = { "Bearer", "ApiKey", "none" },
-                       default = "Bearer" } },
         },
     } },
   },
@@ -252,7 +252,11 @@ local deidentify = {
     { allow_regex    = { type = "array", elements = { type = "string" }, default = {} } },
     { restrict_regex = { type = "array", elements = { type = "string" }, default = {} } },
     { shift_dates = shift_dates },
-    { batch_mode = { type = "string", one_of = { "per_span", "joined" }, default = "per_span" } },
+    -- batch_mode is GONE. It offered per_span | joined, but `joined` was never
+    -- implemented: the handler logged "not implemented; using per_span" and did
+    -- per_span anyway. A setting that silently does something other than what it
+    -- says is worse than no setting -- an operator could believe they had cut
+    -- their Detect call volume when nothing changed.
     -- Explain the placeholders to the model. On by default: a model that has not
     -- been told what [NAME_a1b2c3] is tends to editorialise about redaction
     -- ("all names have been removed, so I cannot provide those details") instead
