@@ -38,7 +38,7 @@ kong/plugins/skyflow-ai-data-control/
   schema.lua     -- configuration contract (this doc §4.3)
   auth.lua       -- bearer-token manager (skyflow-integration §3.2)
   client.lua     -- Detect REST client (skyflow-integration §3.3–3.5, §3.8)
-  body.lua       -- payload profiles + span extract/replace (this doc §4.5)
+  body.lua       -- wire-format detection + span extract/replace (this doc §4.5)
   mapping.lua    -- request-scoped token map (skyflow-integration §3.6)
   *.rockspec     -- packaging (development)
 ```
@@ -69,9 +69,11 @@ are never stored in plaintext in the DB and never appear in `GET /plugins`.
 
 | Field | Type | Default | Description |
 | ----- | ---- | ------- | ----------- |
-| `profile` | string (enum) | `openai` | `openai`\|`anthropic`\|`mcp`\|`generic`. Built-in span selectors (§4.5). |
-| `request_json_paths` | array<string> | profile default | JSONPaths whose **string** values are de-identified. Overrides/extends the profile. |
-| `response_json_paths` | array<string> | profile default | JSONPaths re-identified on the response. |
+| `request_json_paths` | array<string> | `[]` | JSONPaths whose **string** values are de-identified. **Merges** with the detected format's built-in selectors (§4.5). |
+| `response_json_paths` | array<string> | `[]` | JSONPaths re-identified on the response. Merges the same way. |
+
+The wire format is detected per request from the body shape, so there is no field
+to select it — see §4.5.
 | `content_type` | string (enum) | `auto` | `auto`\|`json`\|`text`. `auto` sniffs `Content-Type`. |
 | `max_body_size` | integer (bytes) | `1048576` | Bodies larger than this hit `on_parse_error`. |
 | `max_spans` | integer | `64` | Cap on text spans per request. |
@@ -129,7 +131,9 @@ are never stored in plaintext in the DB and never appear in `GET /plugins`.
 - `reidentify.streaming = reassemble` is gated behind a build flag and rejected
   unless explicitly enabled (experimental).
 - `deadline_ms ≥ timeout_ms`.
-- `profile = generic` ⇒ `request_json_paths` (or `content_type = text`) required.
+- An **unrecognised body shape** ⇒ `request_json_paths` (or `content_type = text`)
+  required. Enforced in the handler, not the schema: the shape is not knowable at
+  config time. Fails closed with a 500 rather than scanning nothing.
 
 ## 4.4 Handler lifecycle (`handler.lua`)
 
@@ -189,14 +193,41 @@ configured posture and is logged, never crashing the worker.
 
 ## 4.5 Payload model (`body.lua`)
 
-A **profile** maps a payload shape to the spans that carry user text.
+A **wire format** maps a payload shape to the spans that carry user text. The
+format is **detected from the body**, not configured.
 
-| Profile | Request span selectors (defaults) | Response span selectors (defaults) |
-| ------- | --------------------------------- | ---------------------------------- |
-| `openai` | `$.messages[*].content` (string or `content[*].text` for array form), `$.input`, `$.prompt` | `$.choices[*].message.content`, `$.choices[*].text` |
-| `anthropic` | `$.messages[*].content[*].text`, `$.system` | `$.content[*].text` |
+| Format | Request span selectors (defaults) | Response span selectors (defaults) |
+| ------ | --------------------------------- | ---------------------------------- |
+| `openai` | `$.messages[*].content` (string or `content[*].text` for array form), `$.input`, `$.prompt`, `$.user`, tool-call arguments | `$.choices[*].message.content`, `$.choices[*].text` |
+| `anthropic` | `$.system` (+ `$.system[*].text`), `$.messages[*].content[*].text`, tool_result content, `$.metadata.user_id` | `$.content[*].text` |
 | `mcp` | `$.params.arguments.*` (string leaves), `$.params.messages[*].content` | `$.result.content[*].text`, `$.result.*` (string leaves) |
-| `generic` | `config.request_json_paths` (required) or whole body as text | `config.response_json_paths` or whole body |
+| *(unrecognised)* | `config.request_json_paths` (**required**) or whole body as text | `config.response_json_paths` or whole body |
+
+### Why the format is detected rather than configured
+
+The OpenAI and Anthropic request shapes **overlap** at `$.messages[*].content`, so
+a hand-set format is a silent failure waiting to happen: on an Anthropic body the
+OpenAI selectors still match the user's typed message, so nothing errors and
+nothing looks broken while the system prompt, every `tool_result` and the end-user
+identifier go to the provider in clear text — 1 of 4 sensitive spans scanned on a
+representative Claude Desktop request. Detection removes that failure mode
+entirely. Discriminators, most to least specific:
+
+1. `jsonrpc` / `method`+`params` ⇒ `mcp` (mandatory in the JSON-RPC spec).
+2. Format-exclusive keys — `system`/`anthropic_version` ⇒ `anthropic`;
+   `frequency_penalty`, `logit_bias`, `response_format`, `max_completion_tokens`,
+   `input`, `prompt` ⇒ `openai`.
+3. Content-block types — `tool_result`/`tool_use`/`image` ⇒ `anthropic`;
+   `image_url`, or a `system`/`tool` **role** ⇒ `openai`.
+4. Model-name namespace — `claude*` vs `gpt*`/`o<n>`/`text-`/`davinci`.
+5. Still undecidable ⇒ **both**, and the two path sets are unioned. Over-scanning
+   is free (a non-matching path yields no spans); under-scanning is a leak.
+
+The one place ambiguity is *not* resolved by union is preamble injection, since an
+OpenAI `role: "system"` message is **illegal** in the Anthropic API (hard 400)
+while a top-level `system` string is valid Anthropic and merely ignored by OpenAI.
+Ambiguity therefore takes the Anthropic shape: worst case is a preamble the model
+never reads, not a request the provider refuses.
 
 Implementation notes:
 
@@ -206,7 +237,7 @@ Implementation notes:
 - `extract` returns spans with their location so `replace` is exact and
   order-independent; non-string / empty leaves are skipped.
 - For `content_type = text`, the whole body is one span.
-- Malformed JSON under a JSON profile → `on_parse_error` posture.
+- Malformed JSON in JSON mode → `on_parse_error` posture.
 
 ## 4.6 PDK surface used
 
@@ -240,4 +271,5 @@ Implementation notes:
 - On the response, Kong runs `response`/body handlers in reverse, so
   re-identify naturally runs after AI Proxy has produced the body.
 - The plugin is **transport-aware but provider-agnostic**: it edits the JSON
-  body shape (via profile), and AI Proxy handles provider routing/auth/format.
+  body shape (via the detected wire format), and AI Proxy handles provider
+  routing/auth/format.

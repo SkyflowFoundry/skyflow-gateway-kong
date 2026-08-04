@@ -114,13 +114,15 @@ describe(PLUGIN_NAME .. ": schema", function()
     assert.is_falsy(validate(c))
   end)
 
-  it("requires paths/text for the generic profile", function()
+  -- There is no `profile` field to validate: the wire format is detected per
+  -- request from the body shape. The rule this case used to cover ("an
+  -- unrecognised shape needs request_json_paths or content_type=text") moved
+  -- into handler.lua, because the shape is not knowable at config time. Its
+  -- replacement lives in spec/offline/pure_algorithms_test.lua section 24.
+  it("rejects an unknown field where `profile` used to be", function()
     local c = base()
-    c.profile = "generic"      -- no request_json_paths, content_type=auto
+    c.profile = "openai"
     assert.is_falsy(validate(c))
-
-    c.content_type = "text"     -- text whole-body is acceptable
-    assert.is_truthy(validate(c))
   end)
 
   it("accepts referenceable secret credentials (vault://)", function()

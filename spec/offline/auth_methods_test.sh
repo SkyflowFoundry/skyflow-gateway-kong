@@ -34,7 +34,6 @@ services:
         config:
           vault_id: v
           cluster_id: c
-          profile: anthropic
 $(printf '%s\n' "$creds")
 YAML
   if docker run --rm -v "$PWD:/w" -v "$WORK:/cfg" -w /w \

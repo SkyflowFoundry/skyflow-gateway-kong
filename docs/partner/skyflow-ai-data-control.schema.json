@@ -47,24 +47,13 @@
           "maximum": 3600,
           "description": "Refresh the cached Skyflow bearer token this many seconds before expiry."
         },
-        "profile": {
-          "type": "string",
-          "default": "openai",
-          "enum": [
-            "openai",
-            "anthropic",
-            "mcp",
-            "generic"
-          ],
-          "description": "Built-in payload template selecting which JSON fields carry user text. 'generic' requires request_json_paths or content_type=text."
-        },
         "request_json_paths": {
           "type": "array",
           "items": {
             "type": "string"
           },
           "default": [],
-          "description": "JSONPath-lite selectors ($, .key, [*], [n], *) for request text spans to de-identify. Overrides/augments the profile."
+          "description": "JSONPath-lite selectors ($, .key, [*], [n], *) for additional request text spans to de-identify. MERGES with the built-in selectors for the wire format detected from the request body (OpenAI / Anthropic / MCP). Required for a body whose shape is not recognised."
         },
         "response_json_paths": {
           "type": "array",
@@ -72,7 +61,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "JSONPath-lite selectors for response text spans to re-identify. Overrides/augments the profile."
+          "description": "JSONPath-lite selectors for additional response text spans to re-identify. MERGES with the built-in selectors for the detected wire format."
         },
         "content_type": {
           "type": "string",

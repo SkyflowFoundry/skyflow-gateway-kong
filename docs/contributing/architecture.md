@@ -57,9 +57,10 @@ kong.plugins.skyflow-ai-data-control
 │                 keepalive pool. One function per operation:
 │                 deidentify_text(), reidentify_text(), detokenize().
 │                 Handles timeouts, retries (idempotent ops), and error mapping.
-├── body.lua      Payload model. Given a profile (openai/anthropic/mcp/generic)
-│                 + JSONPath overrides, extracts the list of "text spans" to
-│                 de-identify and writes processed text back into the same spans.
+├── body.lua      Payload model. Detects the wire format (openai/anthropic/mcp)
+│                 from the body shape, then -- with any JSONPath additions merged
+│                 in -- extracts the list of "text spans" to de-identify and
+│                 writes processed text back into the same spans.
 └── mapping.lua   Request-scoped store of {token → original_value, entity} built
                   during access, consumed during response. Lives only in
                   kong.ctx.plugin for the life of one request.
@@ -164,7 +165,8 @@ When `reidentify.enabled = false` (de-identify only — the most common posture)
 | ------- | ----------------------------- | ----- |
 | Skyflow timeout / 5xx on **de-identify** | `deny` (default): `kong.response.exit(502, ...)`; `allow`: forward original body | Default never leaks raw PII. Emits metric `skyflow_deidentify_error`. |
 | Skyflow auth failure (401/403) | Always `deny` + log; attempt one token refresh+retry first | A bad credential must not silently fall through. |
-| Body not parseable for the profile | `skip` (forward unchanged) or `deny`, per `on_parse_error` | A non-JSON body to the `openai` profile is a misconfiguration signal. |
+| Body not parseable as JSON | `skip` (forward unchanged) or `deny`, per `on_parse_error` | A non-JSON body on a route configured for JSON is a misconfiguration signal. |
+| Body parses but the wire format is unrecognised | `deny` (500) unless `request_json_paths` is set | Scanning nothing while reporting success is the one failure this plugin must never have. |
 | Skyflow error on **re-identify** | Return the **tokenized** response (never 5xx the user over re-ID), log, metric | The upstream succeeded; degrade to tokens rather than failing the call. Configurable via `reidentify.on_error`. |
 | Request body exceeds `max_body_size` | `deny` or `skip` per config | Avoid unbounded memory; large bodies handled per [`operations`](../using/operations.md). |
 | Plugin internal error | `pcall`-guarded; same posture as `on_skyflow_error` | Never crash the worker; structured error log. |

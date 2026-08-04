@@ -1,22 +1,16 @@
 # Skyflow AI Data Control for Kong Gateway
 
-**Runtime data control for agents and models.** Put Kong in front of any LLM, MCP
-server, or API and sensitive data is inspected, de-identified, and governed
-*before* any agent or model sees it — then re-identified only for callers your
-vault policies authorize.
+**Runtime data control for agents and models — added to a Kong gateway you already
+run, without touching its image.**
 
-De-identification is the mechanism, not the product. What the
-`skyflow-ai-data-control` plugin actually enforces at runtime:
+Set three environment variables, upload two Lua files from Gateway Manager, attach
+the plugin to your AI route. Sensitive values are then replaced with vault tokens
+before a prompt leaves your network, and restored on the way back, so the model
+provider only ever sees tokens.
 
-| | |
-| --- | --- |
-| **Runtime sensitive-data protection** | PII/PHI/PCI is replaced with **deterministic tokens that preserve referential integrity**, so models and agents can still compare, join and reason over values they are never allowed to read. |
-| **Identity-aware authorization** | The bearer that reaches Skyflow carries a caller identity, so vault policy — not the gateway — decides whether a value is returned in the clear, masked, or withheld. Three auth methods with genuinely different strength; see [Authentication](#authentication). |
-| **Agent tool containment** | Tool inputs stay tokenized by default, so files an agent writes and commands it runs carry vault tokens. Real values materialize only on authorized paths. |
-| **End-to-end auditability** | Every de-identify and re-identify call is attributable in Skyflow's own audit trail, at field level, to the identity that caused it. |
-
-It composes with **Kong AI Gateway (`ai-proxy`)**, so the model provider only ever
-sees tokens.
+Both reference gateways run stock `kong/kong-gateway:3.15.0.2` from Docker Hub. The
+plugin arrives over the cluster connection at runtime — it is never in the image.
+See [`deploy/streaming/data-plane-env.md`](deploy/streaming/data-plane-env.md).
 
 ```mermaid
 flowchart LR
@@ -41,14 +35,9 @@ flowchart LR
 ```
 
 > **Status: working proof-of-concept.** Verified end-to-end against a live Skyflow
-> vault and real Anthropic and OpenAI traffic, with Kong `ai-proxy` in the path:
-> de-identify on the request leg, re-identify on the response leg (both
-> `mapping_only` and vault-backed `reidentify_text`), Anthropic-native streaming,
-> tool calls, and binary attachments. Ships as the two self-contained files a
-> Konnect **streamed custom plugin** requires —
-> [`schema.lua`](plugin/kong/plugins/skyflow-ai-data-control/schema.lua) and
-> [`handler.lua`](plugin/kong/plugins/skyflow-ai-data-control/handler.lua) — so the
-> plugin is never baked into a data-plane image. See the [roadmap](#roadmap).
+> vault with real Anthropic and OpenAI traffic and `ai-proxy` in the path: both
+> legs, Anthropic-native streaming, tool calls, binary attachments, and all three
+> auth methods. See the [roadmap](#roadmap).
 
 ---
 
@@ -79,7 +68,7 @@ make e2e
 
 1. **Set three data-plane variables and restart.** The only step outside Gateway
    Manager, and the only one needing a restart. Apply them wherever you manage
-   the container's environment — Helm values, an ECS task definition, App Runner.
+   the container's environment — Helm values, an ECS task definition, `docker run -e`.
 
    ```bash
    KONG_CUSTOM_PLUGIN_STREAMING_ENABLED=on   # defaults OFF; without it you get a P309
@@ -100,8 +89,9 @@ make e2e
    `/v2/control-planes/{cp}/core-entities/custom-plugins`).
 
 4. **Attach it** to the route carrying model traffic and fill in the form: vault
-   id, cluster id, account id, `profile: anthropic` or `openai`, and a
-   `credentials.sts.service_account_id`. Everything else has a safe default.
+   id, cluster id, account id, and a `credentials.sts.service_account_id`.
+   Everything else has a safe default. The wire format (OpenAI / Anthropic / MCP)
+   is detected per request from the body, so the same config serves all three.
 
 Then confirm it is really in the path — an unauthenticated request must be
 refused, because there is no caller identity to exchange:
@@ -122,35 +112,18 @@ curl -s -X POST https://<your-gateway>/ai/v1/messages \
 
 ## What it does
 
-- **Control data at runtime, on the way in** — detects and tokenizes PII/PHI/secrets in the
-  request body (chat prompts, tool arguments, arbitrary JSON) before Kong
-  proxies upstream. The LLM/tool receives only tokens.
-- **Context-aware re-identification on the way out** — restores the original values in the response
-  for authorized callers, either from a request-scoped map (`mapping_only`, no
-  extra call) or vault-authoritatively via Skyflow (`reidentify_text`).
-- **Works with Kong AI Gateway** — composes with `ai-proxy` (OpenAI, Anthropic,
-  and other providers) via a nested-proxy pattern (see [Architecture](#architecture)).
-- **Vault-backed, reversible tokenization** — values become tokens that can be
-  detokenized later under Skyflow's fine-grained governance, not one-way
-  placeholders. Backed by 300+ entity detectors, transformations (e.g.
-  date-shifting), and multiple token formats.
-- **Identity-aware policy, enforced by the vault** — the bearer sent to Skyflow
-  carries who is asking, so vault policies grant, mask or withhold
-  re-identification per caller (`$ctx.<attr>`) rather than the gateway deciding.
-  Under `sts` that identity is the caller's own IdP-signed token; under
-  `jwt_credential` the gateway mints an assertion and stamps a `ctx` claim it
-  derives itself from route, service, consumer and client IP — no configuration,
-  and nothing the caller can forge. See [Authentication](#authentication).
-- **Agent tool containment** — real agent traffic (Claude Code verified live)
-  works end-to-end: Anthropic-native streaming, tool calls, tool results. Tool
-  inputs stay **tokenized by default** (`reidentify.tool_inputs`), so files an
-  agent writes and searches it runs carry vault tokens, never raw PII — real
-  values only materialize at the gateway on authorized paths.
-- **Fail-closed by default** — if Skyflow is unreachable or a response can't be
-  re-identified, the configured posture (`deny`) blocks rather than leaks. Also
-  supports `dry_run` (log detections, don't alter traffic) and body/span limits.
-- **Konnect-deployable** — ships as the two-file, `require`-free build that
-  Konnect Dedicated Cloud Gateways and self-managed/hybrid data planes accept.
+- **De-identifies on the way in** — PII/PHI/secrets in the request body become
+  **deterministic vault tokens**, so the model can still compare, group and reason
+  over values it is never allowed to read.
+- **Re-identifies on the way out**, governed by Skyflow vault policy rather than by
+  the gateway — so *who is asking* decides what comes back in the clear.
+- **Contains agent tools** — tool inputs stay tokenized by default, so files an
+  agent writes and commands it runs carry tokens, not raw PII.
+- **Fails closed** — if Skyflow is unreachable or a body cannot be parsed, the
+  request is denied rather than forwarded in the clear.
+
+Composes with **Kong AI Gateway (`ai-proxy`)** via a nested-proxy pattern; see
+[Architecture](#architecture) for why two routes are required.
 
 ## Authentication
 

@@ -32,7 +32,6 @@ for _, strategy in helpers.each_strategy() do
           cluster_id = "mock",
           skyflow_base_url_override = MOCK_SKYFLOW_URL,  -- point client at the mock
           credentials = { api_key = "sky-test" },
-          profile = "openai",
           deidentify = { entities = { "NAME", "EMAIL_ADDRESS" }, token_format = "VAULT_TOKEN" },
           on_skyflow_error = "deny",
         },

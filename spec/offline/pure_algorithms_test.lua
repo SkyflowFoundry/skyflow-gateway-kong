@@ -41,6 +41,16 @@ _G.ngx = { now = function() return 0 end }
 
 local M = dofile("plugin/kong/plugins/skyflow-ai-data-control/handler.lua")
 local T = M._test
+
+-- `profile` was removed from the config: the wire format is detected from the body.
+-- These cases were written against the old field, and what they assert (which paths
+-- a given format contributes) is unchanged, so this shim maps the old name onto the
+-- new format-list argument. `generic` becomes the empty list -- "no shape recognised".
+local function EP(conf, phase)
+  local fmts = {}
+  if conf.profile and conf.profile ~= "generic" then fmts = { conf.profile } end
+  return T.effective_paths(conf, phase, fmts)
+end
 local fails = 0
 local function eq(a, b, msg) if a ~= b then fails = fails + 1; print("FAIL: "..msg.." got="..tostring(a)) else print("ok: "..msg) end end
 
@@ -56,7 +66,7 @@ local doc = { messages = {
     { role = "user", content = { { type = "text", text = "card 4111" } } },
   }, prompt = "hi" }
 local conf = { profile = "openai", request_json_paths = {}, response_json_paths = {} }
-local paths = T.effective_paths(conf, "request")
+local paths = EP(conf, "request")
 local spans = T.collect_spans(doc, paths)
 eq(#spans, 3, "collect_spans found 3 string leaves")
 -- replace and confirm mutation
@@ -76,7 +86,7 @@ local adoc = { messages = {
   { role = "user", content = { { type = "tool_result", tool_use_id = "t2", content = "plain string result" } } },
 } }
 local aconf = { profile = "anthropic", request_json_paths = {}, response_json_paths = {} }
-local aspans = T.collect_spans(adoc, T.effective_paths(aconf, "request"))
+local aspans = T.collect_spans(adoc, EP(aconf, "request"))
 local found = {}
 for _, s in ipairs(aspans) do found[s.text] = true end
 eq(found["name: David Okafor"], true, "anthropic profile reaches tool_result text blocks")
@@ -98,8 +108,9 @@ local fn = function(e) return treatment[e] or "plain_text" end
 local out = T.reidentify_string("Hi [NAME_a], SSN [SSN_b], card [CC_c].", by_token, fn)
 eq(out, "Hi Jane, SSN [SSN_b], card ************1111.", "reidentify honors treatments")
 
+
 -- 5. generic override replaces defaults
-local g = T.effective_paths({ profile = "generic", request_json_paths = { "$.x" }, response_json_paths = {} }, "request")
+local g = EP({ profile = "generic", request_json_paths = { "$.x" }, response_json_paths = {} }, "request")
 eq(g[1], "$.x", "generic uses override")
 eq(#g, 1, "generic override count")
 
@@ -108,10 +119,10 @@ eq(#g, 1, "generic override count")
 -- must be guarded, and the RESPONSE leg was not: zero response spans is
 -- indistinguishable from "the response had no text", so it took the benign branch
 -- and handed the client vault tokens forever, silently.
-eq(#T.effective_paths({ profile = "generic", request_json_paths = { "$.x" },
+eq(#EP({ profile = "generic", request_json_paths = { "$.x" },
                         response_json_paths = {} }, "response"), 0,
    "generic has no default response paths -- which is why the guard is needed")
-eq(#T.effective_paths({ profile = "anthropic", request_json_paths = {},
+eq(#EP({ profile = "anthropic", request_json_paths = {},
                         response_json_paths = {} }, "response"), 1,
    "a named profile does have one, so the guard must not fire for it")
 
@@ -296,28 +307,28 @@ eq(tostring(sub_err):find("no subject", 1, true) ~= nil, true,
 local PRE = "PREAMBLE"
 
 local d1 = { messages = {} }
-T.inject_token_preamble(d1, PRE, "anthropic")
+T.inject_token_preamble(d1, PRE, { "anthropic" })
 eq(d1.system, PRE, "anthropic: absent system -> preamble becomes it")
 
 local d2 = { system = "you are helpful", messages = {} }
-T.inject_token_preamble(d2, PRE, "anthropic")
+T.inject_token_preamble(d2, PRE, { "anthropic" })
 eq(d2.system, PRE .. "\n\nyou are helpful", "anthropic: string system -> prepended")
 
 local d3 = { system = { { type = "text", text = "caller block" } }, messages = {} }
-T.inject_token_preamble(d3, PRE, "anthropic")
+T.inject_token_preamble(d3, PRE, { "anthropic" })
 eq(#d3.system, 2, "anthropic: block array gains one block")
 eq(d3.system[1].text, PRE, "anthropic: preamble is FIRST")
 eq(d3.system[2].text, "caller block", "anthropic: caller block preserved after it")
 
 local d4 = { messages = { { role = "user", content = "hi" } } }
-T.inject_token_preamble(d4, PRE, "openai")
+T.inject_token_preamble(d4, PRE, { "openai" })
 eq(d4.messages[1].role, "system", "openai: system message inserted at the front")
 eq(d4.messages[1].content, PRE, "openai: carries the preamble")
 eq(d4.messages[2].role, "user", "openai: user message still second")
 
 local d5 = { messages = { { role = "system", content = "be terse" },
                           { role = "user", content = "hi" } } }
-T.inject_token_preamble(d5, PRE, "openai")
+T.inject_token_preamble(d5, PRE, { "openai" })
 eq(#d5.messages, 2, "openai: existing system message is NOT duplicated")
 eq(d5.messages[1].content, PRE .. "\n\nbe terse", "openai: prepended to the existing system")
 
@@ -421,7 +432,7 @@ eq(T.tool_policy(tconf("tokenized", { ["a-b.c"] = "plain_text" }), "a-b.c"), "pl
 -- traffic: Claude Desktop sends `system` as a block array, and a replayed
 -- tool_use only exists from the second turn of a tool-using conversation on.
 local gconf = { profile = "anthropic", request_json_paths = {}, response_json_paths = {} }
-local gpaths = T.effective_paths(gconf, "request")
+local gpaths = EP(gconf, "request")
 local function texts(doc)
   local out = {}
   for _, sp in ipairs(T.collect_spans(doc, gpaths)) do out[sp.text] = true end
@@ -609,14 +620,14 @@ eq(am[1].source.media_type, "image/jpeg", "anthropic source untouched")
 -- params.messages -- so every MCP request was de-identified WITHOUT ever telling
 -- the model what the placeholders meant.
 local mcp = { params = { messages = { { role = "user", content = "hi" } } } }
-T.inject_token_preamble(mcp, "PRE", "mcp")
+T.inject_token_preamble(mcp, "PRE", { "mcp" })
 eq(mcp.params.messages[1].role, "system", "mcp: preamble inserted into params.messages")
 eq(mcp.params.messages[1].content, "PRE", "mcp: preamble content present")
 eq(mcp.params.messages[2].content, "hi", "mcp: original message preserved")
 
 -- openai top-level messages still work
 local oa = { messages = { { role = "user", content = "hi" } } }
-T.inject_token_preamble(oa, "PRE", "openai")
+T.inject_token_preamble(oa, "PRE", { "openai" })
 eq(oa.messages[1].role, "system", "openai: unchanged behaviour")
 
 -- (c) the `**` depth guard must fail CLOSED. Previously it returned quietly, so
@@ -625,13 +636,13 @@ local deep = { v = "SECRET" }
 for _ = 1, 40 do deep = { n = deep } end
 local dspans = T.collect_spans(
   { messages = { { role = "assistant", content = { { type = "tool_use", input = deep } } } } },
-  T.effective_paths({ profile = "anthropic", request_json_paths = {}, response_json_paths = {} }, "request"))
+  EP({ profile = "anthropic", request_json_paths = {}, response_json_paths = {} }, "request"))
 eq(dspans.depth_exceeded, true, "exceeding the ** depth limit is RECORDED, not silently ignored")
 
 -- a shallow body must not trip it
 local shallow = T.collect_spans(
   { messages = { { role = "assistant", content = { { type = "tool_use", input = { a = { b = "x" } } } } } } },
-  T.effective_paths({ profile = "anthropic", request_json_paths = {}, response_json_paths = {} }, "request"))
+  EP({ profile = "anthropic", request_json_paths = {}, response_json_paths = {} }, "request"))
 eq(shallow.depth_exceeded, nil, "a normally-nested body does not trip the depth guard")
 
 -- a non-terminal `**` scans nothing, so it must be reported rather than silently
@@ -646,7 +657,7 @@ local idspans = T.collect_spans({
   tools = { { name = "lookup", description = "search records for Jane Doe",
               input_schema = { properties = { q = { description = "e.g. Jane Doe" } } } } },
   messages = { { role = "user", content = "hi" } },
-}, T.effective_paths(idconf, "request"))
+}, EP(idconf, "request"))
 local idfound = {}
 for _, sp in ipairs(idspans) do idfound[sp.text] = true end
 eq(idfound["jane@acme.com"], true, "metadata.user_id is covered")
@@ -669,7 +680,7 @@ local optin = { profile = "anthropic", response_json_paths = {},
 local optspans = T.collect_spans({
   tools = { { name = "lookup", description = "search records for Jane Doe",
               input_schema = { properties = { q = { description = "e.g. Jane Doe" } } } } },
-}, T.effective_paths(optin, "request"))
+}, EP(optin, "request"))
 local optfound = {}
 for _, sp in ipairs(optspans) do optfound[sp.text] = true end
 eq(optfound["search records for Jane Doe"], true, "opt-in reaches tools[].description")
@@ -679,7 +690,7 @@ eq(optfound["e.g. Jane Doe"], true, "opt-in reaches property descriptions")
 -- provider validates against would break the tool contract
 local enumspans = T.collect_spans({ tools = { { name = "t",
   input_schema = { properties = { status = { ["enum"] = { "OPEN", "CLOSED" }, default = "OPEN" } } } } } },
-  T.effective_paths(optin, "request"))
+  EP(optin, "request"))
 eq(#enumspans, 0, "tool enums/defaults are intentionally left alone")
 
 -- A path that duplicates one already in the profile base must not double the
@@ -689,14 +700,14 @@ eq(#enumspans, 0, "tool enums/defaults are intentionally left alone")
 -- latency and double cost on the response leg, with identical output.
 local dupconf = { profile = "anthropic", request_json_paths = {},
                   response_json_paths = { "$.content[*].text" } }
-eq(#T.effective_paths(dupconf, "response"), 1, "a redundant path is deduped, not appended")
+eq(#EP(dupconf, "response"), 1, "a redundant path is deduped, not appended")
 local dupdoc = { content = { { type = "text", text = "one" }, { type = "text", text = "two" } } }
-eq(#T.collect_spans(dupdoc, T.effective_paths(dupconf, "response")), 2,
+eq(#T.collect_spans(dupdoc, EP(dupconf, "response")), 2,
    "two text blocks yield two spans, not four")
 -- and deduping must not break genuine extension
 local extconf = { profile = "anthropic", request_json_paths = {},
                   response_json_paths = { "$.content[*].text", "$.content[*].thinking" } }
-eq(#T.effective_paths(extconf, "response"), 2, "a genuinely new path is still added")
+eq(#EP(extconf, "response"), 2, "a genuinely new path is still added")
 
 -- 20. SSE emitter fidelity. This emitter is an ALLOWLIST, so every content type
 -- Anthropic adds was silently discarded -- invisible content loss, and history
@@ -762,3 +773,95 @@ eq(with_usage:find("[DONE]", 1, true) ~= nil, true, "[DONE] still terminates the
 
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)
+
+-- ---------------------------------------------------------------------------
+-- 24. Wire-format detection replaces the `profile` config field.
+--
+-- WHY THIS EXISTS: `profile` was an enum an operator set by hand, and the OpenAI
+-- and Anthropic request shapes OVERLAP at `$.messages[*].content`. So pointing an
+-- Anthropic route at `profile: openai` did not error, did not warn, and did not
+-- look broken -- it scanned ONE of four sensitive spans and sent the other three
+-- to the provider in clear text. These cases pin both halves: that detection gets
+-- the format right, and that the under-scan it prevents stays prevented.
+local DESKTOP_BODY = {
+  model = "claude-sonnet-4-5",
+  system = { { type = "text", text = "You assist Sarah Chen, employee sarah@acme.com" } },
+  messages = {
+    { role = "user", content = { { type = "text", text = "my card is 4111111111111111" } } },
+    { role = "user", content = { { type = "tool_result", tool_use_id = "t1",
+        content = { { type = "text", text = "patient David Okafor, SSN 123-45-6789" } } } } },
+  },
+  metadata = { user_id = "sarah@acme.com" },
+}
+
+eq(T.detect_formats(DESKTOP_BODY, "request")[1], "anthropic",
+   "a real Claude Desktop body is detected as anthropic")
+
+-- The leak, measured. Under the old wrong-profile config this body yielded 1 span.
+local det = T.collect_spans(DESKTOP_BODY,
+  T.effective_paths({ request_json_paths = {}, response_json_paths = {} },
+                    "request", T.detect_formats(DESKTOP_BODY, "request")))
+eq(#det, 4, "detection reaches all four sensitive spans (the old openai profile got 1)")
+local dfound = {}
+for _, sp in ipairs(det) do dfound[sp.text] = true end
+eq(dfound["You assist Sarah Chen, employee sarah@acme.com"], true, "system prompt scanned")
+eq(dfound["patient David Okafor, SSN 123-45-6789"], true, "tool_result scanned")
+eq(dfound["sarah@acme.com"], true, "metadata.user_id scanned")
+
+-- OpenAI-only discriminators.
+eq(T.detect_formats({ messages = { { role = "system", content = "s" } } }, "request")[1],
+   "openai", "a system ROLE is openai (illegal in anthropic)")
+eq(T.detect_formats({ model = "gpt-4o", messages = { { role = "user", content = "hi" } } },
+   "request")[1], "openai", "gpt- model name resolves an otherwise ambiguous body")
+eq(T.detect_formats({ prompt = "hi" }, "request")[1], "openai", "legacy prompt is openai")
+eq(T.detect_formats({ messages = { { role = "user",
+     content = { { type = "image_url", image_url = {} } } } } }, "request")[1],
+   "openai", "image_url blocks are openai")
+
+-- MCP is JSON-RPC.
+eq(T.detect_formats({ jsonrpc = "2.0", method = "tools/call",
+     params = { arguments = {} } }, "request")[1], "mcp", "jsonrpc tag is mcp")
+
+-- Ambiguity returns BOTH rather than guessing, because unioning the path sets
+-- over-scans (a non-matching path yields no spans) while guessing under-scans.
+local amb = T.detect_formats({ messages = { { role = "user", content = "hi" } } }, "request")
+eq(#amb, 2, "an undecidable chat body returns both candidates")
+local ambpaths = T.effective_paths({ request_json_paths = {}, response_json_paths = {} },
+                                   "request", amb)
+local hasuser, hasprompt = false, false
+for _, pth in ipairs(ambpaths) do
+  if pth == "$.user" then hasuser = true end
+  if pth == "$.prompt" then hasprompt = true end
+end
+eq(hasuser and hasprompt, true,
+   "the union carries openai-only paths, so an ambiguous body cannot under-scan")
+-- and the union must still be deduped: both formats share $.messages[*].content
+local ambseen = {}
+for _, pth in ipairs(ambpaths) do
+  eq(ambseen[pth], nil, "union is deduped: " .. pth .. " appears once")
+  ambseen[pth] = true
+end
+
+-- Response shapes are disjoint, so no union is needed there.
+eq(T.detect_formats({ choices = { {} } }, "response")[1], "openai", "choices -> openai")
+eq(T.detect_formats({ type = "message", content = {} }, "response")[1], "anthropic",
+   "anthropic message envelope -> anthropic")
+eq(T.detect_formats({ result = { content = {} } }, "response")[1], "mcp", "result -> mcp")
+
+-- An unrecognised body yields NO paths, which is what the request-leg guard in
+-- handler.lua fails closed on. Returning an empty list rather than defaulting to
+-- some format is the point: a silent no-op is the failure mode being removed.
+eq(#T.detect_formats({ widget = "x" }, "request"), 0, "an unknown shape detects nothing")
+eq(#T.effective_paths({ request_json_paths = {}, response_json_paths = {} }, "request", {}),
+   0, "no format and no explicit paths yields nothing to scan -- guard territory")
+-- ...but explicit paths still work for exactly that case (the old `generic`).
+eq(#T.effective_paths({ request_json_paths = { "$.widget" }, response_json_paths = {} },
+                      "request", {}), 1, "explicit paths cover an unrecognised shape")
+
+-- Ambiguity must NOT produce an openai-style system message: `role: "system"` is
+-- illegal in the Anthropic API and earns a hard 400, whereas a top-level `system`
+-- string is valid Anthropic and merely ignored by OpenAI. Fail soft, not hard.
+local ambdoc = { messages = { { role = "user", content = "hi" } } }
+T.inject_token_preamble(ambdoc, "PRE", { "anthropic", "openai" })
+eq(ambdoc.system, "PRE", "ambiguous preamble uses the top-level system field")
+eq(ambdoc.messages[1].role, "user", "and does NOT prepend an anthropic-illegal system message")
