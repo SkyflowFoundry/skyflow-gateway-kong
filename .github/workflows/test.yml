@@ -43,6 +43,21 @@ jobs:
       # request and assert the suite NOTICES. The previous version of that test
       # asserted on the cjson library rather than on the handler's codec and
       # passed with the bug reinstated.
+      # The auth-method enum. ctx is configurable ONLY under jwt_credential:
+      # Skyflow ignores caller-supplied context on an STS exchange, and
+      # bearer_token has no assertion to carry it. Accepting those fields anyway
+      # would let a vault policy read as configured while never being enforced.
+      - name: auth-method enum + ctx asymmetry
+        run: ./spec/offline/auth_methods_test.sh
+
+      # Konnect caps the streamed `handler` field at 102,400 bytes. Adding the
+      # auth-method code pushed the real handler to 103,976 and the upload failed
+      # outright -- so this limit has to be a build gate, not something discovered
+      # at deploy time. The target also runs the suite against the STRIPPED code,
+      # because the strip is textual and could in principle corrupt a long string.
+      - name: streamed bundle fits the Konnect limit
+        run: make bundle
+
       - name: mutation check -- the suite must catch the codec regression
         run: |
           mkdir -p /tmp/mut && cp -r plugin spec /tmp/mut/

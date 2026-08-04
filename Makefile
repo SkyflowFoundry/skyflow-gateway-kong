@@ -7,7 +7,7 @@ PLUGIN := skyflow-deidentify
 VERSION := 0.3.0-1
 ROCKSPEC := plugin/kong/plugins/$(PLUGIN)/$(PLUGIN)-$(VERSION).rockspec
 
-.PHONY: help lint lint-md unit-pure globals test unit integration e2e sandbox-smoke pack clean
+.PHONY: help lint lint-md unit-pure globals bundle auth-methods test unit integration e2e sandbox-smoke pack clean
 
 help:
 	@echo "Targets:"
@@ -52,8 +52,30 @@ globals:
 	docker run --rm -v "$(PWD):/w" -w /w --entrypoint sh $(KONG_IMAGE) \
 	  -c 'bash spec/offline/no_undefined_globals.sh'
 
+# Konnect caps the streamed `handler` field at 102,400 bytes, and this handler is
+# heavily commented on purpose. Strip comments for the UPLOAD only, then prove the
+# stripped output still behaves: a full-line-comment strip can in principle eat a
+# line inside a long-bracket string, so the suite runs against the bundled code.
+bundle:
+	./scripts/bundle-streamed-plugin.sh custom-plugin.json
+	@rm -rf .bundle-check && mkdir -p .bundle-check && cp -r plugin spec .bundle-check/
+	@python3 -c "import json;\
+	b=json.load(open('custom-plugin.json'));\
+	open('.bundle-check/plugin/kong/plugins/$(PLUGIN)/handler.lua','w').write(b['handler'])"
+	@cd .bundle-check && docker run --rm -v "$$PWD:/w" -w /w --entrypoint resty $(KONG_IMAGE) \
+	  spec/offline/pure_algorithms_test.lua | tail -2
+	@cd .bundle-check && docker run --rm -v "$$PWD:/w" -w /w --entrypoint sh $(KONG_IMAGE) \
+	  -c 'bash spec/offline/no_undefined_globals.sh' | tail -2
+	@rm -rf .bundle-check
+	@echo "ok: custom-plugin.json is within the Konnect limit and passes the suite"
+
+# The auth-method enum: ctx is configurable ONLY under jwt_credential. Validated
+# through `kong config parse` against the real schema engine.
+auth-methods:
+	./spec/offline/auth_methods_test.sh
+
 # Hermetic: requires only Docker (Pongo). No Skyflow account needed.
-test: lint unit-pure globals
+test: lint unit-pure globals auth-methods bundle
 	pongo run
 
 unit:

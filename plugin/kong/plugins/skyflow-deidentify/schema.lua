@@ -30,31 +30,62 @@ local STRATEGIES    = { "mapping_only", "reidentify_text", "detokenize" }
 local STREAMING     = { "buffer", "passthrough" }
 local PROTOCOLS     = { "http", "https", "grpc", "grpcs", "ws", "wss" }
 
--- Credentials: STS delegation (RFC 8693) and nothing else. See the record
--- below for why there is no api_key / service_account_json / ctx machinery.
+-- How the plugin obtains a Skyflow bearer. Three methods, in descending order of
+-- how strong a claim they make about WHO is asking:
+--
+--   sts             RFC 8693 token exchange. The caller's own IdP token is the
+--                   credential; the gateway stores nothing. `ctx` is the IdP's
+--                   signed claims.
+--   jwt_credential  The gateway signs a service-account JWT (RS256) and exchanges
+--                   it. The gateway holds a private key, and `ctx` is whatever the
+--                   gateway asserts.
+--   bearer_token    A long-lived Skyflow API key or bearer, sent as-is. No
+--                   per-caller identity at all, and no `ctx`.
+local AUTH_METHODS = { "sts", "jwt_credential", "bearer_token" }
+
+-- WHY `ctx` DIFFERS BY METHOD -- the distinction that matters when choosing one:
+--
+--   sts            -- `ctx` IS available, but it is NOT configurable here.
+--                     Skyflow silently ignores context supplied by the caller of
+--                     an exchange, so ctx is exclusively the IdP's claims.
+--                     Attributes like tenant, role and purpose belong in the IdP
+--                     token (Entra app roles, claims-mapping policies), which is
+--                     IdP-signed and strictly stronger than a gateway assertion.
+--                     Configuring ctx under this method would be a no-op, so the
+--                     ctx fields are not declared on this record at all -- the
+--                     schema makes it unrepresentable rather than accepting it and
+--                     letting an operator believe a policy is in force when it is
+--                     not.
+--   jwt_credential -- `ctx` is available AND configurable: the gateway mints the
+--                     assertion, so it decides the claim set. This is the only
+--                     method where context_json / context_headers / role_ids do
+--                     anything.
+--   bearer_token   -- no `ctx` and no per-caller identity. Every request looks
+--                     identical to the vault, so vault policies keyed on
+--                     `$ctx.<attr>` cannot discriminate. Present for gateways
+--                     that already front their own authn and accept that
+--                     trade-off; NOT the default.
 local credentials = {
   type = "record",
   required = true,
   fields = {
-    -- STS delegation (RFC 8693) is the ONLY credential path. There is
-    -- deliberately no api_key, no static bearer token, and no
-    -- service_account_json: a gateway holding a Skyflow credential is a gateway
-    -- worth attacking, and gateway-asserted identity is a weaker claim than a
-    -- signed one. The caller's IdP token is the credential.
-    --
-    -- There is also no context/context_headers/context_kong/role_ids here.
-    -- Skyflow SILENTLY IGNORES context supplied by the caller of an exchange, so
-    -- `ctx` is exclusively the IdP's claims. Attributes like tenant, role, and
-    -- purpose belong in the IdP token -- Entra app roles and claims-mapping
-    -- policies put them there, IdP-signed, which is strictly better than this
-    -- gateway asserting them.
+    -- Defaults to `sts`: it is the only method where the gateway holds no Skyflow
+    -- credential at all, so a compromised data plane yields nothing reusable.
+    { method = { type = "string", one_of = AUTH_METHODS, default = "sts" } },
+
     { sts = {
         type = "record",
-        required = true,
         fields = {
-          -- the Skyflow service account the caller delegates through; it must be
-          -- listed in the account's STS configuration for this issuer
-          { service_account_id = { type = "string", required = true } },
+          -- The Skyflow service account the caller delegates through; it must be
+          -- listed in the account's STS configuration for this issuer.
+          --
+          -- NOT `required = true` on the field itself. Kong materializes a record
+          -- from its defaults even when the operator supplied none, so a required
+          -- subfield here made the sts record effectively mandatory under EVERY
+          -- method -- method=bearer_token failed with "in 'credentials': in
+          -- 'service_account_id': required field missing". Requiredness is
+          -- expressed per method in entity_checks below instead.
+          { service_account_id = { type = "string" } },
           -- where the caller's token arrives (Claude Desktop's gateway OIDC mode
           -- sends it as `Authorization: Bearer <id_token>`)
           { token_header = { type = "string", default = "authorization" } },
@@ -67,6 +98,67 @@ local credentials = {
           { expected_audience = { type = "string" } },
         },
     } },
+
+    -- Gateway-signed service-account JWT (RS256), exchanged for a Skyflow bearer.
+    -- The gateway holds the private key, so this is a gateway-ASSERTED identity:
+    -- weaker than STS, but it works when callers have no IdP token to delegate --
+    -- service-to-service traffic, batch jobs, an internal client the gateway
+    -- already authenticated by other means.
+    { jwt_credential = {
+        type = "record",
+        fields = {
+          -- the full service-account credentials JSON from Skyflow. Reference a
+          -- vault entry rather than pasting it: {vault://env/SKYFLOW_SA_JSON}
+          { service_account_json = { type = "string", referenceable = true } },
+          -- ttl for the minted bearer; Skyflow caps this server-side
+          { ttl_seconds = { type = "integer", default = 3600, between = { 60, 86400 } } },
+
+          -- ctx machinery. Deliberately declared HERE and nowhere else: the
+          -- schema itself is what makes ctx unsettable under sts and
+          -- bearer_token, so no entity_check is needed and no operator can
+          -- configure a claim set that would be silently discarded.
+          { context_json = { type = "string" } },
+          { context_headers = { type = "map", keys = { type = "string" },
+                                values = { type = "string" }, default = {} } },
+          { context_kong = { type = "boolean", default = false } },
+          { role_ids = { type = "array", elements = { type = "string" }, default = {} } },
+        },
+    } },
+
+    -- A long-lived Skyflow API key or bearer, forwarded as-is. No per-caller
+    -- identity reaches the vault, so every request is attributed to this one
+    -- credential and `$ctx.<attr>` policies cannot discriminate between callers.
+    -- Choose it only when the gateway is the trust boundary and you accept that
+    -- the audit trail names the gateway rather than a person.
+    { bearer_token = {
+        type = "record",
+        fields = {
+          { api_key = { type = "string", referenceable = true } },
+          -- Skyflow expects `Authorization: Bearer <key>`; overridable for
+          -- deployments fronting a proxy that renames the header.
+          { header_name = { type = "string", default = "authorization" } },
+          { scheme = { type = "string", one_of = { "Bearer", "ApiKey", "none" },
+                       default = "Bearer" } },
+        },
+    } },
+  },
+
+  entity_checks = {
+    -- Each method needs the ONE field it cannot work without. Targeting the inner
+    -- field, not the record: Kong materializes a record from its defaults even
+    -- when nothing was supplied, so `then_field = "bearer_token", required = true`
+    -- passed against an auto-created empty record and a config naming a method
+    -- with no credential in it validated cleanly -- the failure would then have
+    -- surfaced as a runtime auth error on live traffic.
+    { conditional = { if_field = "method", if_match = { eq = "sts" },
+                      then_field = "sts.service_account_id",
+                      then_match = { required = true } } },
+    { conditional = { if_field = "method", if_match = { eq = "jwt_credential" },
+                      then_field = "jwt_credential.service_account_json",
+                      then_match = { required = true } } },
+    { conditional = { if_field = "method", if_match = { eq = "bearer_token" },
+                      then_field = "bearer_token.api_key",
+                      then_match = { required = true } } },
   },
 }
 

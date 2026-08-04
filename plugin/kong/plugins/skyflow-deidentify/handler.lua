@@ -650,18 +650,175 @@ local function sts_bearer(conf, deadline)
 end
 
 
+-- A static Skyflow API key or bearer, forwarded as-is.
+--
+-- No exchange, no caching, no identity: every request reaches the vault as this
+-- one credential, so `$ctx.<attr>` policies cannot tell callers apart and the
+-- audit trail names the gateway rather than a person. That is the trade-off the
+-- operator accepted by selecting this method; it is not the default.
+local function bearer_token_value(conf)
+  local b = conf.credentials.bearer_token
+  if not b or not b.api_key or b.api_key == "" then
+    return nil, "credentials.bearer_token.api_key is required for method=bearer_token", "config"
+  end
+  if b.scheme == "none" then return b.api_key end
+  return (b.scheme or "Bearer") .. " " .. b.api_key
+end
+
+-- Build the `ctx` claim for a gateway-minted assertion.
+--
+-- Only reachable from jwt_credential: under sts the claim set is the IdP's and
+-- Skyflow ignores anything we add, and under bearer_token there is no assertion
+-- to put claims in. See schema.lua for why that asymmetry is enforced by the
+-- shape of the config rather than by a check.
+local function build_ctx(jc)
+  local ctx = {}
+  if jc.context_json and jc.context_json ~= "" then
+    local parsed = cjson.decode(jc.context_json)
+    if type(parsed) == "table" then
+      for k, v in pairs(parsed) do ctx[k] = v end
+    end
+  end
+  for header, claim in pairs(jc.context_headers or {}) do
+    local v = kong.request.get_header(header)
+    if v ~= nil and v ~= "" then ctx[claim] = v end
+  end
+  if jc.context_kong then
+    -- Gateway-derived facts only. These are trustworthy in the sense that the
+    -- caller cannot forge them, unlike a header they control.
+    local consumer = kong.client.get_consumer()
+    if consumer then ctx.kong_consumer = consumer.username or consumer.id end
+    local route = kong.router.get_route()
+    if route then ctx.kong_route = route.name or route.id end
+    local service = kong.router.get_service()
+    if service then ctx.kong_service = service.name or service.id end
+    ctx.kong_client_ip = kong.client.get_forwarded_ip()
+  end
+  return next(ctx) and ctx or nil
+end
+
+-- Mint a Skyflow bearer from a service-account JWT the GATEWAY signs (RS256).
+--
+-- Weaker than sts -- the identity is asserted by us, not signed by an IdP, and
+-- the host now holds a private key worth stealing -- but it is the only option
+-- when callers have no IdP token to delegate: service-to-service traffic, batch
+-- jobs, a client the gateway already authenticated some other way.
+--
+-- `resty.openssl.pkey` is required LAZILY, not at module scope. Two reasons: an
+-- sts-only or bearer-only deployment should not load a crypto library it never
+-- calls, and if a future sandbox mode drops it from the allowlist the failure is
+-- confined to this method instead of refusing to load the whole plugin. It is in
+-- the STRICT allowlist today, which `lax` extends, so streamed code can use it.
+local function jwt_credential_bearer(conf, deadline)
+  local jc = conf.credentials.jwt_credential
+  if not jc or not jc.service_account_json or jc.service_account_json == "" then
+    return nil, "credentials.jwt_credential.service_account_json is required "
+                .. "for method=jwt_credential", "config"
+  end
+  local sa = cjson.decode(jc.service_account_json)
+  if type(sa) ~= "table" or not sa.privateKey or not sa.clientID then
+    return nil, "service_account_json is not a Skyflow service-account credential "
+                .. "(expected clientID, keyID, tokenURI, privateKey)", "config"
+  end
+  local token_uri = sa.tokenURI
+  if not token_uri or token_uri == "" then
+    token_uri = "https://manage.skyflowapis.com/v1/auth/sa/oauth/token"
+  end
+
+  local ctx = build_ctx(jc)
+  -- Cache on everything that changes the assertion, so a per-request ctx (from
+  -- context_headers) does not silently reuse another caller's bearer.
+  local cache_key = "jwt\n" .. tostring(sa.clientID) .. "\n"
+                    .. (ctx and cjson.encode(ctx) or "-") .. "\n"
+                    .. table.concat(jc.role_ids or {}, ",")
+  local hit = TOKEN_CACHE[cache_key]
+  if hit and hit.exp - (conf.token_skew_seconds or 300) > ngx.now() then
+    return "Bearer " .. hit.token
+  end
+
+  local ok, pkey_lib = pcall(require, "resty.openssl.pkey")
+  if not ok then
+    return nil, "method=jwt_credential needs resty.openssl.pkey, which this "
+                .. "runtime does not permit; use method=sts", "config"
+  end
+  local key, kerr = pkey_lib.new(sa.privateKey)
+  if not key then
+    return nil, "service-account private key is unusable: " .. tostring(kerr), "config"
+  end
+
+  local now = math.floor(ngx.now())
+  local claims = {
+    iss = sa.clientID, key = sa.keyID, aud = token_uri, sub = sa.clientID,
+    exp = now + (jc.ttl_seconds or 3600), iat = now,
+  }
+  if ctx then claims.ctx = ctx end
+  if jc.role_ids and #jc.role_ids > 0 then claims.role_ids = jc.role_ids end
+
+  local signing_input = b64url_encode(cjson.encode({ alg = "RS256", typ = "JWT", kid = sa.keyID }))
+                        .. "." .. b64url_encode(cjson.encode(claims))
+  local sig, serr = key:sign(signing_input, "sha256")
+  if not sig then return nil, "signing the service-account assertion failed: "
+                              .. tostring(serr), "config" end
+  local assertion = signing_input .. "." .. b64url_encode(sig)
+
+  local body = cjson.encode({
+    grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    assertion = assertion,
+  })
+  local attempts, last_err = (conf.retries or 0) + 1, nil
+  for _ = 1, attempts do
+    if deadline and ngx.now() >= deadline then
+      return nil, "deadline exceeded minting a service-account bearer"
+    end
+    local httpc = http.new()
+    httpc:set_timeout(conf.timeout_ms)
+    local res, err = httpc:request_uri(token_uri, {
+      method = "POST", body = body,
+      headers = { ["Content-Type"] = "application/json" },
+      ssl_verify = true,
+      keepalive_timeout = conf.keepalive_idle_ms, keepalive_pool = conf.keepalive_pool_size,
+    })
+    if res and res.status == 200 then
+      local data = cjson.decode(res.body)
+      local minted = data and (data.accessToken or data.access_token)
+      if not minted or minted == "" then
+        return nil, "service-account token endpoint returned no accessToken"
+      end
+      local exp = jwt_exp(minted)
+      if exp == 0 then exp = now + (jc.ttl_seconds or 3600) end
+      if TOKEN_CACHE_N >= TOKEN_CACHE_MAX then TOKEN_CACHE, TOKEN_CACHE_N = {}, 0 end
+      if not TOKEN_CACHE[cache_key] then TOKEN_CACHE_N = TOKEN_CACHE_N + 1 end
+      TOKEN_CACHE[cache_key] = { token = minted, exp = exp }
+      kong.log.info("skyflow: minted service-account bearer (ctx attrs=",
+                    ctx and jwt_ctx_count(minted) or 0,
+                    ", ttl=", math.floor(exp - ngx.now()), "s)")
+      return "Bearer " .. minted
+    elseif res and res.status >= 400 and res.status < 500 and res.status ~= 429 then
+      -- Unlike sts, a 4xx here is never the caller's fault: the assertion is
+      -- ours. Classifying it as "identity" would tell a user to sign in again
+      -- over our own misconfiguration.
+      return nil, "service-account token request rejected: HTTP " .. res.status .. " "
+                  .. string.sub(res.body or "", 1, 180), "config"
+    else
+      last_err = err or ("HTTP " .. tostring(res and res.status))
+    end
+  end
+  return nil, "service-account token request failed: " .. tostring(last_err)
+end
+
 -- Resolve the Authorization header value for this request.
 --
--- There is exactly one way to obtain it: exchange the CALLER's IdP token at
--- Skyflow's STS endpoint. This gateway holds no Skyflow credential -- no API
--- key, no service account, no private key -- so compromising the host yields no
--- vault access, and the identity Skyflow audits is the human's, IdP-signed,
--- rather than something the gateway asserted about them.
---
--- Kept as a one-line indirection rather than calling sts_bearer directly: every
--- call site wants "the Authorization value, whatever the mechanism", and that is
--- the seam a second mechanism would reappear at.
+-- Three methods, and the choice is a real security trade-off rather than a
+-- preference. `sts` exchanges the CALLER's IdP token: the gateway holds no
+-- Skyflow credential at all, so compromising the host yields no vault access,
+-- and the identity Skyflow audits is the human's, IdP-signed. It stays the
+-- default for exactly that reason. `jwt_credential` puts a private key on the
+-- gateway and asserts identity itself. `bearer_token` gives the vault no caller
+-- identity whatsoever.
 local function auth_value(conf, deadline)
+  local method = (conf.credentials and conf.credentials.method) or "sts"
+  if method == "bearer_token" then return bearer_token_value(conf) end
+  if method == "jwt_credential" then return jwt_credential_bearer(conf, deadline) end
   return sts_bearer(conf, deadline)
 end
 
@@ -1107,9 +1264,15 @@ end
 --     requests are exactly the ones carrying suspect credentials.
 --
 -- Nothing inward needs the header: internal routes are guarded by source IP, and
--- the STS bearer we mint travels in our own request to Skyflow. sts_bearer reads
--- ctx.caller_token in preference to the header, so stashing before clearing is
--- what keeps auth working at all.
+-- whichever bearer we end up using travels in our OWN request to Skyflow, never
+-- in the proxied one. sts_bearer reads ctx.caller_token in preference to the
+-- header, so stashing before clearing is what keeps that method working at all.
+--
+-- Deliberately unconditional across auth methods. Under bearer_token and
+-- jwt_credential there is no caller token to exchange, but the client may still
+-- have sent an Authorization header to authenticate to the GATEWAY -- and that
+-- must not ride along to the model provider either. The `sts` lookup below is
+-- only about which header name to read; the clearing happens regardless.
 local function take_caller_token(conf, ctx)
   local sts = conf.credentials and conf.credentials.sts
   local hdr = (sts and sts.token_header) or "authorization"
@@ -2001,6 +2164,9 @@ end
 
 -- Exposed for offline unit testing of the pure algorithms (no Kong runtime).
 SkyflowDeidentify._test = {
+  bearer_token_value = bearer_token_value,
+  build_ctx = build_ctx,
+  auth_value = auth_value,
   parse_path        = parse_path,
   collect_spans     = collect_spans,
   effective_paths   = effective_paths,
