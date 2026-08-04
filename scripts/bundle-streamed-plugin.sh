@@ -61,3 +61,13 @@ json.dump({
 }, open(out, "w"))
 PY
 echo "  wrote $OUT"
+
+# The Konnect UI's "Create custom plugin" screen asks for FILES, not the JSON
+# body the Admin API takes -- and it must be given the STRIPPED handler, since
+# the raw one is over the 102,400-byte cap. Emit both files next to $OUT so there
+# is something to select in the file dialog.
+UPLOAD_DIR="$(dirname "$OUT")/upload"
+mkdir -p "$UPLOAD_DIR"
+cp "$STRIPPED" "$UPLOAD_DIR/handler.lua"
+cp "$PLUGIN_DIR/schema.lua" "$UPLOAD_DIR/schema.lua"
+echo "  wrote $UPLOAD_DIR/{handler.lua,schema.lua} for the Konnect UI"
