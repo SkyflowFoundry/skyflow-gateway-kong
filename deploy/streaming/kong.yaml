@@ -158,6 +158,27 @@ services:
             entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
                        ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER, DRIVER_LICENSE]
             token_format: VAULT_TOKEN
+            token_preamble:
+              enabled: true
+              # Spelled out rather than left blank. Leaving `text` unset falls back to the
+              # identical string compiled into handler.lua -- same behaviour, but an
+              # operator looking at the form sees an empty field and cannot tell what the
+              # model is actually being told.
+              #
+              # Each paragraph past the second exists because of an observed failure. The
+              # model has to be told that a placeholder STANDS FOR a real value, or it
+              # describes the text as redacted and answers about the transport rather than
+              # the content.
+              text: |-
+                Some values in this conversation appear as placeholders: an entity type and a short code in square brackets, such as [NAME_EXAMPLE], [EMAIL_ADDRESS_EXAMPLE] or [ACCOUNT_NUMBER_EXAMPLE].
+
+                Treat each placeholder as the real value it stands for. They are stable: the same placeholder always refers to the same person or thing, so you can compare, group and reason about them normally.
+
+                When you refer to one, reproduce it exactly as written, including the square brackets. Do not translate, shorten, reformat, emphasise or pluralise a placeholder.
+
+                Write as though the placeholders were the underlying values. Do not mention, describe, count or draw attention to the placeholders themselves. Do not characterise the material as redacted, masked, anonymised, sanitised or privacy-protected, and do not add caveats or disclaimers about it -- that is a property of how the text reached you, not a fact about its content, and the reader already knows it.
+
+                Nothing is missing or unavailable, so never say that it is, apologise for it, or decline on those grounds. Do not guess or invent what a placeholder might stand for. Simply answer the request, using the placeholders exactly where you would have used the underlying values.
           media:
             mode: deidentify
             unsupported: strip

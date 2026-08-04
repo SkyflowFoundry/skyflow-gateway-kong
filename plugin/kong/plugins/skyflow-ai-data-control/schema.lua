@@ -17,6 +17,35 @@
 -- See docs/contributing/plugin-spec.md §4.3 for the field reference and docs/using/operations.md for the
 -- Konnect upload steps.
 
+-- Entity types the vault actually has columns for. Taken from the vault schema
+-- (every `*_entity` column, suffix stripped and uppercased) rather than invented
+-- here, so the enum and the vault cannot disagree.
+--
+-- Declared as an enum so Gateway Manager renders a picker instead of a free-text
+-- box: a typo like "EMAIL" or "PHONE" used to be accepted silently and simply
+-- never match anything, which looks identical to "Detect found nothing" and
+-- means a category you believed was protected was not.
+--
+-- When the vault gains a column, add it here. That is the cost of the enum, and
+-- it buys a config-time error instead of a silent gap.
+local ENTITY_TYPES = {
+  "ACCOUNT_NUMBER", "AGE", "BANK_ACCOUNT", "BLOOD_TYPE", "CONDITION",
+  "CORPORATE_ACTION", "CREDIT_CARD", "CREDIT_CARD_EXPIRATION", "CVV", "DATE",
+  "DATE_INTERVAL", "DAY", "DOB", "DOSE", "DRIVER_LICENSE", "DRUG", "DURATION",
+  "EFFECT", "EMAIL_ADDRESS", "EVENT", "FILENAME", "FINANCIAL_METRIC",
+  "GENDER", "GENDER_SEXUALITY", "HEALTHCARE_NUMBER", "INJURY", "IP_ADDRESS",
+  "LANGUAGE", "LOCATION", "LOCATION_ADDRESS", "LOCATION_ADDRESS_STREET",
+  "LOCATION_CITY", "LOCATION_COORDINATE", "LOCATION_COUNTRY",
+  "LOCATION_STATE", "LOCATION_ZIP", "MARITAL_STATUS", "MEDICAL_CODE",
+  "MEDICAL_PROCESS", "MONEY", "MONTH", "NAME", "NAME_FAMILY", "NAME_GIVEN",
+  "NAME_MEDICAL_PROFESSIONAL", "NUMERICAL_PII", "OCCUPATION", "ORGANIZATION",
+  "ORGANIZATION_ID", "ORGANIZATION_MEDICAL_FACILITY", "ORIGIN",
+  "PASSPORT_NUMBER", "PASSWORD", "PHONE_NUMBER", "PHYSICAL_ATTRIBUTE",
+  "POLITICAL_AFFILIATION", "PRODUCT", "PROJECT", "RELIGION", "ROUTING_NUMBER",
+  "SEXUALITY", "SSN", "STATISTICS", "TIME", "TREND", "URL", "USERNAME",
+  "VEHICLE_ID", "YEAR", "ZODIAC_SIGN"
+}
+
 local TOKEN_FORMATS = { "VAULT_TOKEN", "ENTITY_ONLY", "ENTITY_UNQ_COUNTER" }
 local PROFILES      = { "openai", "anthropic", "mcp", "generic" }
 local ENVS          = { "PROD", "SANDBOX", "DEV", "STAGE" }
@@ -215,7 +244,9 @@ local media = {
     -- Entity scope for attachments. Empty = ALL, which is intentionally
     -- broader than deidentify.entities: an image cannot be skimmed before it
     -- egresses, and ALL measurably detects more (6 vs 4 on a test card image).
-    { entities = { type = "array", elements = { type = "string" }, default = {} } },
+    { entities = { type = "array",
+                   elements = { type = "string", one_of = ENTITY_TYPES },
+                   default = {} } },
     -- Non-text objects to redact. MUST be specific types -- `ALL` blacks out
     -- every detected object including plain text runs, so the provider gets a
     -- solid black rectangle. FACE+SIGNATURE keeps the image legible while
@@ -240,14 +271,18 @@ local shift_dates = {
     { enabled  = { type = "boolean", default = false } },
     { min_days = { type = "integer", default = 10 } },
     { max_days = { type = "integer", default = 30 } },
-    { entities = { type = "array", elements = { type = "string" }, default = { "DOB" } } },
+    { entities = { type = "array",
+                   elements = { type = "string", one_of = ENTITY_TYPES },
+                   default = { "DOB" } } },
   },
 }
 
 local deidentify = {
   type = "record",
   fields = {
-    { entities = { type = "array", elements = { type = "string" }, default = {} } },
+    { entities = { type = "array",
+                   elements = { type = "string", one_of = ENTITY_TYPES },
+                   default = {} } },
     { token_format = { type = "string", one_of = TOKEN_FORMATS, default = "VAULT_TOKEN" } },
     { allow_regex    = { type = "array", elements = { type = "string" }, default = {} } },
     { restrict_regex = { type = "array", elements = { type = "string" }, default = {} } },
