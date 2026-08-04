@@ -96,7 +96,7 @@ end
 function _M.server_block()
   return [[
     content_by_lua_block {
-      local mock = require "spec.skyflow-deidentify.helpers.mock_skyflow"
+      local mock = require "spec.skyflow-ai-data-control.helpers.mock_skyflow"
       ngx.req.read_body()
       local headers = ngx.req.get_headers()
       if (headers["x-mock-fault"] == "timeout") then ngx.sleep(30) end

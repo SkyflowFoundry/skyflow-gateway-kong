@@ -98,12 +98,12 @@ The "what the LLM sees" contrast uses two routes onto the same echo upstream:
 `/demo/raw` (no plugin → reflects the raw PII) and `/demo/deid` (de-identify
 **only**, re-identify disabled → reflects the tokens). Re-identify must be *off*
 on `/demo/deid` — otherwise it would restore the tokens in the echoed body and
-you'd see no proof. Both live in `deploy/konnect-hybrid/deck/real-vault.yaml`:
+you'd see no proof. Both live in `deploy/streaming/kong.yaml`:
 
 ```bash
 deck gateway sync --konnect-token "$KONNECT_PAT" \
   --konnect-control-plane-name skyflow-hybrid \
-  deploy/konnect-hybrid/deck/real-vault.yaml
+  deploy/streaming/kong.yaml
 ```
 
 `real-vault.yaml` is the **canonical / default** config for this demo — it holds

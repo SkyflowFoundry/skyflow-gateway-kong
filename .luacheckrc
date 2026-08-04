@@ -1,4 +1,4 @@
--- Luacheck config for the skyflow-deidentify plugin (docs/05 §5.5).
+-- Luacheck config for the skyflow-ai-data-control plugin (docs/05 §5.5).
 std = "ngx_lua"
 unused_args = false
 redefined = false

@@ -1,5 +1,0 @@
-# Never commit secrets or local env for the hybrid demo.
-.env
-certs/*.crt
-certs/*.key
-certs/*.pem

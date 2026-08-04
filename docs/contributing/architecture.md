@@ -40,13 +40,13 @@ We also use:
                    Skyflow Detect                            Skyflow Detect    (no PII)
                    /deidentify                               /reidentify
                                                              or /detokenize
-   * skyflow-deidentify phases
+   * skyflow-ai-data-control phases
 ```
 
 ## 2.2 Module decomposition
 
 ```
-kong.plugins.skyflow-deidentify
+kong.plugins.skyflow-ai-data-control
 ├── handler.lua   Orchestration. Implements the lifecycle phases above. Holds no
 │                 business logic beyond sequencing and PDK I/O.
 ├── schema.lua    Declarative configuration contract (validated by Kong core).
@@ -174,9 +174,9 @@ When `reidentify.enabled = false` (de-identify only — the most common posture)
 ### T1 — Nested proxy with AI Proxy (recommended for LLMs)
 
 ```
-client → [ /ai/chat: skyflow-deidentify (access: de-id) ]
+client → [ /ai/chat: skyflow-ai-data-control (access: de-id) ]
              → (loopback) → [ /_ai_upstream: ai-proxy ] → provider
-client ← [ /ai/chat: skyflow-deidentify (response: re-id) ]
+client ← [ /ai/chat: skyflow-ai-data-control (response: re-id) ]
              ← (loopback) ← [ /_ai_upstream: ai-proxy ] ← provider
 ```
 
@@ -187,13 +187,13 @@ rewrite of the gzip body → `500 "no response body found"`). So they run on two
 routes: a **front route** does de-id + re-id and proxies (loopback to Kong's own
 port) to an **internal route** that runs `ai-proxy` alone. Two independent
 buffered cycles, no collision. Ready-to-run in
-[`deploy/konnect-hybrid/deck/real-vault.yaml`](../../deploy/konnect-hybrid/deck/real-vault.yaml);
-reproduced + verified offline in [`deploy/local-dbless/`](../../deploy/local-dbless).
+[`deploy/streaming/kong.yaml`](../../deploy/streaming/kong.yaml);
+reproduced + verified offline in [`test/offline-harness/`](../../test/offline-harness).
 
 ### T2 — Standalone proxy to any upstream (MCP / generic)
 
 ```
-client → [ skyflow-deidentify ] → Kong Service/Route → upstream (MCP server, REST API)
+client → [ skyflow-ai-data-control ] → Kong Service/Route → upstream (MCP server, REST API)
 ```
 
 No AI Proxy; the plugin is the only AI/privacy plugin on the Route.

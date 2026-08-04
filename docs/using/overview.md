@@ -5,7 +5,7 @@ providers, MCP servers, and third-party APIs — often carrying **PII, PHI,
 secrets, and other regulated data**. Once that data reaches a third party you've
 lost control of it: it can be logged, trained on, cached, or subpoenaed.
 
-`skyflow-deidentify` is a Kong Gateway plugin that puts a privacy control at the
+`skyflow-ai-data-control` is a Kong Gateway plugin that puts a privacy control at the
 gateway:
 
 - **De-identifies** sensitive values out of outbound requests *before* they leave

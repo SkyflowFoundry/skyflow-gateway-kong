@@ -3,7 +3,7 @@
 It holds synthetic PHI (names, MRNs, conditions, meds, providers, contacts) so we
 can show a real coding-agent CLI reason over sensitive data WITHOUT that data ever
 reaching OpenAI in the clear. The agent talks to OpenAI through the Kong AI Gateway,
-where the skyflow-deidentify plugin swaps every PHI value for a deterministic vault
+where the skyflow-ai-data-control plugin swaps every PHI value for a deterministic vault
 token on the way out and restores it on the way back. OpenAI only ever sees
 [NAME_xjv74g]-style tokens; the developer sees real names in the answer.
 

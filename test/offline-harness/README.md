@@ -7,7 +7,7 @@ re-id round-trip and reproduces Kong #14380.
 ## Run
 
 ```bash
-docker compose -f deploy/local-dbless/docker-compose.yml up -d --wait
+docker compose -f test/offline-harness/docker-compose.yml up -d --wait
 
 # STS-only: every request needs a caller identity token. This harness leaves
 # expected_issuer/expected_audience unset, so an unsigned fixture JWT (alg=none,

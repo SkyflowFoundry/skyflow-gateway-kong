@@ -33,7 +33,7 @@
 #     `sandbox` + KONG_UNTRUSTED_LUA_SANDBOX_REQUIRES also FAILS despite the
 #     documentation saying that is what the allowlist is for.
 #
-#   KONG_PLUGINS=bundled  -- must NOT name skyflow-deidentify
+#   KONG_PLUGINS=bundled  -- must NOT name skyflow-ai-data-control
 #     Listing it makes Kong demand the code locally at boot ("plugin is enabled
 #     but not installed") and the node dies before the stream ever arrives.
 #     Streamed plugins are discovered from the control-plane config instead.

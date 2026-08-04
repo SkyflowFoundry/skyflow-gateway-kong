@@ -7,7 +7,7 @@
 local helpers = require "spec.helpers"
 local cjson   = require "cjson"
 
-local PLUGIN_NAME = "skyflow-deidentify"
+local PLUGIN_NAME = "skyflow-ai-data-control"
 
 for _, strategy in helpers.each_strategy() do
   describe(PLUGIN_NAME .. ": access (de-identify) [#" .. strategy .. "]", function()

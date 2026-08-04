@@ -25,7 +25,7 @@ Detect API so the bulk of tests run hermetically with no network or live vault.
 - **Pongo** (`kong-pongo`) to run the integration suite against a matrix of Kong
   versions and to inject dependency services.
 - **`.busted`**, **`.luacheckrc`** committed; `make test` / `make lint` wrap them.
-- Specs under `spec/skyflow-deidentify/` (see reference skeletons in this repo).
+- Specs under `spec/skyflow-ai-data-control/` (see reference skeletons in this repo).
 
 ### The Skyflow mock (`helpers/mock_skyflow.lua`)
 

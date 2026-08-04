@@ -80,7 +80,7 @@ return "$rc"
 if [ "$#" -gt 0 ]; then
   FILES="$*"
 else
-  FILES="plugin/kong/plugins/skyflow-deidentify/handler.lua plugin/kong/plugins/skyflow-deidentify/schema.lua"
+  FILES="plugin/kong/plugins/skyflow-ai-data-control/handler.lua plugin/kong/plugins/skyflow-ai-data-control/schema.lua"
 fi
 
 overall=0

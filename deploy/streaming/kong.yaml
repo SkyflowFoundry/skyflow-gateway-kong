@@ -1,6 +1,6 @@
 # Kong AI Gateway secured by Skyflow -- STREAMING-NATIVE deployment.
 #
-# What makes this different from deploy/konnect/: the plugin CODE is not in the
+# What makes this the only supported path: the plugin CODE is not in the
 # image. schema.lua and handler.lua are uploaded to the control plane and streamed
 # to every data plane, so BOTH the config and the plugin itself are pushed from
 # Konnect. That is the only arrangement that works on a gateway whose image you do
@@ -12,7 +12,7 @@
 #   KONG_CUSTOM_PLUGIN_STREAMING_ENABLED=on
 #   KONG_UNTRUSTED_LUA=lax          <- streamed handlers run sandboxed; `strict`
 #                                      forbids require() and rejects the config
-#   KONG_PLUGINS=bundled            <- must NOT name skyflow-deidentify
+#   KONG_PLUGINS=bundled            <- must NOT name skyflow-ai-data-control
 #
 # Built greenfield deliberately. The previous control plane had accumulated a
 # stale non-streaming node still registered alongside the new one, four file-log
@@ -96,7 +96,7 @@ services:
       # logs stay PII-free by construction.
       - name: file-log
         config: { path: /dev/stdout }
-      - name: skyflow-deidentify
+      - name: skyflow-ai-data-control
         config:
           vault_id: i65a450543bf48b68c3fa58c5ed7ce30
           cluster_id: ebfc9bee4242
@@ -245,7 +245,7 @@ services:
               local upstream = model:find("^gpt") and "/_up_openai" or "/_up_anthropic"
               kong.service.request.set_path(upstream .. tail)
               kong.log.info("kong-ai-gateway: model=", model, " -> ", upstream)
-      - name: skyflow-deidentify
+      - name: skyflow-ai-data-control
         config:
           vault_id: i65a450543bf48b68c3fa58c5ed7ce30
           cluster_id: ebfc9bee4242

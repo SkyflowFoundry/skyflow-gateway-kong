@@ -22,7 +22,7 @@
 #   ./scripts/bundle-streamed-plugin.sh [output.json]
 set -eu
 
-PLUGIN_DIR="plugin/kong/plugins/skyflow-deidentify"
+PLUGIN_DIR="plugin/kong/plugins/skyflow-ai-data-control"
 OUT="${1:-custom-plugin.json}"
 LIMIT=102400
 
@@ -55,7 +55,7 @@ python3 - "$STRIPPED" "$PLUGIN_DIR/schema.lua" "$OUT" <<'PY'
 import json, sys
 handler, schema, out = sys.argv[1], sys.argv[2], sys.argv[3]
 json.dump({
-    "name": "skyflow-deidentify",
+    "name": "skyflow-ai-data-control",
     "schema": open(schema).read(),
     "handler": open(handler).read(),
 }, open(out, "w"))

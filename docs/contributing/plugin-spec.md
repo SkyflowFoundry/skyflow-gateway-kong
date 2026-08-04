@@ -2,15 +2,15 @@
 
 Defines the plugin's identity, module layout, configuration schema, lifecycle
 handlers, and PDK usage. The reference skeleton in
-[`plugin/kong/plugins/skyflow-deidentify/`](../../plugin/kong/plugins/skyflow-deidentify)
+[`plugin/kong/plugins/skyflow-ai-data-control/`](../../plugin/kong/plugins/skyflow-ai-data-control)
 implements this spec.
 
 ## 4.1 Identity
 
 | Attribute | Value |
 | --------- | ----- |
-| Plugin name | `skyflow-deidentify` |
-| Lua namespace | `kong.plugins.skyflow-deidentify.*` |
+| Plugin name | `skyflow-ai-data-control` |
+| Lua namespace | `kong.plugins.skyflow-ai-data-control.*` |
 | Priority (default) | `775` — de-identify runs in `access`; below AI PII Sanitizer (776). Composes with `ai-proxy` via **nested routes**, not shared-route priority (see [`architecture §2.8`](architecture.md#28-deployment-topologies)) |
 | Phases implemented | `access`, `response`, `log` (the design also allows `init_worker`/`configure`; the Konnect single-file build omits them) |
 | Protocols | `http`, `https`, `grpc`, `grpcs`, `ws`, `wss` |
@@ -33,7 +33,7 @@ implements this spec.
 ## 4.2 Module layout
 
 ```
-kong/plugins/skyflow-deidentify/
+kong/plugins/skyflow-ai-data-control/
   handler.lua    -- PDK lifecycle orchestration (this doc §4.4)
   schema.lua     -- configuration contract (this doc §4.3)
   auth.lua       -- bearer-token manager (skyflow-integration §3.2)
@@ -230,7 +230,7 @@ Implementation notes:
 
   ```yaml
   plugins:
-    - name: skyflow-deidentify
+    - name: skyflow-ai-data-control
       config: { ... }
       ordering:
         before:

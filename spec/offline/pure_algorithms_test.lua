@@ -39,7 +39,7 @@ _G.kong = { log = { err=function() end, warn=function() end, set_serialize_value
   request = {}, response = {}, service = { request = {}, response = {} }, ctx = { plugin = {} } }
 _G.ngx = { now = function() return 0 end }
 
-local M = dofile("plugin/kong/plugins/skyflow-deidentify/handler.lua")
+local M = dofile("plugin/kong/plugins/skyflow-ai-data-control/handler.lua")
 local T = M._test
 local fails = 0
 local function eq(a, b, msg) if a ~= b then fails = fails + 1; print("FAIL: "..msg.." got="..tostring(a)) else print("ok: "..msg) end end

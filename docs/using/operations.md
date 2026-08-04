@@ -6,11 +6,11 @@ Configuration recipes, observability, performance budgets, and rollout guidance.
 
 ```bash
 # Into a Kong node / image
-luarocks install skyflow-deidentify        # or: luarocks make ./*.rockspec
+luarocks install skyflow-ai-data-control        # or: luarocks make ./*.rockspec
 
 # Tell Kong to load it
-export KONG_PLUGINS=bundled,skyflow-deidentify
-# (or kong.conf: plugins = bundled,skyflow-deidentify)
+export KONG_PLUGINS=bundled,skyflow-ai-data-control
+# (or kong.conf: plugins = bundled,skyflow-ai-data-control)
 
 kong reload
 ```
@@ -30,7 +30,7 @@ services:
       - name: chat
         paths: ["/v1/chat/completions"]
     plugins:
-      - name: skyflow-deidentify
+      - name: skyflow-ai-data-control
         config:
           vault_id: "${SKYFLOW_VAULT_ID}"
           cluster_id: "${SKYFLOW_CLUSTER_ID}"
@@ -45,7 +45,7 @@ services:
 
 ### decK (de-identify + re-identify, composed with AI Proxy — nested proxy)
 
-`skyflow-deidentify` and `ai-proxy` **cannot share a route** (Kong #14380 — see
+`skyflow-ai-data-control` and `ai-proxy` **cannot share a route** (Kong #14380 — see
 [`architecture.md §2.8`](../contributing/architecture.md#28-deployment-topologies)).
 Use two routes: a **front route** runs de-identify + re-identify and proxies
 (loopback) to an **internal route** that runs `ai-proxy` alone.
@@ -58,7 +58,7 @@ services:
       - name: ai-chat
         paths: ["/ai/chat"]
     plugins:
-      - name: skyflow-deidentify
+      - name: skyflow-ai-data-control
         config:
           vault_id: "${SKYFLOW_VAULT_ID}"
           cluster_id: "${SKYFLOW_CLUSTER_ID}"
@@ -78,13 +78,13 @@ services:
 ```
 
 A ready-to-run version is in
-[`deploy/konnect-hybrid/deck/real-vault.yaml`](../../deploy/konnect-hybrid/deck/real-vault.yaml).
+[`deploy/streaming/kong.yaml`](../../deploy/streaming/kong.yaml).
 
 ### Admin API
 
 ```bash
 curl -X POST http://localhost:8001/routes/chat/plugins \
-  --data name=skyflow-deidentify \
+  --data name=skyflow-ai-data-control \
   --data config.vault_id=$SKYFLOW_VAULT_ID \
   --data config.cluster_id=$SKYFLOW_CLUSTER_ID \
   --data config.credentials.sts.service_account_id=$SKYFLOW_STS_SERVICE_ACCOUNT_ID \
@@ -97,15 +97,15 @@ curl -X POST http://localhost:8001/routes/chat/plugins \
 ```yaml
 apiVersion: configuration.konghq.com/v1
 kind: KongPlugin
-metadata: { name: skyflow-deidentify, namespace: ai }
-plugin: skyflow-deidentify
+metadata: { name: skyflow-ai-data-control, namespace: ai }
+plugin: skyflow-ai-data-control
 config:
   vault_id: { valueFrom: { secretKeyRef: { name: skyflow, key: vault_id } } }
   cluster_id: { valueFrom: { secretKeyRef: { name: skyflow, key: cluster_id } } }
   credentials: { api_key: "{vault://k8s/skyflow/api-key}" }
   profile: openai
   deidentify: { entities: [NAME, EMAIL_ADDRESS], token_format: VAULT_TOKEN }
-# annotate the Ingress/HTTPRoute/Service: konghq.com/plugins: skyflow-deidentify
+# annotate the Ingress/HTTPRoute/Service: konghq.com/plugins: skyflow-ai-data-control
 ```
 
 ### Konnect
