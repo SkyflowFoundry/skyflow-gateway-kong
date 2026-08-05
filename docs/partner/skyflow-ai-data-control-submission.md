@@ -11,7 +11,11 @@ Format model: [https://developer.konghq.com/plugins/prisma-airs-intercept/](http
 
 ## Required collateral
 
-- **Logo icon (64×64 PNG/SVG)** — _TODO: Skyflow brand asset to be provided._ Not in repo.
+- **Logo icon (64×64)** — [`skyflow-icon.svg`](skyflow-icon.svg) (preferred; scales
+  cleanly) and [`skyflow-icon-64.png`](skyflow-icon-64.png). The Skyflow mark: the
+  brand navy `#403E6B`, sampled from the official assets, with the `s` traced from
+  the official wordmark so the letterform is the real one rather than a substitute
+  typeface. Glyph size and corner radius match Skyflow's own favicon.
 - **Plugin schema (JSON)** — [`skyflow-ai-data-control.schema.json`](skyflow-ai-data-control.schema.json)
   (generated from the plugin's `schema.lua`).
 - **Luarock** — `skyflow-ai-data-control` (`skyflow-ai-data-control-0.6.0-1`).
