@@ -32,9 +32,11 @@ services:
     plugins:
       - name: skyflow-ai-data-control
         config:
-          vault_id: v
-          cluster_id: c
-$(printf '%s\n' "$creds")
+          skyflow:
+            vault_configuration:
+              vault_id: v
+              vault_url: https://c.vault.skyflowapis.com
+$(printf '%s\n' "$creds" | sed 's/^/  /')   # nest under skyflow:
 YAML
   if docker run --rm -v "$PWD:/w" -v "$WORK:/cfg" -w /w \
        -e KONG_DATABASE=off -e KONG_PLUGINS=bundled,skyflow-ai-data-control \

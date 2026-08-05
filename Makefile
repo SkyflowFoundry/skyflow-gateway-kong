@@ -4,7 +4,7 @@
 PLUGIN := skyflow-ai-data-control
 # Must match `version` in the rockspec, or `make pack` builds a path to a file
 # that does not exist. It said 0.2.0-1 while the rockspec had moved to 0.3.0-1.
-VERSION := 0.5.0-1
+VERSION := 0.6.0-1
 ROCKSPEC := plugin/kong/plugins/$(PLUGIN)/$(PLUGIN)-$(VERSION).rockspec
 
 .PHONY: help lint lint-md unit-pure globals bundle auth-methods test unit integration e2e sandbox-smoke pack clean

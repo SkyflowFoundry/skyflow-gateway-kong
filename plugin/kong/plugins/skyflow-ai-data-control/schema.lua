@@ -47,7 +47,6 @@ local ENTITY_TYPES = {
 }
 
 local TOKEN_FORMATS = { "VAULT_TOKEN", "ENTITY_ONLY", "ENTITY_UNQ_COUNTER" }
-local ENVS          = { "PROD", "SANDBOX", "DEV", "STAGE" }
 local TREATMENTS    = { "plain_text", "masked", "redacted" }
 -- mapping_only is the strategy implemented in this build; reidentify_text /
 -- detokenize are accepted but degrade to return_tokenized until implemented
@@ -243,6 +242,24 @@ local deidentify = {
                    elements = { type = "string", one_of = ENTITY_TYPES },
                    default = {} } },
     { token_format = { type = "string", one_of = TOKEN_FORMATS, default = "VAULT_TOKEN" } },
+
+    -- Detect models these two as a protobuf oneof named `configurationSource`, so
+    -- they are mutually exclusive on the wire: sending both is rejected. This
+    -- selects one and never merges, the same no-fallback contract
+    -- credentials.method follows.
+    { configuration_source = { type = "string",
+                               one_of = { "inline", "config_id" },
+                               default = "inline" } },
+    -- Required when configuration_source = config_id, and required HERE rather
+    -- than left to the API, because an id that does not resolve comes back as
+    -- "Field vault_id or configuration_id is missing in the request" -- an error
+    -- that names the wrong problem and sends you looking in the wrong place.
+    { config_id = { type = "string" } },
+    -- Every entity tokenized as VAULT_TOKEN needs the vault table.column that
+    -- stores it. The column names are derived (NAME -> table1.name_entity), since
+    -- the Detect vault schema follows that rule for all 70-odd columns; this is
+    -- just the table those columns live in.
+    { destination_table = { type = "string", default = "table1" } },
     { allow_regex    = { type = "array", elements = { type = "string" }, default = {} } },
     { restrict_regex = { type = "array", elements = { type = "string" }, default = {} } },
     -- batch_mode is GONE. It offered per_span | joined, but `joined` was never
@@ -305,11 +322,6 @@ local reidentify = {
                               values = { type = "string",
                                          one_of = { "tokenized", "plain_text" } },
                               default = {} } },
-    { entity_treatment = { type = "map", keys = { type = "string" },
-                           values = { type = "string", one_of = TREATMENTS }, default = {} } },
-    { default_treatment = { type = "string", one_of = TREATMENTS, default = "plain_text" } },
-    { streaming = { type = "string", one_of = STREAMING, default = "buffer" } },
-    { on_error  = { type = "string", one_of = { "return_tokenized", "deny" }, default = "return_tokenized" } },
   },
 }
 
@@ -320,45 +332,30 @@ local skyflow = {
   -- one section rather than by scanning a flat list of twenty fields.
   type = "record",
   fields = {
-    { vault_details = { type = "string" } },
-    -- NOT `required`, because either may instead arrive inside
-    -- vault_details, and a schema cannot look inside a string. The
-    -- entity_checks below keep the config-time guarantee that one source is
-    -- present; the handler additionally verifies per request that the
-    -- values actually resolved, and fails closed if not.
-    { vault_id   = { type = "string" } },
-    { cluster_id = { type = "string" } },
-    { account_id = { type = "string" } },
-    { env = { type = "string", one_of = ENVS, default = "PROD" } },
-    { base_url_override = { type = "string" } },
+    -- Mirrors the admin UI: Vault Configuration carries the three values shown on
+    -- the vault's own page, under the same names, so a value can be copied across
+    -- without translating what it is called.
+    { vault_configuration = {
+        type = "record",
+        fields = {
+          { account_id = { type = "string" } },
+          -- The vault URL exactly as the UI shows it:
+          -- https://ebfc9bee4242.vault.skyflowapis.com. Taken whole rather than
+          -- assembled from a cluster id, because the host encodes the ENVIRONMENT
+          -- too -- a sandbox vault is on .skyflowapis.tech, which concatenating a
+          -- cluster id onto .skyflowapis.com can never reach. It doubles as the
+          -- override the offline harness and integration specs need to point the
+          -- client at a mock.
+          { vault_url  = { type = "string", required = true } },
+          { vault_id   = { type = "string", required = true } },
+        },
+    } },
     { credentials = credentials },
     -- SA-JWT bearers are re-minted this many seconds before their exp.
-    { token_skew_seconds = { type = "integer", default = 300, between = { 0, 3600 } } },
 
     ----------------------------------------------------------------- behavior
     { deidentify = deidentify },
     { reidentify = reidentify },
-  },
-}
-
-local targeting = {
-  -- WHERE in the payload to look. The wire format (OpenAI / Anthropic / MCP) is
-  -- detected per request, so these only ADD to what detection already covers.
-  type = "record",
-  fields = {
-    { content_type = { type = "string", one_of = { "auto", "json", "text" }, default = "auto" } },
-
-    ----------------------------------------------------------------- targeting
-    -- The wire format (OpenAI / Anthropic / MCP) is detected per request
-    -- from the body shape in handler.lua rather than configured here. A
-    -- hand-set format is a silent failure waiting to happen: the two chat
-    -- shapes overlap at `$.messages[*].content`, so the wrong value scans
-    -- the user's typed message and nothing else, sending the system prompt,
-    -- every tool_result and the end-user id to the provider in the clear
-    -- without erroring. `request_json_paths` MERGES with the detected base
-    -- set, and is REQUIRED for a body shape that is not recognised.
-    { request_json_paths  = { type = "array", elements = { type = "string" }, default = {} } },
-    { response_json_paths = { type = "array", elements = { type = "string" }, default = {} } },
   },
 }
 
@@ -428,7 +425,6 @@ return {
           -- unrecognised keys are ignored. Contains identifiers only, never a
           -- credential, so it is neither encrypted nor referenceable.
           { skyflow    = skyflow    },
-          { targeting  = targeting  },
           { operations = operations },
         },
 
@@ -446,16 +442,13 @@ return {
         --     have been a schema rule anyway: the shape is not known at config
         --     time.
         entity_checks = {
-          -- A vault id must come from SOMEWHERE. This catches the empty config at
-          -- save time; it cannot verify that a supplied vault_details block
-          -- actually contains VAULT_ID, which is why handler.lua re-checks the
-          -- resolved value per request.
-          { at_least_one_of = { "skyflow.vault_id", "skyflow.vault_details" } },
-          -- Likewise the vault URL, which has three possible sources: an explicit
-          -- override, VAULT_URL inside the pasted block, or reconstruction from
-          -- cluster_id.
-          { at_least_one_of = { "skyflow.cluster_id", "skyflow.vault_details",
-                                "skyflow.base_url_override" } },
+          { conditional = {
+              if_field = "skyflow.deidentify.configuration_source",
+              if_match = { eq = "config_id" },
+              then_field = "skyflow.deidentify.config_id",
+              then_match = { required = true },
+          } },
+
 
           { conditional = {
               if_field = "skyflow.reidentify.strategy", if_match = { eq = "mapping_only" },

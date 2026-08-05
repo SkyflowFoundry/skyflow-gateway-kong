@@ -31,29 +31,34 @@ services:
     plugins:
       - name: skyflow-ai-data-control
         config: &skyflow_deid_reid
-          vault_id: demo-vault
-          cluster_id: demo
-          skyflow_base_url_override: "http://mock-skyflow:8080"
+          skyflow:
+            vault_configuration:
+              vault_id: demo-vault
+              # vault_url doubles as the base-URL override: pointing it at the mock is
+              # the whole reason this harness can run with no Skyflow account.
+              vault_url: "http://mock-skyflow:8080"
           # `credentials.api_key` moved under `credentials.bearer_token` when the auth
           # this file kept it -- so Kong aborted at startup with
           # "in 'api_key': unknown field" and the 60-second demo could not run at
           # all. expected_issuer/expected_audience are deliberately UNSET here so
           # the harness accepts the fixture JWT below without an IdP; a real
           # deployment must set both (see deploy/streaming/kong.yaml).
-          credentials:
-            sts:
-              service_account_id: "demo-service-account"
-              token_uri: "http://mock-skyflow:8080/v1/auth/sts/token"
+            credentials:
+              sts:
+                service_account_id: "demo-service-account"
+                token_uri: "http://mock-skyflow:8080/v1/auth/sts/token"
           # The local mock
           # tokenizes by lookup table (ignores entity_types), so this list is for
           # parity; the healthcare values live in mock-skyflow/nginx.conf.
-          deidentify:
-            entities: [NAME, NAME_GIVEN, NAME_MEDICAL_PROFESSIONAL, OCCUPATION,
-                       HEALTHCARE_NUMBER, ORGANIZATION_MEDICAL_FACILITY, CONDITION,
-                       DRUG, DOSE, DOB, EMAIL_ADDRESS, PHONE_NUMBER]
-            token_format: VAULT_TOKEN
-          reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
-          on_skyflow_error: deny
+            deidentify:
+              entities: [NAME, NAME_GIVEN, NAME_MEDICAL_PROFESSIONAL, OCCUPATION,
+                         HEALTHCARE_NUMBER, ORGANIZATION_MEDICAL_FACILITY, CONDITION,
+                         DRUG, DOSE, DOB, EMAIL_ADDRESS, PHONE_NUMBER]
+              token_format: VAULT_TOKEN
+            reidentify: { enabled: true, strategy: reidentify_text }
+          operations:
+            on_error:
+              skyflow: deny
 
   # -- REPRO of the #14380 conflict: ai-proxy + a response-phase re-identify on
   #    ONE route. skyflow-ai-data-control does both de-id (access) AND re-id

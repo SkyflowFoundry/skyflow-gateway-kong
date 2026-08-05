@@ -46,12 +46,12 @@ local T = M._test
 -- These cases assert path and span behaviour, not config shape, so rather than
 -- restate every literal they are written flat and nested here on the way in.
 local function as_conf(c)
-  if c.skyflow or c.targeting or c.operations then return c end
+  if c.skyflow or c.operations then return c end
   return {
     skyflow = {
-      vault_details = c.vault_details, vault_id = c.vault_id,
-      cluster_id = c.cluster_id, account_id = c.account_id,
-      base_url_override = c.base_url_override,
+      vault_configuration = {
+        vault_id = c.vault_id, account_id = c.account_id, vault_url = c.vault_url,
+      },
       deidentify = c.deidentify, reidentify = c.reidentify,
     },
     targeting = {
@@ -63,7 +63,9 @@ local function as_conf(c)
   }
 end
 
-local function EP3(conf, phase, formats) return T.effective_paths(as_conf(conf), phase, formats) end
+-- effective_paths takes (phase, formats) now: there are no operator path
+-- overrides, so the conf these cases used to pass is no longer read.
+local function EP3(_conf, phase, formats) return T.effective_paths(phase, formats) end
 
 -- `profile` was removed from the config: the wire format is detected from the body.
 -- These cases were written against the old field, and what they assert (which paths
@@ -132,10 +134,11 @@ local out = T.reidentify_string("Hi [NAME_a], SSN [SSN_b], card [CC_c].", by_tok
 eq(out, "Hi Jane, SSN [SSN_b], card ************1111.", "reidentify honors treatments")
 
 
--- 5. generic override replaces defaults
-local g = EP({ profile = "generic", request_json_paths = { "$.x" }, response_json_paths = {} }, "request")
-eq(g[1], "$.x", "generic uses override")
-eq(#g, 1, "generic override count")
+-- 5. An unrecognised shape yields NO paths, and there is no override to supply
+-- them: the supported formats are OpenAI, Anthropic and MCP, so anything else is a
+-- misrouted request rather than a config gap. The access phase turns this into a
+-- 422 rather than scanning nothing and reporting success.
+eq(#T.effective_paths("request", {}), 0, "no detected format means nothing to scan")
 
 -- 5b. The `generic` profile has NO built-in paths on either leg, so it is the one
 -- profile that can be configured to do nothing while reporting success. Both legs
@@ -695,25 +698,16 @@ eq(idfound["search records for Jane Doe"], nil,
 eq(idfound["e.g. Jane Doe"], nil,
    "input_schema property descriptions are NOT scanned by default")
 
--- ...but they must still WORK when an operator opts in, because the surface is
--- real. request_json_paths MERGES with the profile's base set.
-local optin = { profile = "anthropic", response_json_paths = {},
-  request_json_paths = { "$.tools[*].description",
-                         "$.tools[*].input_schema.properties.*.description" } }
-local optspans = T.collect_spans({
-  tools = { { name = "lookup", description = "search records for Jane Doe",
-              input_schema = { properties = { q = { description = "e.g. Jane Doe" } } } } },
-}, EP(optin, "request"))
-local optfound = {}
-for _, sp in ipairs(optspans) do optfound[sp.text] = true end
-eq(optfound["search records for Jane Doe"], true, "opt-in reaches tools[].description")
-eq(optfound["e.g. Jane Doe"], true, "opt-in reaches property descriptions")
+-- There is no longer an opt-in for them: the paths are not configurable, so the
+-- span-amplification decision above is now the only behaviour. Re-enabling the
+-- surface means editing PROFILE_PATHS and raising max_spans in the same change.
 
--- enums and defaults stay unscanned even when opted in: tokenizing a value the
--- provider validates against would break the tool contract
+-- Tool enums and defaults stay unscanned. Tokenizing a value the provider
+-- validates against would break the tool contract, so the built-in paths reach
+-- neither -- not even via the tool-description paths, were those ever enabled.
 local enumspans = T.collect_spans({ tools = { { name = "t",
   input_schema = { properties = { status = { ["enum"] = { "OPEN", "CLOSED" }, default = "OPEN" } } } } } },
-  EP(optin, "request"))
+  T.effective_paths("request", { "anthropic" }))
 eq(#enumspans, 0, "tool enums/defaults are intentionally left alone")
 
 -- A path that duplicates one already in the profile base must not double the
@@ -727,10 +721,15 @@ eq(#EP(dupconf, "response"), 1, "a redundant path is deduped, not appended")
 local dupdoc = { content = { { type = "text", text = "one" }, { type = "text", text = "two" } } }
 eq(#T.collect_spans(dupdoc, EP(dupconf, "response")), 2,
    "two text blocks yield two spans, not four")
--- and deduping must not break genuine extension
-local extconf = { profile = "anthropic", request_json_paths = {},
-                  response_json_paths = { "$.content[*].text", "$.content[*].thinking" } }
-eq(#EP(extconf, "response"), 2, "a genuinely new path is still added")
+-- Dedupe still earns its place on the UNION: an ambiguous body detects as both
+-- chat formats, and the two share paths, so without it every shared path would
+-- collect its spans twice.
+local uni = T.effective_paths("request", { "anthropic", "openai" })
+local uniseen = {}
+for _, pth in ipairs(uni) do
+  eq(uniseen[pth], nil, "union is deduped: " .. pth)
+  uniseen[pth] = true
+end
 
 -- 20. SSE emitter fidelity. This emitter is an ALLOWLIST, so every content type
 -- Anthropic adds was silently discarded -- invisible content loss, and history
@@ -794,72 +793,6 @@ eq(select(2, with_usage:gsub("data: ", "")), 3,
    "include_usage yields content chunk + usage chunk + [DONE]")
 eq(with_usage:find("[DONE]", 1, true) ~= nil, true, "[DONE] still terminates the stream")
 
-
--- ---------------------------------------------------------------------------
--- 25. vault_details: the admin UI's "copy vault details" block, taken verbatim.
---
--- The point is to remove hand-transcription of several opaque 32-character ids,
--- so the parser has to survive a real paste rather than a tidied one.
-local PASTE = [[
-VAULT_NAME="Detect93533"
-VAULT_DESCRIPTION="Detect vault consists of columns to store entities idenfied during deidentification of any text, Eg: name, age, ssn etc."
-WORKSPACE_ID="k1ca4415485b4c06a0415e83baa8a8b5"
-ACCOUNT_ID="j58448d299cf4e42ac433948d9c70d94"
-VAULT_URL="https://ebfc9bee4242.vault.skyflowapis.com"
-VAULT_ID="i65a450543bf48b68c3fa58c5ed7ce30"
-]]
-local vd = T.parse_vault_details(PASTE)
-eq(vd.VAULT_ID, "i65a450543bf48b68c3fa58c5ed7ce30", "VAULT_ID read from a real paste")
-eq(vd.ACCOUNT_ID, "j58448d299cf4e42ac433948d9c70d94", "ACCOUNT_ID read from a real paste")
-eq(vd.VAULT_URL, "https://ebfc9bee4242.vault.skyflowapis.com", "VAULT_URL read from a real paste")
--- The description is prose containing commas, colons and spaces. Tokenizing on
--- any of those would truncate it and, worse, could truncate a value that matters.
-eq(vd.VAULT_DESCRIPTION,
-   "Detect vault consists of columns to store entities idenfied during deidentification of any text, Eg: name, age, ssn etc.",
-   "a prose value with commas and colons survives whole")
-
-local pasted = as_conf({ vault_details = PASTE })
-eq(T.vault_id_of(pasted), "i65a450543bf48b68c3fa58c5ed7ce30", "vault_id resolves from the block")
-eq(T.account_id_of(pasted), "j58448d299cf4e42ac433948d9c70d94", "account_id resolves from the block")
-eq(T.base_url(pasted), "https://ebfc9bee4242.vault.skyflowapis.com", "base URL comes from VAULT_URL")
-
--- An explicit field wins, so one value can be overridden without editing the paste.
-eq(T.vault_id_of(as_conf({ vault_details = PASTE, vault_id = "iOVERRIDE" })), "iOVERRIDE",
-   "an explicit vault_id beats the pasted block")
-
--- VAULT_URL carries the ENVIRONMENT, which rebuilding from a cluster id cannot.
--- A sandbox vault therefore needs no base_url_override.
-eq(T.base_url(as_conf({ vault_details = 'VAULT_URL="https://abc.vault.skyflowapis.tech"' })),
-   "https://abc.vault.skyflowapis.tech", "a non-prod vault URL is used as-is")
--- ...and an explicit override still beats it.
-eq(T.base_url(as_conf({ vault_details = PASTE, base_url_override = "https://local.test/" })),
-   "https://local.test", "base_url_override wins and loses its trailing slash")
--- Falling back to cluster_id still works for configs written before the block existed.
-eq(T.base_url(as_conf({ cluster_id = "cl1" })), "https://cl1.vault.skyflowapis.com",
-   "cluster_id reconstruction still works")
-
--- Paste-target tolerance. Each of these is something a human plausibly produces.
-local tolerant = {
-  { "unquoted",      'VAULT_ID=i1' },
-  { "single quotes", "VAULT_ID='i1'" },
-  { "export prefix", 'export VAULT_ID="i1"' },
-  { "CRLF endings",  'VAULT_ID="i1"\r\nACCOUNT_ID="j1"' },
-  { "# comment",     '# my vault\nVAULT_ID="i1"' },
-  { "blank lines",   '\n\nVAULT_ID="i1"\n\n' },
-  { "lowercase key", '{"vault_id":"i1"}' },
-  { "JSON object",   '{"VAULT_ID":"i1"}' },
-}
-for _, case in ipairs(tolerant) do
-  eq(T.parse_vault_details(case[2]).VAULT_ID, "i1", "tolerates " .. case[1])
-end
-
--- Junk must yield nothing rather than a wrong value: a half-resolved vault id is
--- worse than none, because the access-phase guard only fails closed on absence.
-eq(next(T.parse_vault_details("hello world")) == nil, true, "prose yields no keys")
-eq(next(T.parse_vault_details("")) == nil, true, "empty string yields no keys")
-eq(next(T.parse_vault_details(nil)) == nil, true, "nil yields no keys")
-eq(T.vault_id_of(as_conf({})), nil, "no source at all resolves to nil, for the guard to catch")
-eq(T.base_url(as_conf({})), nil, "and so does the base URL")
 
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)

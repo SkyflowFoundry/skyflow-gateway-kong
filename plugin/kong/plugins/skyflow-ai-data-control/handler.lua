@@ -9,7 +9,7 @@
 --   * access  -> full de-identify of request bodies (Skyflow Detect)
 --   * response-> re-identify via `mapping_only` (pure, request-scoped map) OR
 --                `reidentify_text` (resolves real VAULT_TOKENs through Skyflow
---                /v1/detect/reidentify/string -- works regardless of our map)
+--                /v2/detect/reidentify/string -- works regardless of our map)
 --   * auth    -> STS delegation only (RFC 8693): exchange the CALLER's IdP
 --                token for a short-lived Skyflow bearer whose `ctx` is their
 --                signed claims. The gateway holds NO Skyflow credential.
@@ -50,7 +50,7 @@ local inflate_gzip = ok_gzip and kgzip and kgzip.inflate_gzip or nil
 local kong = kong
 local ngx  = ngx
 
-local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.5.0" }
+local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.6.0" }
 
 --==========================================================================--
 -- Pure helpers (no Kong/ngx deps) — exercised offline via SkyflowAIDataControl._test
@@ -308,26 +308,15 @@ local function detect_formats(doc, phase)
   return {}
 end
 
-local function effective_paths(conf, phase, formats)
-  -- Union the base sets of every candidate format. Dedupe throughout:
-  -- collect_spans walks each path independently and appends, so a path listed
-  -- twice collects every matching span twice -- and then every span is sent to
-  -- Detect twice, doubling latency and cost for no effect, and counting twice
-  -- against max_spans for a premature 413. This is not hypothetical: the
-  -- deployed config set `response_json_paths: ["$.content[*].text"]`, which is
-  -- ALREADY the anthropic response default, so every assistant text block was
-  -- detokenized twice. Merging is the documented way to extend the built-in set,
-  -- so the merge has to be idempotent rather than trusting operators to know the
-  -- base set by heart.
+local function effective_paths(phase, formats)
+  -- Union the built-in path sets of every candidate format, deduped. Detection
+  -- returns two candidates when a body is genuinely ambiguous, and the two chat
+  -- formats share paths -- collect_spans walks each path independently and
+  -- appends, so a duplicate would collect every span twice, send each to Detect
+  -- twice, and count twice against max_spans for a premature 413.
   local merged, seen = {}, {}
   for _, fmt in ipairs(formats or {}) do
     for _, s in ipairs((PROFILE_PATHS[fmt] or PROFILE_PATHS.generic)[phase] or {}) do
-      if not seen[s] then seen[s] = true; merged[#merged + 1] = s end
-    end
-  end
-  local override = (phase == "request") and conf.targeting.request_json_paths or conf.targeting.response_json_paths
-  if override and #override > 0 then
-    for _, s in ipairs(override) do
       if not seen[s] then seen[s] = true; merged[#merged + 1] = s end
     end
   end
@@ -558,119 +547,43 @@ local function request_deadline(conf)
   return ngx.now() + (budget_ms / 1000)
 end
 
---==========================================================================--
--- Vault identity from one paste
+-- The vault URL exactly as the Skyflow admin UI shows it, e.g.
+-- https://ebfc9bee4242.vault.skyflowapis.com. Taken whole rather than rebuilt
+-- from a cluster id, because the host also encodes the ENVIRONMENT -- a sandbox
+-- vault lives on .skyflowapis.tech, which no amount of cluster-id concatenation
+-- would reach.
 --
--- The Skyflow admin UI's "copy vault details" button yields a block of
--- shell-style assignments:
+-- Tolerant about the two things people actually paste: a trailing slash, and a
+-- bare host with no scheme.
+-- Bearers are re-minted this many seconds before their own `exp`. A fixed margin
+-- rather than a config field: it guards against clock skew and in-flight latency,
+-- which is not something a deployment tunes, and it was one more box in a form
+-- that had too many.
+-- Re-identification behaviours that used to be config fields. Fixed, because each
+-- had exactly one sensible value and together they were four more boxes in a form
+-- that had too many:
 --
---   VAULT_NAME="Detect93533"
---   VAULT_DESCRIPTION="Detect vault consists of columns to store entities..."
---   WORKSPACE_ID="k1ca4415485b4c06a0415e83baa8a8b5"
---   ACCOUNT_ID="j58448d299cf4e42ac433948d9c70d94"
---   VAULT_URL="https://ebfc9bee4242.vault.skyflowapis.com"
---   VAULT_ID="i65a450543bf48b68c3fa58c5ed7ce30"
---
--- Taking it verbatim removes the step where someone hand-transcribes several
--- opaque 32-character ids into separate form fields -- the kind of copying that
--- cannot be eyeballed afterwards, where one wrong character surfaces much later
--- as an unhelpful 404 from the vault. Nothing here is a credential: these are
--- identifiers and grant no access on their own.
---
--- Deliberately tolerant, because it is a paste target rather than a format we
--- control: optional quotes, an optional `export ` prefix, blank lines, `#`
--- comments, CRLF line endings and unrecognised keys are all accepted. A JSON
--- object with the same keys works too, since that is what people tend to assume
--- the format is.
-local EMPTY_DETAILS = {}
+--   on_error = return_tokenized -- the upstream call already SUCCEEDED, so failing
+--     the whole response over re-identification would throw away a paid-for answer.
+--     Degrading to tokens is visible to the caller and leaks nothing.
+--   streaming = buffer -- re-identification needs the whole body: a token like
+--     [NAME_xjv74g] split across SSE chunks cannot be matched.
+--   default_treatment = plain_text, entity_treatment = {} -- per-entity masking
+--     only ever applied under the mapping_only strategy, and the default strategy
+--     is reidentify_text, so these were inert for every real deployment.
+local REID_ON_ERROR         = "return_tokenized"
+local REID_STREAMING        = "buffer"
+local REID_DEFAULT_TREATMENT = "plain_text"
+local REID_ENTITY_TREATMENT  = {}
 
-local function parse_vault_details(text)
-  if type(text) ~= "string" or text == "" then return EMPTY_DETAILS end
-  local out = {}
-
-  local trimmed = text:match("^%s*(.-)%s*$")
-  if trimmed:sub(1, 1) == "{" then
-    local doc = cjson.decode(trimmed)
-    if type(doc) == "table" then
-      for k, v in pairs(doc) do
-        if type(v) == "string" then out[tostring(k):upper()] = v end
-      end
-      return out
-    end
-    -- Looked like JSON and was not; fall through to line parsing rather than
-    -- returning nothing, so a half-edited paste still yields what it can.
-  end
-
-  for line in (text .. "\n"):gmatch("([^\r\n]*)\r?\n") do
-    local body = line:gsub("^%s+", ""):gsub("%s+$", "")
-    if body ~= "" and body:sub(1, 1) ~= "#" then
-      body = body:gsub("^export%s+", "")
-      local k, v = body:match("^([%w_]+)%s*=%s*(.*)$")
-      if k then
-        -- Strip at most one matching pair of surrounding quotes. Do NOT tokenize
-        -- on whitespace or commas: VAULT_DESCRIPTION is prose and contains both.
-        local q = v:sub(1, 1)
-        if (q == '"' or q == "'") and v:sub(-1) == q and #v >= 2 then
-          v = v:sub(2, -2)
-        end
-        out[k:upper()] = v
-      end
-    end
-  end
-  return out
-end
-
--- Parsing the same unchanging string on every request is pure waste, so memoize
--- on the blob itself. Bounded, because the key is operator-supplied: a config
--- churning through many distinct values must not grow this without limit.
-local vault_details_cache, vault_details_cache_n = {}, 0
-
-local function vault_details(conf)
-  local raw = conf.skyflow.vault_details
-  if type(raw) ~= "string" or raw == "" then return EMPTY_DETAILS end
-  local hit = vault_details_cache[raw]
-  if hit then return hit end
-  local parsed = parse_vault_details(raw)
-  if vault_details_cache_n >= 16 then
-    vault_details_cache, vault_details_cache_n = {}, 0
-  end
-  vault_details_cache[raw] = parsed
-  vault_details_cache_n = vault_details_cache_n + 1
-  return parsed
-end
-
--- An explicitly set field always beats the pasted block, so an operator can
--- paste the block and still override one value without editing the paste.
-local function vault_id_of(conf)
-  if conf.skyflow.vault_id and conf.skyflow.vault_id ~= "" then return conf.skyflow.vault_id end
-  return vault_details(conf).VAULT_ID
-end
-
-local function account_id_of(conf)
-  if conf.skyflow.account_id and conf.skyflow.account_id ~= "" then return conf.skyflow.account_id end
-  return vault_details(conf).ACCOUNT_ID
-end
+local TOKEN_SKEW_SECONDS = 300
 
 local function base_url(conf)
-  if conf.skyflow.base_url_override and conf.skyflow.base_url_override ~= "" then
-    return (conf.skyflow.base_url_override:gsub("/+$", ""))
-  end
-  -- VAULT_URL beats rebuilding from cluster_id because it also carries the
-  -- ENVIRONMENT. The reconstruction below hardcodes .vault.skyflowapis.com, so a
-  -- sandbox or dev vault (.tech / .dev) needed an explicit override -- and the
-  -- failure mode was a bare connection error rather than anything naming the
-  -- cause.
-  local vurl = vault_details(conf).VAULT_URL
-  if vurl and vurl ~= "" then return (vurl:gsub("/+$", "")) end
-  local cluster = conf.skyflow.cluster_id
-  if not cluster or cluster == "" then cluster = vault_details(conf).CLUSTER_ID end
-  if cluster and cluster ~= "" then
-    return "https://" .. cluster .. ".vault.skyflowapis.com"
-  end
-  -- Callers must handle nil: the access-phase guard fails the request closed
-  -- rather than letting a nil concatenation error surface as a 500 with no
-  -- explanation.
-  return nil
+  local u = conf.skyflow.vault_configuration.vault_url or ""
+  u = u:gsub("%s+", ""):gsub("/+$", "")
+  if u == "" then return nil end
+  if not u:find("^https?://") then u = "https://" .. u end
+  return u
 end
 
 --==========================================================================--
@@ -811,7 +724,7 @@ local function sts_bearer(conf, deadline)
                     .. tostring(claims.sub or claims.oid or "?") .. "\n"
                     .. tostring(claims.exp or 0)
   local hit = TOKEN_CACHE[cache_key]
-  if hit and hit.exp - (conf.skyflow.token_skew_seconds or 300) > ngx.now() then
+  if hit and hit.exp - TOKEN_SKEW_SECONDS > ngx.now() then
     return "Bearer " .. hit.token
   end
 
@@ -980,7 +893,7 @@ local function jwt_credential_bearer(conf, deadline)
   -- kong_request_id is unique per request, so including it made the key unique per
   -- request and the cache could never hit: every single request signed a 2048-bit
   -- RS256 assertion and did a live HTTPS exchange with Skyflow, continuously
-  -- refilling and wiping the 256-slot cache, and making token_skew_seconds dead
+  -- refilling and wiping the 256-slot cache, and making the skew margin dead
   -- config. Measured: 3 token-endpoint POSTs across 3 request ids, where 1 was
   -- correct.
   --
@@ -998,7 +911,7 @@ local function jwt_credential_bearer(conf, deadline)
                     .. b64url_encode(tostring(sa.privateKey)):sub(1, 24) .. "\n"
                     .. table.concat(ctx_key, "&")
   local hit = TOKEN_CACHE[cache_key]
-  if hit and hit.exp - (conf.skyflow.token_skew_seconds or 300) > ngx.now() then
+  if hit and hit.exp - TOKEN_SKEW_SECONDS > ngx.now() then
     return "Bearer " .. hit.token
   end
 
@@ -1121,7 +1034,7 @@ end
 local function skyflow_post(conf, authz, path, payload, deadline)
   local url = base_url(conf) .. path
   local headers = { ["Authorization"] = authz, ["Content-Type"] = "application/json" }
-  local acct = account_id_of(conf)
+  local acct = conf.skyflow.vault_configuration.account_id
   if acct and acct ~= "" then
     headers["X-SKYFLOW-ACCOUNT-ID"] = acct
   end
@@ -1339,13 +1252,13 @@ local function deidentify_file(conf, authz, b64, fmt, deadline)
 
   local body = cjson.encode({
     dataSource = "BASE64", value = b64, dataFormat = fmt,
-    configuration = { vaultId = vault_id_of(conf), detect = detect, media = media_cfg },
+    configuration = { vaultId = conf.skyflow.vault_configuration.vault_id, detect = detect, media = media_cfg },
   })
 
   local httpc = http.new()
   httpc:set_timeout(conf.operations.limits.timeout_ms)
   local headers = { ["Authorization"] = authz, ["Content-Type"] = "application/json" }
-  local acct = account_id_of(conf)
+  local acct = conf.skyflow.vault_configuration.account_id
   if acct and acct ~= "" then
     headers["X-SKYFLOW-ACCOUNT-ID"] = acct
   end
@@ -1360,7 +1273,7 @@ local function deidentify_file(conf, authz, b64, fmt, deadline)
   if not run_id then return nil, nil, "no runId in submit response" end
 
   local poll_url = base_url(conf) .. "/v2/detect/runs/" .. run_id
-                   .. "?vaultId=" .. vault_id_of(conf)
+                   .. "?vaultId=" .. conf.skyflow.vault_configuration.vault_id
   local interval = (m.poll_interval_ms or 500) / 1000
   while true do
     if deadline and ngx.now() >= deadline then
@@ -1444,19 +1357,71 @@ local function process_media(conf, authz, data, deadline)
   return processed, stripped
 end
 
+-- Detect requires a `destination` for every entity tokenized as VAULT_TOKEN: the
+-- vault table.column that stores the detected value. Omitting it fails with
+-- "Missing Destination for entity NAME in DetectConfigV2", and it is a
+-- tableColumn reference rather than an enum -- a value like "VAULT" is rejected
+-- with "invalid tableColumn format".
+--
+-- Derived rather than configured, because the Detect vault schema is mechanical:
+-- one table whose every column is the lower-cased entity type plus "_entity"
+-- (age_entity, credit_card_entity, driver_license_entity...). Asking an operator
+-- to map up to 70 entity types onto columns by hand would restate a rule the
+-- schema already follows, and put back the config sprawl this plugin has shed.
+--
+-- `destination_table` exists because the convention is a convention, not a
+-- contract: a hand-built vault can name its table anything.
+local function destination_for(d, entity)
+  return (d.destination_table or "table1") .. "." .. string.lower(entity) .. "_entity"
+end
+
+-- `configurationId` and inline `configuration` are the two arms of a protobuf
+-- oneof named `configurationSource`, so they are mutually exclusive server-side:
+-- sending both fails with "oneof ... configurationSource is already set". The
+-- config field selects one and never merges -- the same no-fallback contract
+-- `credentials.method` follows.
+local function deidentify_payload(conf, d, text)
+  if d.configuration_source == "config_id" then
+    -- A saved configuration owns every detection decision, so no vaultId travels
+    -- with it. The field is camelCase ONLY: `configuration_id` is refused as an
+    -- unknown field. Note that an id which does not resolve reports "Field
+    -- vault_id or configuration_id is missing in the request", which names the
+    -- wrong problem -- hence the explicit config-time requirement in schema.lua.
+    return { text = text, configurationId = d.config_id }
+  end
+
+  local entities = {}
+  for _, e in ipairs(d.entities or {}) do
+    entities[#entities + 1] = {
+      entityType = e:upper(),
+      deidentificationType = d.token_format,
+      destination = destination_for(d, e),
+    }
+  end
+  if #entities == 0 then
+    -- An empty list means "everything", and ALL has no single column to store
+    -- into, so it pairs with a counter rather than a vault token. This is the
+    -- same reason the attachment path avoids the destination requirement.
+    entities[1] = { entityType = "ALL", deidentificationType = "ENTITY_UNIQUE_COUNTER" }
+  end
+
+  local detect = { entities = entities, returnEntities = "ALL" }
+  -- `skip` suppresses false POSITIVES: matches are left as plaintext. `restrict`
+  -- catches false NEGATIVES: matches become [RESTRICTED] whether or not a
+  -- detector fired. Worth keeping straight -- they are not two halves of one
+  -- allow/deny pair.
+  if d.allow_regex and #d.allow_regex > 0 then detect.skip = d.allow_regex end
+  if d.restrict_regex and #d.restrict_regex > 0 then detect.restrict = d.restrict_regex end
+
+  return { text = text, configuration = { vaultId = conf.skyflow.vault_configuration.vault_id, detect = detect } }
+end
+
 local function deidentify_text(conf, authz, text, deadline)
   local d = conf.skyflow.deidentify
-  local payload = {
-    text = text,
-    vault_id = vault_id_of(conf),
-    entity_types = lower_list(d.entities),
-    token_type = { default = string.lower(d.token_format) },
-    allow_regex_list = (#d.allow_regex > 0) and d.allow_regex or nil,
-    restrict_regex_list = (#d.restrict_regex > 0) and d.restrict_regex or nil,
-  }
-  local data, err = skyflow_post(conf, authz, "/v1/detect/deidentify/string", payload, deadline)
+  local data, err = skyflow_post(conf, authz, "/v2/detect/deidentify/string",
+                                 deidentify_payload(conf, d, text), deadline)
   if not data then return nil, err end
-  return data.processed_text or text, data.entities or {}
+  return data.processedText or text, data.entities or {}
 end
 
 -- Re-identify one text via Skyflow: resolves real vault tokens embedded in the
@@ -1464,13 +1429,20 @@ end
 -- the vault, so this is the vault-authoritative re-id path (independent of the
 -- request-scoped map). Returns re-identified text (or nil, err).
 local function skyflow_reidentify(conf, authz, text, deadline)
-  local payload = { text = text, vault_id = vault_id_of(conf) }
+  -- vaultId sits at the TOP level here, not inside `configuration` as it does on
+  -- the de-identify call. Asymmetric, but that is the wire contract.
+  --
+  -- `redactionLevel` is deliberately omitted: absent, the API returns full
+  -- plaintext, and per-entity masking/redaction is applied locally afterwards so
+  -- that one code path covers both this vault-authoritative route and the
+  -- request-scoped mapping route.
+  local payload = { text = text, vaultId = conf.skyflow.vault_configuration.vault_id }
   -- third return value carries the failure KIND; "unmatched_token" is benign on
   -- this leg and the caller degrades instead of failing the whole response.
-  local data, err, kind = skyflow_post(conf, authz, "/v1/detect/reidentify/string",
+  local data, err, kind = skyflow_post(conf, authz, "/v2/detect/reidentify/string",
                                        payload, deadline)
   if not data then return nil, err, kind end
-  return data.processed_text or data.text or text
+  return data.processedText or data.text or text
 end
 
 local function has_body()
@@ -1478,9 +1450,11 @@ local function has_body()
   return m == "POST" or m == "PUT" or m == "PATCH"
 end
 
-local function wants_json(conf, ct)
-  if conf.targeting.content_type == "json" then return true end
-  if conf.targeting.content_type == "text" then return false end
+-- JSON is assumed, and sniffed from the header rather than configured: every
+-- payload this plugin exists to protect is a JSON chat body. A non-JSON body still
+-- gets handled -- as a single whole-body span -- it just is not something a route
+-- declares up front.
+local function wants_json(ct)
   ct = ct or ""
   return ct:find("application/json", 1, true) ~= nil or ct:find("+json", 1, true) ~= nil
 end
@@ -1688,9 +1662,9 @@ local function run_access(conf, ctx)
   -- tokenized SSE the provider produced, which is that route's whole purpose.
 
   local will_reemit = conf.skyflow.reidentify.enabled
-                      and conf.skyflow.reidentify.streaming ~= "passthrough"
+                      and REID_STREAMING ~= "passthrough"
 
-  local json_mode = wants_json(conf, kong.request.get_header("Content-Type"))
+  local json_mode = wants_json(kong.request.get_header("Content-Type"))
 
   -- Build the list of text spans to process.
   local doc, spans
@@ -1702,63 +1676,22 @@ local function run_access(conf, ctx)
       end
       return { ok = true }
     end
-    -- Vault identity has to resolve before anything is sent anywhere. vault_id
-    -- and cluster_id are no longer schema-`required`, because either may arrive
-    -- inside the pasted `vault_details` block instead -- which the schema cannot
-    -- look inside. So the completeness check lands here, once per request, and
-    -- fails CLOSED: without a vault there is nothing to de-identify against, and
-    -- forwarding would send the body onward untouched.
-    if not vault_id_of(conf) or vault_id_of(conf) == "" then
-      kong.log.err("skyflow: no vault id -- set vault_id, or paste a vault_details ",
-                   "block containing VAULT_ID")
-      return { deny = true, status = 500,
-               body = { message = "request blocked: gateway misconfigured "
-                                  .. "(no Skyflow vault id)" } }
-    end
-    if not base_url(conf) then
-      kong.log.err("skyflow: cannot determine the vault base URL -- set cluster_id, ",
-                   "or paste a vault_details block containing VAULT_URL, or set ",
-                   "skyflow_base_url_override")
-      return { deny = true, status = 500,
-               body = { message = "request blocked: gateway misconfigured "
-                                  .. "(no Skyflow vault URL)" } }
-    end
-
     ctx.formats = detect_formats(doc, "request")
 
-    -- No recognised wire format and no explicit paths means there is nothing to
-    -- look at, so we would de-identify precisely nothing while reporting success
-    -- -- the exact silent passthrough this plugin must not do. This replaces two
-    -- schema entity checks on the old `profile: generic`; it has to live here
-    -- rather than in the schema because the shape is only known once the body is
-    -- parsed. Two ANDed conditions, so it was never expressible as a field rule.
-    if #ctx.formats == 0 and (not conf.targeting.request_json_paths or #conf.targeting.request_json_paths == 0) then
-      kong.log.err("skyflow: unrecognised request wire format; set request_json_paths ",
-                   "or content_type=text for this route")
-      return { deny = true, status = 500,
-               body = { message = "request blocked: gateway misconfigured "
-                                  .. "(unrecognised request format and no "
-                                  .. "request_json_paths configured)" } }
+    -- FAIL CLOSED on a shape we do not recognise. Zero spans is indistinguishable
+    -- from "this body had no text in it", so without this the request would be
+    -- forwarded untouched while reporting success -- the one failure this plugin
+    -- must never have. There is deliberately no override to fall back on: the
+    -- supported shapes are OpenAI, Anthropic and MCP, and anything else is a
+    -- misrouted request rather than a configuration gap.
+    if #ctx.formats == 0 then
+      kong.log.err("skyflow: unrecognised request wire format; expected an OpenAI, ",
+                   "Anthropic or MCP payload")
+      return { deny = true, status = 422,
+               body = { message = "request blocked: unrecognised request format" } }
     end
 
-    -- The RESPONSE-leg twin, checked HERE so it fails before we pay for a
-    -- provider call rather than after. With no recognised format there are no
-    -- built-in response paths, so re-identification would collect zero spans --
-    -- indistinguishable from "the response had no text", so it takes the benign
-    -- branch and hands the CLIENT raw vault tokens, permanently, with nothing
-    -- anywhere saying why. Not a data leak, but the same silent-misconfiguration
-    -- class: a feature reported as enabled that never runs.
-    if #ctx.formats == 0 and conf.skyflow.reidentify.enabled
-       and (not conf.targeting.response_json_paths or #conf.targeting.response_json_paths == 0) then
-      kong.log.err("skyflow: unrecognised request wire format with reidentify.enabled ",
-                   "requires response_json_paths; nothing would ever be re-identified")
-      return { deny = true, status = 500,
-               body = { message = "request blocked: gateway misconfigured "
-                                  .. "(re-identification enabled but no "
-                                  .. "response_json_paths for an unrecognised format)" } }
-    end
-
-    spans = collect_spans(doc, effective_paths(conf, "request", ctx.formats))
+    spans = collect_spans(doc, effective_paths("request", ctx.formats))
   else
     spans = { { whole = true, text = raw } }
   end
@@ -1812,7 +1745,7 @@ local function run_access(conf, ctx)
       -- (2) in a multi-turn session the model echoes tokens minted on EARLIER
       -- turns, and those would come back to the caller unresolved.
       ctx.deidentified = true
-      if conf.skyflow.reidentify.streaming ~= "passthrough" then
+      if REID_STREAMING ~= "passthrough" then
         kong.service.request.clear_header("Accept-Encoding")
         kong.service.request.enable_buffering()
       end
@@ -1900,9 +1833,12 @@ local function run_access(conf, ctx)
   for _, ents in ipairs(results) do
     for _, e in ipairs(ents) do
       if e.token then
-        -- Detect returns the class as `entity_type` (e.g. "NAME"); keep the
-        -- internal field `entity` that reidentify/treatment lookups expect.
-        local etype = e.entity_type or e.entity
+        -- Detect returns the class as `entity_type` on V1 and `entityType` on V2;
+        -- keep the internal field `entity` that reidentify/treatment lookups
+        -- expect. Missing the V2 spelling leaves this nil, which does not error --
+        -- it silently disables every per-entity treatment (masked/redacted) and
+        -- files every count under "?".
+        local etype = e.entity_type or e.entityType or e.entity
         by_token[e.token] = { value = e.value, entity = etype }
         counts[etype or "?"] = (counts[etype or "?"] or 0) + 1
       end
@@ -1965,7 +1901,7 @@ local function run_access(conf, ctx)
   -- Buffer the response so this plugin's own response phase can re-identify it.
   -- Enable whenever we actually de-identified, independent of the reidentify
   -- setting, so a buffered body is available to read back.
-  if ctx.deidentified and conf.skyflow.reidentify.streaming ~= "passthrough" then
+  if ctx.deidentified and REID_STREAMING ~= "passthrough" then
     -- Prefer an uncompressed response so the response phase can parse it. Only a
     -- hint -- some upstreams (e.g. ai-proxy's own call) compress anyway, so the
     -- response phase also inflates gzip defensively.
@@ -2237,7 +2173,7 @@ function SkyflowAIDataControl:response(conf)
   if strat ~= "mapping_only" and strat ~= "reidentify_text" then
     kong.log.warn("skyflow reidentify strategy '", strat,
                   "' not implemented in this build; returning tokenized response")
-    if conf.skyflow.reidentify.on_error == "deny" then
+    if REID_ON_ERROR == "deny" then
       return kong.response.exit(502, { message = "response blocked: re-identify unavailable" })
     end
     return
@@ -2285,27 +2221,27 @@ function SkyflowAIDataControl:response(conf)
       -- answer rather than blaming Skyflow.
       if akind == "identity" then
         kong.log.warn("skyflow: caller identity rejected on the response leg: ", aerr)
-        if conf.skyflow.reidentify.on_error == "deny" then
+        if REID_ON_ERROR == "deny" then
           return kong.response.exit(401, { message = "response blocked: " .. tostring(aerr) })
         end
         reemit_tokenized_stream(ctx)
         return
       end
       kong.log.err("skyflow re-identify auth error: ", aerr)
-      if conf.skyflow.reidentify.on_error == "deny" then
+      if REID_ON_ERROR == "deny" then
         return kong.response.exit(502, { message = "response blocked: re-identify unavailable" })
       end
       reemit_tokenized_stream(ctx)
       return
     end
-    if next(conf.skyflow.reidentify.entity_treatment) or conf.skyflow.reidentify.default_treatment ~= "plain_text" then
+    if next(REID_ENTITY_TREATMENT) or REID_DEFAULT_TREATMENT ~= "plain_text" then
       kong.log.warn("skyflow: reidentify_text restores plaintext from the vault; ",
                     "entity_treatment/masking is not applied (use mapping_only for treatments)")
     end
   end
 
   local treatment_fn = function(entity)
-    return conf.skyflow.reidentify.entity_treatment[entity] or conf.skyflow.reidentify.default_treatment
+    return REID_ENTITY_TREATMENT[entity] or REID_DEFAULT_TREATMENT
   end
 
   -- Restore one text span. mapping_only substitutes from the request-scoped map
@@ -2362,7 +2298,7 @@ function SkyflowAIDataControl:response(conf)
 
     local newbody
     local streamed = false
-    if wants_json(conf, ct) then
+    if wants_json(ct) then
       local doc = body_json.decode(body)
       if doc == nil then
         call_err = "response body not decodable JSON"; return
@@ -2423,7 +2359,7 @@ function SkyflowAIDataControl:response(conf)
       -- no discriminator of its own (e.g. an empty or error-shaped body).
       local rformats = detect_formats(doc, "response")
       if #rformats == 0 then rformats = ctx.formats or {} end
-      local spans = collect_spans(doc, effective_paths(conf, "response", rformats))
+      local spans = collect_spans(doc, effective_paths("response", rformats))
       if #spans == 0 and not tool_changed then
         -- Nothing to re-identify (e.g. an empty response). If the client is
         -- streaming we STILL must hand back SSE, not the raw JSON completion, or
@@ -2473,7 +2409,7 @@ function SkyflowAIDataControl:response(conf)
     -- for a day.
     local detail = (not ok) and (": pcall: " .. tostring(perr))
                    or (call_err and (": " .. call_err) or "")
-    if conf.skyflow.reidentify.on_error == "deny" then
+    if REID_ON_ERROR == "deny" then
       kong.log.err("skyflow re-identify failed; WITHHOLDING the response (502)", detail)
       return kong.response.exit(502, { message = "response blocked: re-identify failed" })
     end
@@ -2509,9 +2445,6 @@ SkyflowAIDataControl._test = {
   collect_spans     = collect_spans,
   effective_paths   = effective_paths,
   detect_formats    = detect_formats,
-  parse_vault_details = parse_vault_details,
-  vault_id_of       = vault_id_of,
-  account_id_of     = account_id_of,
   base_url          = base_url,
   tool_policy       = tool_policy,
   classify_client_error = classify_client_error,
