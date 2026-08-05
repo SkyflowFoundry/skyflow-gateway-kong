@@ -50,7 +50,7 @@ local inflate_gzip = ok_gzip and kgzip and kgzip.inflate_gzip or nil
 local kong = kong
 local ngx  = ngx
 
-local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.4.0" }
+local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.5.0" }
 
 --==========================================================================--
 -- Pure helpers (no Kong/ngx deps) — exercised offline via SkyflowAIDataControl._test
@@ -325,7 +325,7 @@ local function effective_paths(conf, phase, formats)
       if not seen[s] then seen[s] = true; merged[#merged + 1] = s end
     end
   end
-  local override = (phase == "request") and conf.request_json_paths or conf.response_json_paths
+  local override = (phase == "request") and conf.targeting.request_json_paths or conf.targeting.response_json_paths
   if override and #override > 0 then
     for _, s in ipairs(override) do
       if not seen[s] then seen[s] = true; merged[#merged + 1] = s end
@@ -551,18 +551,126 @@ local function inject_token_preamble(doc, text, formats)
 end
 
 local function request_deadline(conf)
-  local budget_ms = conf.deadline_ms or 0
-  if conf.timeout_ms and budget_ms < conf.timeout_ms then
-    budget_ms = conf.timeout_ms
+  local budget_ms = conf.operations.limits.deadline_ms or 0
+  if conf.operations.limits.timeout_ms and budget_ms < conf.operations.limits.timeout_ms then
+    budget_ms = conf.operations.limits.timeout_ms
   end
   return ngx.now() + (budget_ms / 1000)
 end
 
-local function base_url(conf)
-  if conf.skyflow_base_url_override and conf.skyflow_base_url_override ~= "" then
-    return (conf.skyflow_base_url_override:gsub("/$", ""))
+--==========================================================================--
+-- Vault identity from one paste
+--
+-- The Skyflow admin UI's "copy vault details" button yields a block of
+-- shell-style assignments:
+--
+--   VAULT_NAME="Detect93533"
+--   VAULT_DESCRIPTION="Detect vault consists of columns to store entities..."
+--   WORKSPACE_ID="k1ca4415485b4c06a0415e83baa8a8b5"
+--   ACCOUNT_ID="j58448d299cf4e42ac433948d9c70d94"
+--   VAULT_URL="https://ebfc9bee4242.vault.skyflowapis.com"
+--   VAULT_ID="i65a450543bf48b68c3fa58c5ed7ce30"
+--
+-- Taking it verbatim removes the step where someone hand-transcribes several
+-- opaque 32-character ids into separate form fields -- the kind of copying that
+-- cannot be eyeballed afterwards, where one wrong character surfaces much later
+-- as an unhelpful 404 from the vault. Nothing here is a credential: these are
+-- identifiers and grant no access on their own.
+--
+-- Deliberately tolerant, because it is a paste target rather than a format we
+-- control: optional quotes, an optional `export ` prefix, blank lines, `#`
+-- comments, CRLF line endings and unrecognised keys are all accepted. A JSON
+-- object with the same keys works too, since that is what people tend to assume
+-- the format is.
+local EMPTY_DETAILS = {}
+
+local function parse_vault_details(text)
+  if type(text) ~= "string" or text == "" then return EMPTY_DETAILS end
+  local out = {}
+
+  local trimmed = text:match("^%s*(.-)%s*$")
+  if trimmed:sub(1, 1) == "{" then
+    local doc = cjson.decode(trimmed)
+    if type(doc) == "table" then
+      for k, v in pairs(doc) do
+        if type(v) == "string" then out[tostring(k):upper()] = v end
+      end
+      return out
+    end
+    -- Looked like JSON and was not; fall through to line parsing rather than
+    -- returning nothing, so a half-edited paste still yields what it can.
   end
-  return "https://" .. conf.cluster_id .. ".vault.skyflowapis.com"
+
+  for line in (text .. "\n"):gmatch("([^\r\n]*)\r?\n") do
+    local body = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if body ~= "" and body:sub(1, 1) ~= "#" then
+      body = body:gsub("^export%s+", "")
+      local k, v = body:match("^([%w_]+)%s*=%s*(.*)$")
+      if k then
+        -- Strip at most one matching pair of surrounding quotes. Do NOT tokenize
+        -- on whitespace or commas: VAULT_DESCRIPTION is prose and contains both.
+        local q = v:sub(1, 1)
+        if (q == '"' or q == "'") and v:sub(-1) == q and #v >= 2 then
+          v = v:sub(2, -2)
+        end
+        out[k:upper()] = v
+      end
+    end
+  end
+  return out
+end
+
+-- Parsing the same unchanging string on every request is pure waste, so memoize
+-- on the blob itself. Bounded, because the key is operator-supplied: a config
+-- churning through many distinct values must not grow this without limit.
+local vault_details_cache, vault_details_cache_n = {}, 0
+
+local function vault_details(conf)
+  local raw = conf.skyflow.vault_details
+  if type(raw) ~= "string" or raw == "" then return EMPTY_DETAILS end
+  local hit = vault_details_cache[raw]
+  if hit then return hit end
+  local parsed = parse_vault_details(raw)
+  if vault_details_cache_n >= 16 then
+    vault_details_cache, vault_details_cache_n = {}, 0
+  end
+  vault_details_cache[raw] = parsed
+  vault_details_cache_n = vault_details_cache_n + 1
+  return parsed
+end
+
+-- An explicitly set field always beats the pasted block, so an operator can
+-- paste the block and still override one value without editing the paste.
+local function vault_id_of(conf)
+  if conf.skyflow.vault_id and conf.skyflow.vault_id ~= "" then return conf.skyflow.vault_id end
+  return vault_details(conf).VAULT_ID
+end
+
+local function account_id_of(conf)
+  if conf.skyflow.account_id and conf.skyflow.account_id ~= "" then return conf.skyflow.account_id end
+  return vault_details(conf).ACCOUNT_ID
+end
+
+local function base_url(conf)
+  if conf.skyflow.base_url_override and conf.skyflow.base_url_override ~= "" then
+    return (conf.skyflow.base_url_override:gsub("/+$", ""))
+  end
+  -- VAULT_URL beats rebuilding from cluster_id because it also carries the
+  -- ENVIRONMENT. The reconstruction below hardcodes .vault.skyflowapis.com, so a
+  -- sandbox or dev vault (.tech / .dev) needed an explicit override -- and the
+  -- failure mode was a bare connection error rather than anything naming the
+  -- cause.
+  local vurl = vault_details(conf).VAULT_URL
+  if vurl and vurl ~= "" then return (vurl:gsub("/+$", "")) end
+  local cluster = conf.skyflow.cluster_id
+  if not cluster or cluster == "" then cluster = vault_details(conf).CLUSTER_ID end
+  if cluster and cluster ~= "" then
+    return "https://" .. cluster .. ".vault.skyflowapis.com"
+  end
+  -- Callers must handle nil: the access-phase guard fails the request closed
+  -- rather than letting a nil concatenation error surface as a 500 with no
+  -- explanation.
+  return nil
 end
 
 --==========================================================================--
@@ -670,7 +778,7 @@ end
 
 -- Exchange the caller's token; cache per caller token identity.
 local function sts_bearer(conf, deadline)
-  local sts = conf.credentials.sts
+  local sts = conf.skyflow.credentials.sts
   if not sts.service_account_id or sts.service_account_id == "" then
     return nil, "credentials.sts.service_account_id is required"
   end
@@ -703,7 +811,7 @@ local function sts_bearer(conf, deadline)
                     .. tostring(claims.sub or claims.oid or "?") .. "\n"
                     .. tostring(claims.exp or 0)
   local hit = TOKEN_CACHE[cache_key]
-  if hit and hit.exp - (conf.token_skew_seconds or 300) > ngx.now() then
+  if hit and hit.exp - (conf.skyflow.token_skew_seconds or 300) > ngx.now() then
     return "Bearer " .. hit.token
   end
 
@@ -718,18 +826,18 @@ local function sts_bearer(conf, deadline)
     service_account_id = sts.service_account_id,
   })
 
-  local attempts, last_err = (conf.retries or 0) + 1, nil
+  local attempts, last_err = (conf.operations.limits.retries or 0) + 1, nil
   for _ = 1, attempts do
     if deadline and ngx.now() >= deadline then
       return nil, "deadline exceeded exchanging caller identity"
     end
     local httpc = http.new()
-    httpc:set_timeout(conf.timeout_ms)
+    httpc:set_timeout(conf.operations.limits.timeout_ms)
     local res, err = httpc:request_uri(token_uri, {
       method = "POST", body = body,
       headers = { ["Content-Type"] = "application/json" },
       ssl_verify = true,
-      keepalive_timeout = conf.keepalive_idle_ms, keepalive_pool = conf.keepalive_pool_size,
+      keepalive_timeout = conf.operations.limits.keepalive_idle_ms, keepalive_pool = conf.operations.limits.keepalive_pool_size,
     })
     if res and res.status == 200 then
       local data = cjson.decode(res.body)
@@ -770,7 +878,7 @@ end
 -- audit trail names the gateway rather than a person. That is the trade-off the
 -- operator accepted by selecting this method; it is not the default.
 local function bearer_token_value(conf)
-  local b = conf.credentials.bearer_token
+  local b = conf.skyflow.credentials.bearer_token
   if not b or not b.api_key or b.api_key == "" then
     return nil, "credentials.bearer_token.api_key is required for method=bearer_token", "config"
   end
@@ -842,7 +950,7 @@ end
 -- confined to this method instead of refusing to load the whole plugin. It is in
 -- the STRICT allowlist today, which `lax` extends, so streamed code can use it.
 local function jwt_credential_bearer(conf, deadline)
-  local jc = conf.credentials.jwt_credential
+  local jc = conf.skyflow.credentials.jwt_credential
   if not jc or not jc.service_account_json or jc.service_account_json == "" then
     return nil, "credentials.jwt_credential.service_account_json is required "
                 .. "for method=jwt_credential", "config"
@@ -890,7 +998,7 @@ local function jwt_credential_bearer(conf, deadline)
                     .. b64url_encode(tostring(sa.privateKey)):sub(1, 24) .. "\n"
                     .. table.concat(ctx_key, "&")
   local hit = TOKEN_CACHE[cache_key]
-  if hit and hit.exp - (conf.token_skew_seconds or 300) > ngx.now() then
+  if hit and hit.exp - (conf.skyflow.token_skew_seconds or 300) > ngx.now() then
     return "Bearer " .. hit.token
   end
 
@@ -922,18 +1030,18 @@ local function jwt_credential_bearer(conf, deadline)
     grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
     assertion = assertion,
   })
-  local attempts, last_err = (conf.retries or 0) + 1, nil
+  local attempts, last_err = (conf.operations.limits.retries or 0) + 1, nil
   for _ = 1, attempts do
     if deadline and ngx.now() >= deadline then
       return nil, "deadline exceeded minting a service-account bearer"
     end
     local httpc = http.new()
-    httpc:set_timeout(conf.timeout_ms)
+    httpc:set_timeout(conf.operations.limits.timeout_ms)
     local res, err = httpc:request_uri(token_uri, {
       method = "POST", body = body,
       headers = { ["Content-Type"] = "application/json" },
       ssl_verify = true,
-      keepalive_timeout = conf.keepalive_idle_ms, keepalive_pool = conf.keepalive_pool_size,
+      keepalive_timeout = conf.operations.limits.keepalive_idle_ms, keepalive_pool = conf.operations.limits.keepalive_pool_size,
     })
     if res and res.status == 200 then
       local data = cjson.decode(res.body)
@@ -976,7 +1084,7 @@ end
 -- gateway and asserts identity itself. `bearer_token` gives the vault no caller
 -- identity whatsoever.
 local function auth_value(conf, deadline)
-  local method = (conf.credentials and conf.credentials.method) or "sts"
+  local method = (conf.skyflow.credentials and conf.skyflow.credentials.method) or "sts"
   if method == "bearer_token" then return bearer_token_value(conf) end
   if method == "jwt_credential" then return jwt_credential_bearer(conf, deadline) end
   return sts_bearer(conf, deadline)
@@ -1013,20 +1121,21 @@ end
 local function skyflow_post(conf, authz, path, payload, deadline)
   local url = base_url(conf) .. path
   local headers = { ["Authorization"] = authz, ["Content-Type"] = "application/json" }
-  if conf.account_id and conf.account_id ~= "" then
-    headers["X-SKYFLOW-ACCOUNT-ID"] = conf.account_id
+  local acct = account_id_of(conf)
+  if acct and acct ~= "" then
+    headers["X-SKYFLOW-ACCOUNT-ID"] = acct
   end
   local body = cjson.encode(payload)
-  local attempts = (conf.retries or 0) + 1
+  local attempts = (conf.operations.limits.retries or 0) + 1
   local last_err
 
   for i = 1, attempts do
     if ngx.now() >= deadline then return nil, "deadline exceeded" end
     local httpc = http.new()
-    httpc:set_timeout(conf.timeout_ms)
+    httpc:set_timeout(conf.operations.limits.timeout_ms)
     local res, err = httpc:request_uri(url, {
       method = "POST", headers = headers, body = body, ssl_verify = true,
-      keepalive_timeout = conf.keepalive_idle_ms, keepalive_pool = conf.keepalive_pool_size,
+      keepalive_timeout = conf.operations.limits.keepalive_idle_ms, keepalive_pool = conf.operations.limits.keepalive_pool_size,
     })
     if res and res.status == 200 then
       local data = cjson.decode(res.body)
@@ -1163,8 +1272,30 @@ end
 
 -- Submit one file and poll to completion. Returns redacted base64, entity
 -- count. Bounded by the request deadline; a timeout is an error, never a pass.
+-- The `media` config record was removed to keep the Konnect form small, so the
+-- values it defaulted to are pinned here. Two of these are load-bearing and were
+-- NOT recoverable from the code's own `or` fallbacks:
+--
+--   redact_object_types -- with no value the request omits objectEntities
+--     entirely, so faces and signatures stop being covered. Entity detection
+--     cannot see them, so that is a silent loss of exactly the protection an
+--     image needs. Not "ALL": that blacks out every detected object including
+--     plain text runs, so the provider gets a solid black rectangle and the
+--     entity count collapses to 1.
+--   max_file_bytes -- with no value there is no size guard, and a large PDF
+--     (~10s to process) can consume the entire request deadline.
+local MEDIA_DEFAULTS = {
+  mode                = "deidentify",
+  unsupported         = "strip",
+  masking_method      = "BLACKBOX",
+  pdf_processing_mode = "OCR",
+  poll_interval_ms    = 500,
+  max_file_bytes      = 8388608,
+  redact_object_types = { "FACE", "SIGNATURE" },
+}
+
 local function deidentify_file(conf, authz, b64, fmt, deadline)
-  local m = conf.media or {}
+  local m = conf.media or MEDIA_DEFAULTS
   -- Attachment entity scope defaults to ALL, deliberately BROADER than the text
   -- path's list. Measured: the 8-entity text list found 4 entities in a card
   -- image where ALL found 6 (it missed CREDIT_CARD_EXPIRATION and more) -- and
@@ -1208,14 +1339,15 @@ local function deidentify_file(conf, authz, b64, fmt, deadline)
 
   local body = cjson.encode({
     dataSource = "BASE64", value = b64, dataFormat = fmt,
-    configuration = { vaultId = conf.vault_id, detect = detect, media = media_cfg },
+    configuration = { vaultId = vault_id_of(conf), detect = detect, media = media_cfg },
   })
 
   local httpc = http.new()
-  httpc:set_timeout(conf.timeout_ms)
+  httpc:set_timeout(conf.operations.limits.timeout_ms)
   local headers = { ["Authorization"] = authz, ["Content-Type"] = "application/json" }
-  if conf.account_id and conf.account_id ~= "" then
-    headers["X-SKYFLOW-ACCOUNT-ID"] = conf.account_id
+  local acct = account_id_of(conf)
+  if acct and acct ~= "" then
+    headers["X-SKYFLOW-ACCOUNT-ID"] = acct
   end
 
   local res, err = httpc:request_uri(base_url(conf) .. "/v2/detect/deidentify/file",
@@ -1228,7 +1360,7 @@ local function deidentify_file(conf, authz, b64, fmt, deadline)
   if not run_id then return nil, nil, "no runId in submit response" end
 
   local poll_url = base_url(conf) .. "/v2/detect/runs/" .. run_id
-                   .. "?vaultId=" .. conf.vault_id
+                   .. "?vaultId=" .. vault_id_of(conf)
   local interval = (m.poll_interval_ms or 500) / 1000
   while true do
     if deadline and ngx.now() >= deadline then
@@ -1236,7 +1368,7 @@ local function deidentify_file(conf, authz, b64, fmt, deadline)
     end
     ngx.sleep(interval)
     local p = http.new()
-    p:set_timeout(conf.timeout_ms)
+    p:set_timeout(conf.operations.limits.timeout_ms)
     local pr, perr = p:request_uri(poll_url, { method = "GET", headers = headers, ssl_verify = true })
     if not pr then return nil, nil, "poll failed: " .. tostring(perr) end
     if pr.status ~= 200 then
@@ -1266,8 +1398,9 @@ end
 
 -- Apply the media policy to every attachment in the request.
 -- Returns processed count, stripped count, or nil+err when failing closed.
+
 local function process_media(conf, authz, data, deadline)
-  local m = conf.media or {}
+  local m = conf.media or MEDIA_DEFAULTS
   local mode = m.mode or "deidentify"
   if mode == "passthrough" then return 0, 0 end
 
@@ -1312,20 +1445,15 @@ local function process_media(conf, authz, data, deadline)
 end
 
 local function deidentify_text(conf, authz, text, deadline)
-  local d = conf.deidentify
+  local d = conf.skyflow.deidentify
   local payload = {
     text = text,
-    vault_id = conf.vault_id,
+    vault_id = vault_id_of(conf),
     entity_types = lower_list(d.entities),
     token_type = { default = string.lower(d.token_format) },
     allow_regex_list = (#d.allow_regex > 0) and d.allow_regex or nil,
     restrict_regex_list = (#d.restrict_regex > 0) and d.restrict_regex or nil,
   }
-  if d.shift_dates and d.shift_dates.enabled then
-    payload.transformations = { shift_dates = {
-      min_days = d.shift_dates.min_days, max_days = d.shift_dates.max_days,
-      entities = lower_list(d.shift_dates.entities) } }
-  end
   local data, err = skyflow_post(conf, authz, "/v1/detect/deidentify/string", payload, deadline)
   if not data then return nil, err end
   return data.processed_text or text, data.entities or {}
@@ -1336,7 +1464,7 @@ end
 -- the vault, so this is the vault-authoritative re-id path (independent of the
 -- request-scoped map). Returns re-identified text (or nil, err).
 local function skyflow_reidentify(conf, authz, text, deadline)
-  local payload = { text = text, vault_id = conf.vault_id }
+  local payload = { text = text, vault_id = vault_id_of(conf) }
   -- third return value carries the failure KIND; "unmatched_token" is benign on
   -- this leg and the caller degrades instead of failing the whole response.
   local data, err, kind = skyflow_post(conf, authz, "/v1/detect/reidentify/string",
@@ -1351,8 +1479,8 @@ local function has_body()
 end
 
 local function wants_json(conf, ct)
-  if conf.content_type == "json" then return true end
-  if conf.content_type == "text" then return false end
+  if conf.targeting.content_type == "json" then return true end
+  if conf.targeting.content_type == "text" then return false end
   ct = ct or ""
   return ct:find("application/json", 1, true) ~= nil or ct:find("+json", 1, true) ~= nil
 end
@@ -1362,8 +1490,8 @@ end
 -- unwinds via a sentinel error that a nested pcall would swallow).
 local function fail_action(conf, ctx, err)
   kong.log.err("skyflow de-identify failed: ", err)
-  ctx.posture = conf.on_skyflow_error
-  if conf.on_skyflow_error == "deny" then
+  ctx.posture = conf.operations.on_error.skyflow
+  if conf.operations.on_error.skyflow == "deny" then
     return { deny = true, status = 502, body = { message = "request blocked: de-identification unavailable" } }
   end
   return { ok = true }   -- allow: forward the original body unchanged
@@ -1434,7 +1562,7 @@ end
 -- must not ride along to the model provider either. The `sts` lookup below is
 -- only about which header name to read; the clearing happens regardless.
 local function take_caller_token(conf, ctx)
-  local sts = conf.credentials and conf.credentials.sts
+  local sts = conf.skyflow.credentials and conf.skyflow.credentials.sts
   local hdr = (sts and sts.token_header) or "authorization"
   local raw = kong.request.get_header(hdr)
   if raw and raw ~= "" then ctx.caller_token = raw end
@@ -1511,13 +1639,13 @@ local function run_access(conf, ctx)
 
   local raw = read_request_body()
   if raw == nil then
-    if conf.on_parse_error == "deny" then
+    if conf.operations.on_error.parse == "deny" then
       return { deny = true, status = 422, body = { message = "request blocked: body unavailable" } }
     end
     return { ok = true }
   end
-  if #raw > conf.max_body_size then
-    if conf.on_parse_error == "deny" then
+  if #raw > conf.operations.limits.max_body_size then
+    if conf.operations.on_error.parse == "deny" then
       return { deny = true, status = 413, body = { message = "request blocked: body too large" } }
     end
     return { ok = true }
@@ -1559,8 +1687,8 @@ local function run_access(conf, ctx)
   -- case, so it must keep streaming straight through -- showing the caller the
   -- tokenized SSE the provider produced, which is that route's whole purpose.
 
-  local will_reemit = conf.reidentify.enabled
-                      and conf.reidentify.streaming ~= "passthrough"
+  local will_reemit = conf.skyflow.reidentify.enabled
+                      and conf.skyflow.reidentify.streaming ~= "passthrough"
 
   local json_mode = wants_json(conf, kong.request.get_header("Content-Type"))
 
@@ -1569,11 +1697,33 @@ local function run_access(conf, ctx)
   if json_mode then
     doc = body_json.decode(raw)
     if doc == nil then
-      if conf.on_parse_error == "deny" then
+      if conf.operations.on_error.parse == "deny" then
         return { deny = true, status = 422, body = { message = "request blocked: invalid JSON" } }
       end
       return { ok = true }
     end
+    -- Vault identity has to resolve before anything is sent anywhere. vault_id
+    -- and cluster_id are no longer schema-`required`, because either may arrive
+    -- inside the pasted `vault_details` block instead -- which the schema cannot
+    -- look inside. So the completeness check lands here, once per request, and
+    -- fails CLOSED: without a vault there is nothing to de-identify against, and
+    -- forwarding would send the body onward untouched.
+    if not vault_id_of(conf) or vault_id_of(conf) == "" then
+      kong.log.err("skyflow: no vault id -- set vault_id, or paste a vault_details ",
+                   "block containing VAULT_ID")
+      return { deny = true, status = 500,
+               body = { message = "request blocked: gateway misconfigured "
+                                  .. "(no Skyflow vault id)" } }
+    end
+    if not base_url(conf) then
+      kong.log.err("skyflow: cannot determine the vault base URL -- set cluster_id, ",
+                   "or paste a vault_details block containing VAULT_URL, or set ",
+                   "skyflow_base_url_override")
+      return { deny = true, status = 500,
+               body = { message = "request blocked: gateway misconfigured "
+                                  .. "(no Skyflow vault URL)" } }
+    end
+
     ctx.formats = detect_formats(doc, "request")
 
     -- No recognised wire format and no explicit paths means there is nothing to
@@ -1582,7 +1732,7 @@ local function run_access(conf, ctx)
     -- schema entity checks on the old `profile: generic`; it has to live here
     -- rather than in the schema because the shape is only known once the body is
     -- parsed. Two ANDed conditions, so it was never expressible as a field rule.
-    if #ctx.formats == 0 and (not conf.request_json_paths or #conf.request_json_paths == 0) then
+    if #ctx.formats == 0 and (not conf.targeting.request_json_paths or #conf.targeting.request_json_paths == 0) then
       kong.log.err("skyflow: unrecognised request wire format; set request_json_paths ",
                    "or content_type=text for this route")
       return { deny = true, status = 500,
@@ -1598,8 +1748,8 @@ local function run_access(conf, ctx)
     -- branch and hands the CLIENT raw vault tokens, permanently, with nothing
     -- anywhere saying why. Not a data leak, but the same silent-misconfiguration
     -- class: a feature reported as enabled that never runs.
-    if #ctx.formats == 0 and conf.reidentify.enabled
-       and (not conf.response_json_paths or #conf.response_json_paths == 0) then
+    if #ctx.formats == 0 and conf.skyflow.reidentify.enabled
+       and (not conf.targeting.response_json_paths or #conf.targeting.response_json_paths == 0) then
       kong.log.err("skyflow: unrecognised request wire format with reidentify.enabled ",
                    "requires response_json_paths; nothing would ever be re-identified")
       return { deny = true, status = 500,
@@ -1636,7 +1786,7 @@ local function run_access(conf, ctx)
     -- No text to process, but an attachment may have been rewritten above, so
     -- the body still has to go out re-encoded. Mirrors the main rewrite path
     -- below, including the force-non-streaming behaviour.
-    if (media_processed > 0 or media_stripped > 0) and not conf.dry_run then
+    if (media_processed > 0 or media_stripped > 0) and not conf.operations.dry_run then
       if doc.stream == true and will_reemit then
         ctx.client_stream = true
         doc.stream = false
@@ -1662,7 +1812,7 @@ local function run_access(conf, ctx)
       -- (2) in a multi-turn session the model echoes tokens minted on EARLIER
       -- turns, and those would come back to the caller unresolved.
       ctx.deidentified = true
-      if conf.reidentify.streaming ~= "passthrough" then
+      if conf.skyflow.reidentify.streaming ~= "passthrough" then
         kong.service.request.clear_header("Accept-Encoding")
         kong.service.request.enable_buffering()
       end
@@ -1687,14 +1837,14 @@ local function run_access(conf, ctx)
     return { deny = true, status = 500,
              body = { message = "request blocked: gateway de-identification path misconfigured" } }
   end
-  if #spans > conf.max_spans then
-    kong.log.err("skyflow: ", #spans, " spans exceed max_spans=", conf.max_spans, "; blocking request")
+  if #spans > conf.operations.limits.max_spans then
+    kong.log.err("skyflow: ", #spans, " spans exceed max_spans=", conf.operations.limits.max_spans, "; blocking request")
     return { deny = true, status = 413,
              body = { message = "request blocked: too many fields to de-identify (max_spans)" } }
   end
 
 
-  -- De-identify every span, CONCURRENTLY, in waves of conf.max_concurrency.
+  -- De-identify every span, CONCURRENTLY, in waves of conf.operations.limits.max_concurrency.
   --
   -- This loop used to be sequential, which made latency linear in span count:
   -- measured on real traffic, Detect costs ~104ms per span at the median and
@@ -1741,7 +1891,7 @@ local function run_access(conf, ctx)
     return ents
   end
 
-  local width = tonumber(conf.max_concurrency) or 8
+  local width = tonumber(conf.operations.limits.max_concurrency) or 8
   local results, first_err = run_waves(
     pending, width, run_span,
     ngx and ngx.thread and ngx.thread.spawn,
@@ -1767,12 +1917,12 @@ local function run_access(conf, ctx)
   ctx.entities_by_type = counts
 
   -- Rewrite the outbound body (unless dry-run).
-  if not conf.dry_run then
+  if not conf.operations.dry_run then
     local newbody
     if json_mode then
       for _, span in ipairs(spans) do span.parent[span.key] = span.processed end
       -- placeholders now exist in the body, so explain them to the model
-      local pre = conf.deidentify.token_preamble
+      local pre = conf.skyflow.deidentify.token_preamble
       if pre == nil or pre.enabled ~= false then
         local text = (pre and pre.text ~= nil and pre.text ~= "" and pre.text)
                      or DEFAULT_TOKEN_PREAMBLE
@@ -1815,7 +1965,7 @@ local function run_access(conf, ctx)
   -- Buffer the response so this plugin's own response phase can re-identify it.
   -- Enable whenever we actually de-identified, independent of the reidentify
   -- setting, so a buffered body is available to read back.
-  if ctx.deidentified and conf.reidentify.streaming ~= "passthrough" then
+  if ctx.deidentified and conf.skyflow.reidentify.streaming ~= "passthrough" then
     -- Prefer an uncompressed response so the response phase can parse it. Only a
     -- hint -- some upstreams (e.g. ai-proxy's own call) compress anyway, so the
     -- response phase also inflates gzip defensively.
@@ -1836,8 +1986,8 @@ function SkyflowAIDataControl:access(conf)
 
   if not ok then
     kong.log.err("skyflow access internal error: ", tostring(action))
-    ctx.posture = conf.on_skyflow_error
-    if conf.on_skyflow_error == "deny" then
+    ctx.posture = conf.operations.on_error.skyflow
+    if conf.operations.on_error.skyflow == "deny" then
       return kong.response.exit(502, { message = "request blocked: de-identification unavailable" })
     end
     return  -- allow posture: fall through with the original body
@@ -1876,7 +2026,7 @@ end
 --     "mcp__workspace__*"        = "plain_text"   -- runs locally
 --     "mcp__workspace__web_fetch" = "tokenized"   -- ...except this one egresses
 local function tool_policy(conf, name)
-  local reid = conf.reidentify
+  local reid = conf.skyflow.reidentify
   local fallback = reid.tool_inputs or "tokenized"
   local by = reid.tool_inputs_by_tool
   if type(by) ~= "table" or type(name) ~= "string" or name == "" then
@@ -2080,14 +2230,14 @@ local function reemit_tokenized_stream(ctx)
 end
 
 function SkyflowAIDataControl:response(conf)
-  if not conf.reidentify.enabled then return end
+  if not conf.skyflow.reidentify.enabled then return end
 
-  local strat = conf.reidentify.strategy
+  local strat = conf.skyflow.reidentify.strategy
   -- `detokenize` is a documented follow-up in this build; degrade safely.
   if strat ~= "mapping_only" and strat ~= "reidentify_text" then
     kong.log.warn("skyflow reidentify strategy '", strat,
                   "' not implemented in this build; returning tokenized response")
-    if conf.reidentify.on_error == "deny" then
+    if conf.skyflow.reidentify.on_error == "deny" then
       return kong.response.exit(502, { message = "response blocked: re-identify unavailable" })
     end
     return
@@ -2135,27 +2285,27 @@ function SkyflowAIDataControl:response(conf)
       -- answer rather than blaming Skyflow.
       if akind == "identity" then
         kong.log.warn("skyflow: caller identity rejected on the response leg: ", aerr)
-        if conf.reidentify.on_error == "deny" then
+        if conf.skyflow.reidentify.on_error == "deny" then
           return kong.response.exit(401, { message = "response blocked: " .. tostring(aerr) })
         end
         reemit_tokenized_stream(ctx)
         return
       end
       kong.log.err("skyflow re-identify auth error: ", aerr)
-      if conf.reidentify.on_error == "deny" then
+      if conf.skyflow.reidentify.on_error == "deny" then
         return kong.response.exit(502, { message = "response blocked: re-identify unavailable" })
       end
       reemit_tokenized_stream(ctx)
       return
     end
-    if next(conf.reidentify.entity_treatment) or conf.reidentify.default_treatment ~= "plain_text" then
+    if next(conf.skyflow.reidentify.entity_treatment) or conf.skyflow.reidentify.default_treatment ~= "plain_text" then
       kong.log.warn("skyflow: reidentify_text restores plaintext from the vault; ",
                     "entity_treatment/masking is not applied (use mapping_only for treatments)")
     end
   end
 
   local treatment_fn = function(entity)
-    return conf.reidentify.entity_treatment[entity] or conf.reidentify.default_treatment
+    return conf.skyflow.reidentify.entity_treatment[entity] or conf.skyflow.reidentify.default_treatment
   end
 
   -- Restore one text span. mapping_only substitutes from the request-scoped map
@@ -2323,7 +2473,7 @@ function SkyflowAIDataControl:response(conf)
     -- for a day.
     local detail = (not ok) and (": pcall: " .. tostring(perr))
                    or (call_err and (": " .. call_err) or "")
-    if conf.reidentify.on_error == "deny" then
+    if conf.skyflow.reidentify.on_error == "deny" then
       kong.log.err("skyflow re-identify failed; WITHHOLDING the response (502)", detail)
       return kong.response.exit(502, { message = "response blocked: re-identify failed" })
     end
@@ -2336,7 +2486,7 @@ function SkyflowAIDataControl:response(conf)
 end
 
 function SkyflowAIDataControl:log(conf)
-  if conf.log and conf.log.detections then
+  if conf.operations.log and conf.operations.log.detections then
     local ctx = kong.ctx.plugin
     kong.log.set_serialize_value("skyflow.entities_by_type", ctx.entities_by_type or {})
     kong.log.set_serialize_value("skyflow.posture", ctx.posture or "enforce")
@@ -2359,6 +2509,10 @@ SkyflowAIDataControl._test = {
   collect_spans     = collect_spans,
   effective_paths   = effective_paths,
   detect_formats    = detect_formats,
+  parse_vault_details = parse_vault_details,
+  vault_id_of       = vault_id_of,
+  account_id_of     = account_id_of,
+  base_url          = base_url,
   tool_policy       = tool_policy,
   classify_client_error = classify_client_error,
   doc_to_sse        = doc_to_sse,

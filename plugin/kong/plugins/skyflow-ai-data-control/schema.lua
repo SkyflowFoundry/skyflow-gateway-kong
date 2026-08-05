@@ -229,52 +229,12 @@ local credentials = {
 -- `unsupported` covers formats Detect cannot process at all -- webp is the
 -- notable one, since Anthropic accepts it and Detect does not -- plus URL and
 -- file_id sources whose bytes the gateway never sees.
-local MEDIA_MODES        = { "deidentify", "strip", "block", "passthrough" }
-local UNSUPPORTED_MODES  = { "strip", "block" }
-local MASKING_METHODS    = { "BLACKBOX", "BLUR" }
-local PDF_MODES          = { "OCR", "TEXT_LAYER" }
 
-local media = {
-  type = "record",
-  fields = {
-    { mode = { type = "string", one_of = MEDIA_MODES, default = "deidentify" } },
-    { unsupported = { type = "string", one_of = UNSUPPORTED_MODES, default = "strip" } },
-    { masking_method = { type = "string", one_of = MASKING_METHODS, default = "BLACKBOX" } },
-    -- Entity scope for attachments. Empty = ALL, which is intentionally
-    -- broader than deidentify.entities: an image cannot be skimmed before it
-    -- egresses, and ALL measurably detects more (6 vs 4 on a test card image).
-    { entities = { type = "array",
-                   elements = { type = "string", one_of = ENTITY_TYPES },
-                   default = {} } },
-    -- Non-text objects to redact. MUST be specific types -- `ALL` blacks out
-    -- every detected object including plain text runs, so the provider gets a
-    -- solid black rectangle. FACE+SIGNATURE keeps the image legible while
-    -- covering what entity detection cannot see.
-    { redact_object_types = { type = "array",
-                              elements = { type = "string",
-                                           one_of = { "FACE", "SIGNATURE", "LOGO", "LICENSE_PLATE" } },
-                              default = { "FACE", "SIGNATURE" } } },
-    -- OCR rasterizes (right for scans); TEXT_LAYER edits the PDF's text layer
-    -- and keeps it selectable.
-    { pdf_processing_mode = { type = "string", one_of = PDF_MODES, default = "OCR" } },
-    { poll_interval_ms = { type = "integer", default = 500, between = { 100, 5000 } } },
-    -- Guard on base64 length. A PDF takes ~10s, so a large attachment can eat
-    -- the whole request deadline; refuse early rather than time out mid-flight.
-    { max_file_bytes = { type = "integer", default = 8388608, between = { 0, 67108864 } } },
-  },
-}
-
-local shift_dates = {
-  type = "record",
-  fields = {
-    { enabled  = { type = "boolean", default = false } },
-    { min_days = { type = "integer", default = 10 } },
-    { max_days = { type = "integer", default = 30 } },
-    { entities = { type = "array",
-                   elements = { type = "string", one_of = ENTITY_TYPES },
-                   default = { "DOB" } } },
-  },
-}
+-- The `media` record was removed from the config surface to keep the Konnect
+-- form small. Attachment de-identification still RUNS -- the behaviour it used to
+-- configure is now fixed in handler.lua (MEDIA_DEFAULTS) at the values this
+-- record defaulted to, so nothing changed except that the knobs are gone. Restore
+-- the record here if a deployment needs to vary them.
 
 local deidentify = {
   type = "record",
@@ -285,7 +245,6 @@ local deidentify = {
     { token_format = { type = "string", one_of = TOKEN_FORMATS, default = "VAULT_TOKEN" } },
     { allow_regex    = { type = "array", elements = { type = "string" }, default = {} } },
     { restrict_regex = { type = "array", elements = { type = "string" }, default = {} } },
-    { shift_dates = shift_dates },
     -- batch_mode is GONE. It offered per_span | joined, but `joined` was never
     -- implemented: the handler logged "not implemented; using per_span" and did
     -- per_span anyway. A setting that silently does something other than what it
@@ -310,8 +269,16 @@ local deidentify = {
 local reidentify = {
   type = "record",
   fields = {
-    { enabled  = { type = "boolean", default = false } },
-    { strategy = { type = "string", one_of = STRATEGIES, default = "mapping_only" } },
+    -- On by default. Re-identification is what makes the gateway transparent to
+    -- the caller: without it the client receives vault tokens, which is a
+    -- deliberate posture but a surprising default. A deployment that wants the
+    -- provider AND the caller to see only tokens sets this to false explicitly.
+    { enabled  = { type = "boolean", default = true } },
+    -- reidentify_text pairs with the VAULT_TOKEN token_format default, so the
+    -- two defaults are consistent out of the box. mapping_only resolves from the
+    -- request-scoped map instead, which cannot restore tokens minted on an
+    -- earlier turn.
+    { strategy = { type = "string", one_of = STRATEGIES, default = "reidentify_text" } },
     -- Tool inputs (tool_calls/tool_use) the model sends back to the agent:
     -- 'tokenized' (default) leaves tokens in place -- the gateway is the trust
     -- boundary and tools egress to arbitrary services; 'plain_text' restores
@@ -346,6 +313,101 @@ local reidentify = {
   },
 }
 
+local skyflow = {
+  -- Everything needed to talk to the Skyflow API: which vault, how to
+  -- authenticate to it, and what to ask it to do. Grouped so the one question an
+  -- operator actually has -- "is my Skyflow connection right?" -- is answered by
+  -- one section rather than by scanning a flat list of twenty fields.
+  type = "record",
+  fields = {
+    { vault_details = { type = "string" } },
+    -- NOT `required`, because either may instead arrive inside
+    -- vault_details, and a schema cannot look inside a string. The
+    -- entity_checks below keep the config-time guarantee that one source is
+    -- present; the handler additionally verifies per request that the
+    -- values actually resolved, and fails closed if not.
+    { vault_id   = { type = "string" } },
+    { cluster_id = { type = "string" } },
+    { account_id = { type = "string" } },
+    { env = { type = "string", one_of = ENVS, default = "PROD" } },
+    { base_url_override = { type = "string" } },
+    { credentials = credentials },
+    -- SA-JWT bearers are re-minted this many seconds before their exp.
+    { token_skew_seconds = { type = "integer", default = 300, between = { 0, 3600 } } },
+
+    ----------------------------------------------------------------- behavior
+    { deidentify = deidentify },
+    { reidentify = reidentify },
+  },
+}
+
+local targeting = {
+  -- WHERE in the payload to look. The wire format (OpenAI / Anthropic / MCP) is
+  -- detected per request, so these only ADD to what detection already covers.
+  type = "record",
+  fields = {
+    { content_type = { type = "string", one_of = { "auto", "json", "text" }, default = "auto" } },
+
+    ----------------------------------------------------------------- targeting
+    -- The wire format (OpenAI / Anthropic / MCP) is detected per request
+    -- from the body shape in handler.lua rather than configured here. A
+    -- hand-set format is a silent failure waiting to happen: the two chat
+    -- shapes overlap at `$.messages[*].content`, so the wrong value scans
+    -- the user's typed message and nothing else, sending the system prompt,
+    -- every tool_result and the end-user id to the provider in the clear
+    -- without erroring. `request_json_paths` MERGES with the detected base
+    -- set, and is REQUIRED for a body shape that is not recognised.
+    { request_json_paths  = { type = "array", elements = { type = "string" }, default = {} } },
+    { response_json_paths = { type = "array", elements = { type = "string" }, default = {} } },
+  },
+}
+
+local operations = {
+  -- Day-2 concerns: what the plugin costs, what it does when something fails,
+  -- and what it records. Nothing here changes which data is protected.
+  type = "record",
+  fields = {
+    { limits = {
+        -- Cost, latency and blast-radius ceilings. Every one of these is a
+        -- fail-closed bound rather than a hint: exceeding max_spans or
+        -- max_body_size refuses the request instead of partially processing it.
+        type = "record",
+        fields = {
+          { max_body_size = { type = "integer", default = 1048576, between = { 0, 33554432 } } },
+          { max_spans = { type = "integer", default = 64, between = { 1, 4096 } } },
+          { max_concurrency = { type = "integer", default = 8, between = { 1, 64 } } },
+
+          ----------------------------------------------------------------- resilience
+          { timeout_ms  = { type = "integer", default = 5000, between = { 100, 60000 } } },
+          { deadline_ms = { type = "integer", default = 8000, between = { 100, 120000 } } },
+          { retries = { type = "integer", default = 2, between = { 0, 5 } } },
+          { keepalive_pool_size = { type = "integer", default = 16, between = { 0, 1000 } } },
+          { keepalive_idle_ms = { type = "integer", default = 60000, between = { 0, 600000 } } },
+        },
+    } },
+    { on_error = {
+        -- Posture when a dependency misbehaves. Both default to `deny`, because
+        -- forwarding a body the gateway could not process is the one outcome this
+        -- plugin exists to prevent.
+        type = "record",
+        fields = {
+          { skyflow = { type = "string", one_of = { "deny", "allow" }, default = "deny" } },
+          { parse   = { type = "string", one_of = { "deny", "skip" }, default = "deny" } },
+        },
+    } },
+    { dry_run = { type = "boolean", default = false } },
+
+    ----------------------------------------------------------------- observability
+    { log = { type = "record", fields = {
+        { detections = { type = "boolean", default = true } },
+        { sample_rate = { type = "number", default = 1.0, between = { 0, 1 } } },
+    } } },
+    { metrics = { type = "record", fields = {
+        { enabled = { type = "boolean", default = true } },
+    } } },
+  },
+}
+
 return {
   name = "skyflow-ai-data-control",
   fields = {
@@ -359,54 +421,15 @@ return {
         type = "record",
         fields = {
           ----------------------------------------------------------------- conn/auth
-          { vault_id   = { type = "string", required = true } },
-          { cluster_id = { type = "string", required = true } },
-          { account_id = { type = "string" } },
-          { env = { type = "string", one_of = ENVS, default = "PROD" } },
-          { skyflow_base_url_override = { type = "string" } },
-          { credentials = credentials },
-          -- SA-JWT bearers are re-minted this many seconds before their exp.
-          { token_skew_seconds = { type = "integer", default = 300, between = { 0, 3600 } } },
-
-          ----------------------------------------------------------------- targeting
-          -- The wire format (OpenAI / Anthropic / MCP) is detected per request
-          -- from the body shape in handler.lua rather than configured here. A
-          -- hand-set format is a silent failure waiting to happen: the two chat
-          -- shapes overlap at `$.messages[*].content`, so the wrong value scans
-          -- the user's typed message and nothing else, sending the system prompt,
-          -- every tool_result and the end-user id to the provider in the clear
-          -- without erroring. `request_json_paths` MERGES with the detected base
-          -- set, and is REQUIRED for a body shape that is not recognised.
-          { request_json_paths  = { type = "array", elements = { type = "string" }, default = {} } },
-          { response_json_paths = { type = "array", elements = { type = "string" }, default = {} } },
-          { content_type = { type = "string", one_of = { "auto", "json", "text" }, default = "auto" } },
-          { max_body_size = { type = "integer", default = 1048576, between = { 0, 33554432 } } },
-          { max_spans = { type = "integer", default = 64, between = { 1, 4096 } } },
-
-          ----------------------------------------------------------------- behavior
-          { deidentify = deidentify },
-          { media = media },
-          { reidentify = reidentify },
-
-          ----------------------------------------------------------------- resilience
-          { timeout_ms  = { type = "integer", default = 5000, between = { 100, 60000 } } },
-          { deadline_ms = { type = "integer", default = 8000, between = { 100, 120000 } } },
-          { retries = { type = "integer", default = 2, between = { 0, 5 } } },
-          { max_concurrency = { type = "integer", default = 8, between = { 1, 64 } } },
-          { keepalive_pool_size = { type = "integer", default = 16, between = { 0, 1000 } } },
-          { keepalive_idle_ms = { type = "integer", default = 60000, between = { 0, 600000 } } },
-          { on_skyflow_error = { type = "string", one_of = { "deny", "allow" }, default = "deny" } },
-          { on_parse_error   = { type = "string", one_of = { "deny", "skip" }, default = "deny" } },
-          { dry_run = { type = "boolean", default = false } },
-
-          ----------------------------------------------------------------- observability
-          { log = { type = "record", fields = {
-              { detections = { type = "boolean", default = true } },
-              { sample_rate = { type = "number", default = 1.0, between = { 0, 1 } } },
-          } } },
-          { metrics = { type = "record", fields = {
-              { enabled = { type = "boolean", default = true } },
-          } } },
+          -- Paste target for the admin UI's "copy vault details" block, which
+          -- carries VAULT_ID, ACCOUNT_ID and VAULT_URL among others. Supplying it
+          -- fills in the three fields below, so nobody hand-transcribes several
+          -- opaque 32-character ids into separate boxes. Parsed in handler.lua;
+          -- unrecognised keys are ignored. Contains identifiers only, never a
+          -- credential, so it is neither encrypted nor referenceable.
+          { skyflow    = skyflow    },
+          { targeting  = targeting  },
+          { operations = operations },
         },
 
         -- Only Kong's built-in entity checkers below -- no per-entity custom
@@ -423,16 +446,27 @@ return {
         --     have been a schema rule anyway: the shape is not known at config
         --     time.
         entity_checks = {
+          -- A vault id must come from SOMEWHERE. This catches the empty config at
+          -- save time; it cannot verify that a supplied vault_details block
+          -- actually contains VAULT_ID, which is why handler.lua re-checks the
+          -- resolved value per request.
+          { at_least_one_of = { "skyflow.vault_id", "skyflow.vault_details" } },
+          -- Likewise the vault URL, which has three possible sources: an explicit
+          -- override, VAULT_URL inside the pasted block, or reconstruction from
+          -- cluster_id.
+          { at_least_one_of = { "skyflow.cluster_id", "skyflow.vault_details",
+                                "skyflow.base_url_override" } },
+
           { conditional = {
-              if_field = "reidentify.strategy", if_match = { eq = "mapping_only" },
-              then_field = "deidentify.token_format", then_match = { ne = "ENTITY_ONLY" },
+              if_field = "skyflow.reidentify.strategy", if_match = { eq = "mapping_only" },
+              then_field = "skyflow.deidentify.token_format", then_match = { ne = "ENTITY_ONLY" },
           } },
 
           -- Vault-authoritative re-id can only resolve tokens that were actually
           -- stored in the vault, i.e. VAULT_TOKEN de-identification.
           { conditional = {
-              if_field = "reidentify.strategy", if_match = { eq = "reidentify_text" },
-              then_field = "deidentify.token_format", then_match = { eq = "VAULT_TOKEN" },
+              if_field = "skyflow.reidentify.strategy", if_match = { eq = "reidentify_text" },
+              then_field = "skyflow.deidentify.token_format", then_match = { eq = "VAULT_TOKEN" },
           } },
         },
     } },

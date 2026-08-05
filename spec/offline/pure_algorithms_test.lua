@@ -42,6 +42,29 @@ _G.ngx = { now = function() return 0 end }
 local M = dofile("plugin/kong/plugins/skyflow-ai-data-control/handler.lua")
 local T = M._test
 
+-- Config moved into three top-level records (skyflow / targeting / operations).
+-- These cases assert path and span behaviour, not config shape, so rather than
+-- restate every literal they are written flat and nested here on the way in.
+local function as_conf(c)
+  if c.skyflow or c.targeting or c.operations then return c end
+  return {
+    skyflow = {
+      vault_details = c.vault_details, vault_id = c.vault_id,
+      cluster_id = c.cluster_id, account_id = c.account_id,
+      base_url_override = c.base_url_override,
+      deidentify = c.deidentify, reidentify = c.reidentify,
+    },
+    targeting = {
+      content_type        = c.content_type,
+      request_json_paths  = c.request_json_paths,
+      response_json_paths = c.response_json_paths,
+    },
+    operations = { limits = {}, on_error = {} },
+  }
+end
+
+local function EP3(conf, phase, formats) return T.effective_paths(as_conf(conf), phase, formats) end
+
 -- `profile` was removed from the config: the wire format is detected from the body.
 -- These cases were written against the old field, and what they assert (which paths
 -- a given format contributes) is unchanged, so this shim maps the old name onto the
@@ -49,7 +72,7 @@ local T = M._test
 local function EP(conf, phase)
   local fmts = {}
   if conf.profile and conf.profile ~= "generic" then fmts = { conf.profile } end
-  return T.effective_paths(conf, phase, fmts)
+  return EP3(conf, phase, fmts)
 end
 local fails = 0
 local function eq(a, b, msg) if a ~= b then fails = fails + 1; print("FAIL: "..msg.." got="..tostring(a)) else print("ok: "..msg) end end
@@ -390,7 +413,7 @@ end
 -- the user's real file. The destination of the call decides the policy, and the
 -- tool name is what names the destination.
 local function tconf(default, by)
-  return { reidentify = { tool_inputs = default, tool_inputs_by_tool = by } }
+  return as_conf({ reidentify = { tool_inputs = default, tool_inputs_by_tool = by } })
 end
 
 local DESKTOP = {
@@ -771,6 +794,73 @@ eq(select(2, with_usage:gsub("data: ", "")), 3,
    "include_usage yields content chunk + usage chunk + [DONE]")
 eq(with_usage:find("[DONE]", 1, true) ~= nil, true, "[DONE] still terminates the stream")
 
+
+-- ---------------------------------------------------------------------------
+-- 25. vault_details: the admin UI's "copy vault details" block, taken verbatim.
+--
+-- The point is to remove hand-transcription of several opaque 32-character ids,
+-- so the parser has to survive a real paste rather than a tidied one.
+local PASTE = [[
+VAULT_NAME="Detect93533"
+VAULT_DESCRIPTION="Detect vault consists of columns to store entities idenfied during deidentification of any text, Eg: name, age, ssn etc."
+WORKSPACE_ID="k1ca4415485b4c06a0415e83baa8a8b5"
+ACCOUNT_ID="j58448d299cf4e42ac433948d9c70d94"
+VAULT_URL="https://ebfc9bee4242.vault.skyflowapis.com"
+VAULT_ID="i65a450543bf48b68c3fa58c5ed7ce30"
+]]
+local vd = T.parse_vault_details(PASTE)
+eq(vd.VAULT_ID, "i65a450543bf48b68c3fa58c5ed7ce30", "VAULT_ID read from a real paste")
+eq(vd.ACCOUNT_ID, "j58448d299cf4e42ac433948d9c70d94", "ACCOUNT_ID read from a real paste")
+eq(vd.VAULT_URL, "https://ebfc9bee4242.vault.skyflowapis.com", "VAULT_URL read from a real paste")
+-- The description is prose containing commas, colons and spaces. Tokenizing on
+-- any of those would truncate it and, worse, could truncate a value that matters.
+eq(vd.VAULT_DESCRIPTION,
+   "Detect vault consists of columns to store entities idenfied during deidentification of any text, Eg: name, age, ssn etc.",
+   "a prose value with commas and colons survives whole")
+
+local pasted = as_conf({ vault_details = PASTE })
+eq(T.vault_id_of(pasted), "i65a450543bf48b68c3fa58c5ed7ce30", "vault_id resolves from the block")
+eq(T.account_id_of(pasted), "j58448d299cf4e42ac433948d9c70d94", "account_id resolves from the block")
+eq(T.base_url(pasted), "https://ebfc9bee4242.vault.skyflowapis.com", "base URL comes from VAULT_URL")
+
+-- An explicit field wins, so one value can be overridden without editing the paste.
+eq(T.vault_id_of(as_conf({ vault_details = PASTE, vault_id = "iOVERRIDE" })), "iOVERRIDE",
+   "an explicit vault_id beats the pasted block")
+
+-- VAULT_URL carries the ENVIRONMENT, which rebuilding from a cluster id cannot.
+-- A sandbox vault therefore needs no base_url_override.
+eq(T.base_url(as_conf({ vault_details = 'VAULT_URL="https://abc.vault.skyflowapis.tech"' })),
+   "https://abc.vault.skyflowapis.tech", "a non-prod vault URL is used as-is")
+-- ...and an explicit override still beats it.
+eq(T.base_url(as_conf({ vault_details = PASTE, base_url_override = "https://local.test/" })),
+   "https://local.test", "base_url_override wins and loses its trailing slash")
+-- Falling back to cluster_id still works for configs written before the block existed.
+eq(T.base_url(as_conf({ cluster_id = "cl1" })), "https://cl1.vault.skyflowapis.com",
+   "cluster_id reconstruction still works")
+
+-- Paste-target tolerance. Each of these is something a human plausibly produces.
+local tolerant = {
+  { "unquoted",      'VAULT_ID=i1' },
+  { "single quotes", "VAULT_ID='i1'" },
+  { "export prefix", 'export VAULT_ID="i1"' },
+  { "CRLF endings",  'VAULT_ID="i1"\r\nACCOUNT_ID="j1"' },
+  { "# comment",     '# my vault\nVAULT_ID="i1"' },
+  { "blank lines",   '\n\nVAULT_ID="i1"\n\n' },
+  { "lowercase key", '{"vault_id":"i1"}' },
+  { "JSON object",   '{"VAULT_ID":"i1"}' },
+}
+for _, case in ipairs(tolerant) do
+  eq(T.parse_vault_details(case[2]).VAULT_ID, "i1", "tolerates " .. case[1])
+end
+
+-- Junk must yield nothing rather than a wrong value: a half-resolved vault id is
+-- worse than none, because the access-phase guard only fails closed on absence.
+eq(next(T.parse_vault_details("hello world")) == nil, true, "prose yields no keys")
+eq(next(T.parse_vault_details("")) == nil, true, "empty string yields no keys")
+eq(next(T.parse_vault_details(nil)) == nil, true, "nil yields no keys")
+eq(T.vault_id_of(as_conf({})), nil, "no source at all resolves to nil, for the guard to catch")
+eq(T.base_url(as_conf({})), nil, "and so does the base URL")
+
 print(fails == 0 and "\nALL PASS" or ("\n" .. fails .. " FAILURES"))
 os.exit(fails == 0 and 0 or 1)
 
@@ -799,7 +889,7 @@ eq(T.detect_formats(DESKTOP_BODY, "request")[1], "anthropic",
 
 -- The leak, measured. Under the old wrong-profile config this body yielded 1 span.
 local det = T.collect_spans(DESKTOP_BODY,
-  T.effective_paths({ request_json_paths = {}, response_json_paths = {} },
+  EP3({ request_json_paths = {}, response_json_paths = {} },
                     "request", T.detect_formats(DESKTOP_BODY, "request")))
 eq(#det, 4, "detection reaches all four sensitive spans (the old openai profile got 1)")
 local dfound = {}
@@ -826,7 +916,7 @@ eq(T.detect_formats({ jsonrpc = "2.0", method = "tools/call",
 -- over-scans (a non-matching path yields no spans) while guessing under-scans.
 local amb = T.detect_formats({ messages = { { role = "user", content = "hi" } } }, "request")
 eq(#amb, 2, "an undecidable chat body returns both candidates")
-local ambpaths = T.effective_paths({ request_json_paths = {}, response_json_paths = {} },
+local ambpaths = EP3({ request_json_paths = {}, response_json_paths = {} },
                                    "request", amb)
 local hasuser, hasprompt = false, false
 for _, pth in ipairs(ambpaths) do
@@ -852,10 +942,10 @@ eq(T.detect_formats({ result = { content = {} } }, "response")[1], "mcp", "resul
 -- handler.lua fails closed on. Returning an empty list rather than defaulting to
 -- some format is the point: a silent no-op is the failure mode being removed.
 eq(#T.detect_formats({ widget = "x" }, "request"), 0, "an unknown shape detects nothing")
-eq(#T.effective_paths({ request_json_paths = {}, response_json_paths = {} }, "request", {}),
+eq(#EP3({ request_json_paths = {}, response_json_paths = {} }, "request", {}),
    0, "no format and no explicit paths yields nothing to scan -- guard territory")
 -- ...but explicit paths still work for exactly that case (the old `generic`).
-eq(#T.effective_paths({ request_json_paths = { "$.widget" }, response_json_paths = {} },
+eq(#EP3({ request_json_paths = { "$.widget" }, response_json_paths = {} },
                       "request", {}), 1, "explicit paths cover an unrecognised shape")
 
 -- Ambiguity must NOT produce an openai-style system message: `role: "system"` is
