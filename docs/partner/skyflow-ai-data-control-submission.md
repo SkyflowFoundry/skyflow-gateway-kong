@@ -75,15 +75,31 @@ When you enable this plugin on a route, it acts in two Kong request-lifecycle ph
   vault-authoritative call to `POST /v2/detect/reidentify/string`) and rewrites the
   response body. The end-user sees real values; the provider never did.
 
-```text
-            ┌───────────────────── Kong worker (OpenResty) ─────────────────────┐
- client ───▶│  ACCESS* │ ──────────▶ upstream ──────────▶ │ RESPONSE* │ │ log │ │───▶ client
-            └──────┼──────────────────────────────────────────┼──────────┼──────┘
-                   │ de-identify                               │ re-id    │ metrics
-                   ▼                                           ▼          ▼
-            Skyflow Detect                              Skyflow Detect  (no PII)
-            /deidentify                                 /reidentify
-            * skyflow-ai-data-control phases
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant K as Kong Gateway<br/>skyflow-ai-data-control
+    participant S as Skyflow Detect
+    participant U as Upstream<br/>LLM / MCP / API
+
+    C->>K: Request containing sensitive values
+    Note over K: access phase
+    K->>S: POST /v2/detect/deidentify/string
+    S-->>K: Tokens + token/value map
+
+    alt Skyflow unreachable and on_error.skyflow = deny
+        K-->>C: 502 — request blocked, nothing forwarded
+    else De-identified
+        K->>U: Forward request — tokens only
+        U-->>K: Response referring to tokens
+        Note over K: response phase
+        K->>S: POST /v2/detect/reidentify/string
+        S-->>K: Original values
+        K-->>C: Response with real values restored
+    end
+
+    Note over K: log phase — entity counts by type, never values
 ```
 
 **Entities it interacts with.** The plugin attaches to Kong Routes and Services and talks
@@ -104,17 +120,36 @@ body is gzip-encoded — which real OpenAI always is
 ([Kong #14380](https://github.com/Kong/kong/issues/14380)). The fix is a **nested-proxy
 topology**: two routes, two independent buffered cycles.
 
-```text
-  Client "Email Jane Doe at jane@acme.com"
-    │
-    ▼
-  /ai/chat            skyflow-ai-data-control only
-    access  : de-identify (PII → tokens) ──▶ Skyflow Detect
-    response: re-identify (tokens → PII) ◀── Skyflow Detect
-    │  tokens only (loopback to 127.0.0.1:8000/_ai_upstream)   ▲ tokens only
-    ▼                                                          │
-  /_ai_upstream       ai-proxy only ──▶ OpenAI / Anthropic / … (sees only tokens)
+```mermaid
+flowchart TB
+    C["<b>Client</b><br/>Email Jane Doe at jane@acme.com"]
+    F["<b>/ai/chat</b> — front route<br/>skyflow-ai-data-control only<br/>access: de-identify · response: re-identify"]
+    I["<b>/_ai_upstream</b> — internal route<br/>ai-proxy only"]
+    P["<b>Provider</b><br/>OpenAI · Anthropic · …<br/>sees only tokens"]
+    S[("<b>Skyflow</b><br/>Detect")]
+
+    C -- "sensitive values" --> F
+    F -- "tokens only<br/>loopback 127.0.0.1:8000" --> I
+    I --> P
+    P -- "tokens" --> I
+    I -- "tokens" --> F
+    F -- "values restored" --> C
+    F -. "deidentify · reidentify" .-> S
+
+    classDef clear fill:#f7ebe3,stroke:#9c4221,color:#16191f
+    classDef safe  fill:#e4efed,stroke:#1b5e5a,color:#16191f
+    classDef vault fill:#ede9f6,stroke:#4c3a8c,color:#16191f
+    class C clear
+    class F safe
+    class I safe
+    class P safe
+    class S vault
 ```
+
+Each route runs its own buffered request/response cycle, which is what keeps the two
+plugins out of each other's way. The internal route is not externally reachable — an
+`ip-restriction` plugin bound to `127.0.0.1/32` refuses anything else, because that route
+carries neither authentication nor de-identification.
 
 **Real agent traffic.** Beyond simple JSON bodies, the plugin handles coding-agent /
 MCP traffic: it reads large bodies that nginx spools to disk, re-identifies values inside

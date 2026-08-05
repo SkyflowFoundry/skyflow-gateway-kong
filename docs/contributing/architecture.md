@@ -31,17 +31,33 @@ We also use:
 - **`log`** — emit metrics/structured logs (counts, latencies, error classes) —
   never the de-identified values themselves.
 
+```mermaid
+flowchart LR
+    CL(["Client<br/><i>request</i>"])
+    RW["rewrite"]
+    AC["<b>access</b>"]
+    UP["upstream"]
+    RS["<b>response</b>"]
+    LG["log"]
+    CL2(["Client<br/><i>response</i>"])
+
+    CL --> RW --> AC --> UP --> RS --> LG --> CL2
+
+    AC -. "de-identify" .-> D[("Skyflow Detect<br/>/deidentify")]
+    RS -. "re-identify" .-> R[("Skyflow Detect<br/>/reidentify<br/>or /detokenize")]
+    LG -. "entity counts, no values" .-> M["metrics · logs"]
+
+    classDef phase fill:#e4efed,stroke:#1b5e5a,color:#16191f
+    classDef vault fill:#ede9f6,stroke:#4c3a8c,color:#16191f
+    classDef plain fill:#f6f7f9,stroke:#6b7280,color:#16191f
+    class AC,RS phase
+    class D,R vault
+    class RW,UP,LG,M plain
 ```
-            ┌───────────────────────── Kong worker (OpenResty) ─────────────────────────┐
- client ───▶│ rewrite │ ACCESS* │ ───────▶ upstream ───────▶ │ RESPONSE* │ │ log │ ─────▶ client
-            └─────────────┼───────────────────────────────────────┼──────────────┼──────┘
-                          │ de-identify                            │ re-identify  │ metrics
-                          ▼                                        ▼              ▼
-                   Skyflow Detect                            Skyflow Detect    (no PII)
-                   /deidentify                               /reidentify
-                                                             or /detokenize
-   * skyflow-ai-data-control phases
-```
+
+The bold phases are this plugin's; `access` and `response` are the only two it
+does work in. `response` rather than `body_filter` is forced: re-identification
+calls Skyflow over a cosocket, which Kong bans in `body_filter`.
 
 ## 2.2 Module decomposition
 

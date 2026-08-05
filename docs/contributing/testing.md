@@ -8,15 +8,26 @@ Detect API so the bulk of tests run hermetically with no network or live vault.
 
 ## 6.1 Test pyramid
 
+```mermaid
+flowchart TB
+    E["<b>e2e</b> — docker compose<br/>Kong + mock Skyflow + echo upstream,<br/>plus a guarded smoke test against a real vault"]
+    I["<b>integration</b> — Pongo + busted<br/>real Kong, Skyflow mocked over HTTP"]
+    U["<b>unit</b> — busted / resty<br/>span extraction, path matching, wire-format<br/>detection, schema entity checks"]
+
+    E --- I --- U
+
+    classDef slow  fill:#f7ebe3,stroke:#9c4221,color:#16191f
+    classDef mid   fill:#f6f7f9,stroke:#6b7280,color:#16191f
+    classDef fast  fill:#e4efed,stroke:#1b5e5a,color:#16191f
+    class E slow
+    class I mid
+    class U fast
 ```
-        ┌───────────────────────────────┐
-        │  e2e (docker-compose, manual)  │  Kong + mock Skyflow + echo upstream
-        ├───────────────────────────────┤  + guarded sandbox-smoke vs real vault
-        │  integration (Pongo + busted)  │  real Kong, mocked Skyflow HTTP
-        ├───────────────────────────────┤
-        │  unit (busted)                 │  body.lua, auth.lua, client.lua,
-        └───────────────────────────────┘  mapping.lua, schema entity checks
-```
+
+Fewest at the top, most at the bottom — but note which layer catches what. The
+unit tests call the pure functions directly, so they cannot see the request-phase
+wiring; a regression that left the request leg with zero spans passed all 200 of
+them and was caught by the e2e run on its first attempt.
 
 ## 6.2 Tooling & layout
 
