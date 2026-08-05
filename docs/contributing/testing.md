@@ -32,9 +32,11 @@ Detect API so the bulk of tests run hermetically with no network or live vault.
 A tiny HTTP server (Kong `http_mock` / a `mockbin`-style Service, or an OpenResty
 `content_by_lua` server started by the spec) that emulates the Detect API:
 
-- `POST /v1/detect/deidentify/string` → deterministic tokenization: replaces
+- `POST /v2/detect/deidentify/string` → deterministic tokenization: replaces
   known fixtures (`Jane Doe`→`[NAME_aB3xQ]`, …) and echoes an `entities[]` map.
-- `POST /v1/detect/reidentify/string` → inverse mapping.
+- `POST /v2/detect/reidentify/string` → inverse mapping. Both answer with the
+  camelCase `processedText` envelope, so the mock exercises the same field names
+  the real API uses.
 - `POST /v1/vaults/{id}/detokenize` → token→value lookup.
 - `POST {tokenURI}` → returns a signed-looking `accessToken` with short
   `expiresIn` to exercise refresh.
@@ -47,7 +49,7 @@ This keeps unit + integration tests **hermetic, deterministic, and fast**.
 
 | Spec | Module | Key cases |
 | ---- | ------ | --------- |
-| `01-schema_spec.lua` | `schema.lua` | valid full config; missing `vault_id`/`cluster_id`; **exactly-one-of** credentials (none / two ⇒ invalid); `mapping_only` + `ENTITY_ONLY` ⇒ invalid; `deadline_ms < timeout_ms` ⇒ invalid; `generic` without paths ⇒ invalid; referenceable+encrypted credential fields accept `{vault://…}`. |
+| `01-schema_spec.lua` | `schema.lua` | valid full config; missing `vault_configuration.vault_id`/`.vault_url`; each `credentials.method` requiring its own record; `configuration_source = config_id` requiring `config_id`; `mapping_only` + `ENTITY_ONLY` ⇒ invalid; a removed field (e.g. `profile`) ⇒ unknown-field error; referenceable+encrypted credential fields accept `{vault://…}`. |
 | `04-auth_spec.lua` | `auth.lua` | api_key path sets header; SA-JWT builds correct claims & RS256-signs; token cached & reused; refresh at `expiry−skew`; **single-flight** under concurrent misses (one mint); 401 ⇒ one forced refresh+retry. |
 | `client_spec.lua` | `client.lua` | request body matches [`skyflow-integration §3.3`](skyflow-integration.md#33-de-identify-operation); timeout/5xx/429 ⇒ `retryable`; 403 ⇒ non-retryable + clear error; non-JSON ⇒ error; deadline halts retries; keepalive reused. |
 | `05-body_spec.lua` | `body.lua` | each detected wire format extracts the right spans (incl. OpenAI array-content form, MCP `arguments.*`, Anthropic `system`); JSONPath subset (`$.a.b`, `[*]`, `[n]`, string-leaf recursion); non-string leaves skipped; replace is exact & order-independent; `text` content-type whole-body; malformed JSON ⇒ error. |
@@ -60,12 +62,12 @@ Run real Kong with the plugin enabled, pointed at the **mock Skyflow** Service.
 | Spec | Scenario | Assertions |
 | ---- | -------- | ---------- |
 | `02-access_spec.lua` | de-identify only, OpenAI-shaped body | upstream (echo) receives **tokenized** `messages[*].content`; original PII absent from upstream-seen body; `Content-Length` correct; client still gets a 200. |
-| | fail-closed | mock returns `500`/timeout, `on_skyflow_error=deny` ⇒ client gets **502**, upstream **never called** with raw body. |
+| | fail-closed | mock returns `500`/timeout, `operations.on_error.skyflow=deny` ⇒ client gets **502**, upstream **never called** with raw body. |
 | | fail-open | same fault, `allow` ⇒ original body forwarded, warn logged. |
 | | dry_run | body **unchanged** upstream, but detection metrics/logs present. |
-| | non-JSON / oversized | `on_parse_error` posture respected. |
+| | non-JSON / oversized | `operations.on_error.parse` posture respected. |
 | | MCP-shaped body | JSON-RPC `params.arguments.*` tokenized; non-string params untouched. |
-| `03-response_spec.lua` | re-identify `reidentify_text` | response `choices[*].message.content` restored; `entity_treatment` (name plain, card masked) honored. |
+| `03-response_spec.lua` | re-identify `reidentify_text` | response `choices[*].message.content` restored to real values; tool arguments honour `tool_inputs`/`tool_inputs_by_tool`. |
 | | `detokenize` strategy | targeted fields detokenized; redaction levels respected. |
 | | `mapping_only` | no second Skyflow call (mock asserts zero `/reidentify` hits); tokens from the request restored; foreign tokens left intact. |
 | | reidentify error | `return_tokenized` ⇒ client gets tokenized 200 (not 5xx); `deny` ⇒ configured failure. |
@@ -90,7 +92,7 @@ These encode the product's promises and gate every release:
 5. **Treatment honored:** entities configured `masked`/`redacted` are **never**
    returned in plaintext to the client even on the re-identify path.
 6. **Auth-failure-never-falls-through:** 401/403 always denies (never forwards
-   raw body), regardless of `on_skyflow_error`.
+   raw body), regardless of `operations.on_error.skyflow`.
 
 ## 6.6 Conformance matrix
 
@@ -102,7 +104,7 @@ These encode the product's promises and gate every release:
 | Token format | VAULT_TOKEN, ENTITY_ONLY, ENTITY_UNQ_COUNTER |
 | Reidentify | off, reidentify_text, detokenize, mapping_only |
 | Streaming | non-stream, buffer, passthrough |
-| Posture | deny, allow; on_parse_error deny/skip |
+| Posture | `on_error.skyflow` deny/allow; `on_error.parse` deny/skip |
 | Auth | api_key, service-account JWT |
 | Fault | none, timeout, 500, 401, 429, garbage |
 

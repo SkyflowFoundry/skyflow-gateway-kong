@@ -161,15 +161,15 @@ When `reidentify.enabled = false` (de-identify only — the most common posture)
 
 ## 2.7 Failure modes & posture
 
-| Failure | Behavior (`on_skyflow_error`) | Notes |
+| Failure | Behavior (`operations.on_error.skyflow`) | Notes |
 | ------- | ----------------------------- | ----- |
 | Skyflow timeout / 5xx on **de-identify** | `deny` (default): `kong.response.exit(502, ...)`; `allow`: forward original body | Default never leaks raw PII. Emits metric `skyflow_deidentify_error`. |
 | Skyflow auth failure (401/403) | Always `deny` + log; attempt one token refresh+retry first | A bad credential must not silently fall through. |
-| Body not parseable as JSON | `skip` (forward unchanged) or `deny`, per `on_parse_error` | A non-JSON body on a route configured for JSON is a misconfiguration signal. |
+| Body not parseable as JSON | `skip` (forward unchanged) or `deny`, per `operations.on_error.parse` | A non-JSON body on a route configured for JSON is a misconfiguration signal. |
 | Body parses but the wire format is unrecognised | `deny` (500) unless `request_json_paths` is set | Scanning nothing while reporting success is the one failure this plugin must never have. |
 | Skyflow error on **re-identify** | Return the **tokenized** response (never 5xx the user over re-ID), log, metric | The upstream succeeded; degrade to tokens rather than failing the call. Configurable via `reidentify.on_error`. |
 | Request body exceeds `max_body_size` | `deny` or `skip` per config | Avoid unbounded memory; large bodies handled per [`operations`](../using/operations.md). |
-| Plugin internal error | `pcall`-guarded; same posture as `on_skyflow_error` | Never crash the worker; structured error log. |
+| Plugin internal error | `pcall`-guarded; same posture as `operations.on_error.skyflow` | Never crash the worker; structured error log. |
 
 ## 2.8 Deployment topologies
 

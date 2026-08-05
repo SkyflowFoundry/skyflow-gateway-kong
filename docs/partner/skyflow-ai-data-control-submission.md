@@ -14,8 +14,8 @@ Format model: [https://developer.konghq.com/plugins/prisma-airs-intercept/](http
 - **Logo icon (64×64 PNG/SVG)** — _TODO: Skyflow brand asset to be provided._ Not in repo.
 - **Plugin schema (JSON)** — [`skyflow-ai-data-control.schema.json`](skyflow-ai-data-control.schema.json)
   (generated from the plugin's `schema.lua`).
-- **Luarock** — `skyflow-ai-data-control` (`skyflow-ai-data-control-0.2.0-1`).
-  Source: `git+https://github.com/SkyflowFoundry/skyflow-kong-poc.git`, tag `v0.2.0`.
+- **Luarock** — `skyflow-ai-data-control` (`skyflow-ai-data-control-0.6.0-1`).
+  Source: `git+https://github.com/SkyflowFoundry/skyflow-kong-poc.git`, tag `v0.6.0`.
   For Konnect, the plugin is uploaded as two self-contained files
   (`schema.lua` + `handler.lua`) rather than a rock.
 
@@ -49,9 +49,10 @@ Benefits of de-identifying traffic with the Skyflow De-identify plugin:
 - **Fail-closed by default** — if Skyflow is unreachable or a response can't be
   re-identified, the configured posture (`deny`) blocks rather than leaks. A `dry_run`
   mode logs detections without altering traffic.
-- **Deployable on Konnect and self-managed** — ships as two self-contained, `require`-free
-  files that Konnect Dedicated Cloud Gateways and hybrid data planes accept, and as a
-  LuaRock for self-managed installs.
+- **Deployable on Konnect and self-managed** — ships as two self-contained files that
+  Konnect Dedicated Cloud Gateways and hybrid data planes accept as a streamed custom
+  plugin, with no third-party rock dependencies, and as a LuaRock for self-managed
+  installs.
 
 ### How it works
 
@@ -61,13 +62,13 @@ When you enable this plugin on a route, it acts in two Kong request-lifecycle ph
   body, extracts the target text spans (selected by the **wire format detected from the
   body** — OpenAI, Anthropic, or MCP — plus any explicit JSONPath selectors), calls
   Skyflow **De-identify**
-  (`POST /v1/detect/deidentify/string`), and rewrites the outbound body so the upstream
+  (`POST /v2/detect/deidentify/string`), and rewrites the outbound body so the upstream
   receives only tokens (e.g. `[NAME_aB3xQ]`). A request-scoped token→value map is stashed
   for the response phase.
 - **`response`** — runs after the full upstream response is buffered but before any byte
   reaches the client. When `reidentify.enabled = true`, the plugin restores the original
   values (via `mapping_only`, the request-scoped map, or `reidentify_text`, a
-  vault-authoritative call to `POST /v1/detect/reidentify/string`) and rewrites the
+  vault-authoritative call to `POST /v2/detect/reidentify/string`) and rewrites the
   response body. The end-user sees real values; the provider never did.
 
 ```text
@@ -119,13 +120,15 @@ SSE — so a token split across chunks is never leaked.
 
 ### Installation details
 
-Luarock name: `skyflow-ai-data-control` (`skyflow-ai-data-control-0.2.0-1`).
+Luarock name: `skyflow-ai-data-control` (current version `0.6.0-1`).
 
 **Self-managed Kong (OSS / Enterprise):**
 
 ```bash
-luarocks make        # builds the skyflow-ai-data-control rock
-# then enable it on the node:
+# the rockspec lives with the plugin, not at the repo root
+luarocks make ./plugin/kong/plugins/skyflow-ai-data-control/skyflow-ai-data-control-0.6.0-1.rockspec
+
+# then enable it on the node
 export KONG_PLUGINS=bundled,skyflow-ai-data-control
 ```
 
@@ -134,85 +137,110 @@ provided by the Kong/OpenResty runtime).
 
 **Konnect (Dedicated Cloud Gateways / hybrid data planes):** do not use the rock. Upload
 the two self-contained files — `schema.lua` and `handler.lua` — to the control plane as a
-custom plugin (Konnect → Plugins → Custom Plugins). The build is `require`-free and uses
-only Kong-bundled runtime libraries, which is what Konnect's custom-plugin upload requires.
+custom plugin (Konnect → Plugins → Custom Plugins), choosing **Streamed** rather than
+Installed so no image rebuild or data-plane restart is involved.
+
+The two files pull in no third-party rocks — only libraries the gateway already ships
+(`resty.http`, `cjson`, and `resty.openssl.pkey` for service-account JWT signing), all of
+which are on the streamed-plugin sandbox allowlist. Streamed plugins run sandboxed, so the
+data planes need `KONG_UNTRUSTED_LUA=lax`; under `strict` the sandbox forbids `require`
+outright and the config is rejected. See
+[`deploy/streaming/data-plane-env.md`](../../deploy/streaming/data-plane-env.md).
 
 ### Example configuration
 
 **Prerequisites.** Before enabling the plugin you need:
 
-- A **Skyflow account** and a **Data Privacy Vault** — you'll need its `vault_id` and
-  `cluster_id`.
-- A **Skyflow credential** with the "De-identify and reidentify sensitive data in text and
-  files" permission — an `api_key` or static `token`. Store it as a Kong secret/vault
-  reference; the credential fields are referenceable and stored encrypted.
+- A **Skyflow account** and a **Detect vault**. From the vault's page in the Skyflow admin
+  console you need its **Vault ID**, **Vault URL** and **Account ID** — the plugin's
+  `vault_configuration` block uses those same three names.
+- A way to reach the vault. The default `sts` method needs only a **service account ID**:
+  the gateway exchanges each caller's own IdP token for a short-lived Skyflow bearer
+  (RFC 8693), so it stores no Skyflow credential at all. The `jwt_credential` and
+  `bearer_token` methods do hold one; both fields are referenceable and stored encrypted,
+  so pass a `{vault://...}` reference rather than a literal.
+- The credential's Skyflow role must permit **de-identify** (and **re-identify**, if you
+  restore values on the response).
 
-**De-identify only (the model never sees raw PII).** In the following example, the plugin
-tokenizes the chat prompt (`messages[*].content`, via the auto-detected OpenAI shape) before Kong
-proxies the request. Re-identification is off, so the tokens are what the caller sees too —
-useful for a strict egress posture.
+**De-identify only — the model never sees raw values.** The plugin tokenizes the prompt
+before Kong proxies the request. Re-identification is off, so the caller receives tokens
+too, which suits a strict egress posture.
 
 ```yaml
 plugins:
   - name: skyflow-ai-data-control
     config:
-      vault_id: "{vault_id}"
-      cluster_id: "{cluster_id}"
-      env: PROD
-      credentials:
-        sts:
-          service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
-      deidentify:
-        entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]
-        token_format: VAULT_TOKEN
+      skyflow:
+        vault_configuration:
+          vault_id: "{vault_id}"
+          vault_url: "https://{cluster}.vault.skyflowapis.com"
+          account_id: "{account_id}"
+        credentials:
+          method: sts
+          sts:
+            service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
+            expected_issuer: "https://login.microsoftonline.com/{tenant}/v2.0"
+            expected_audience: "{client_id}"
+        deidentify:
+          entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]
+          token_format: VAULT_TOKEN
+        reidentify:
+          enabled: false
 ```
 
-**De-identify + re-identify (provider sees tokens, caller sees real values).** Same as
-above, but the plugin restores the original values in the response. `reidentify.strategy`
-= `reidentify_text` resolves tokens vault-authoritatively (requires `VAULT_TOKEN`), and
-`entity_treatment` masks / redacts selected types on the way back.
+**De-identify and re-identify — the provider sees tokens, the caller sees real values.**
+This is the default posture, so it needs less config than the one above:
 
 ```yaml
 plugins:
   - name: skyflow-ai-data-control
     config:
-      vault_id: "{vault_id}"
-      cluster_id: "{cluster_id}"
-      credentials:
-        sts:
-          service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
-      deidentify:
-        entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]
-        token_format: VAULT_TOKEN
-      reidentify:
-        enabled: true
-        strategy: reidentify_text
-        default_treatment: plain_text
-        entity_treatment:
-          CREDIT_CARD: masked
-          SSN: redacted
-      on_skyflow_error: deny
+      skyflow:
+        vault_configuration:
+          vault_id: "{vault_id}"
+          vault_url: "https://{cluster}.vault.skyflowapis.com"
+        credentials:
+          method: sts
+          sts:
+            service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
+        deidentify:
+          entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD]
+          token_format: VAULT_TOKEN
+      operations:
+        limits:
+          max_spans: 512
 ```
 
 What the config does:
 
-- `vault_id` / `cluster_id` / `env` — which Skyflow vault and environment to call.
-- `credentials.sts` — the delegating service-account ID plus the expected IdP issuer and audience. Not a secret: the gateway holds no Skyflow credential, and vault access requires a live caller IdP token exchanged per request (RFC 8693).
-- The wire format (OpenAI / Anthropic / MCP) is detected per request from the body shape,
-  so all three take this same config. `request_json_paths` **merges** extra selectors into
-  the detected set, and is **required** for a body shape the plugin does not recognise.
-- `deidentify.entities` — the entity types to detect (empty = Skyflow's default set).
-- `deidentify.token_format: VAULT_TOKEN` — reversible, deterministic tokens.
-- `reidentify.enabled: true` + `strategy: reidentify_text` — restore originals in the
-  response, resolved through the vault.
-- `entity_treatment` — mask `CREDIT_CARD`, redact `SSN` even when re-identifying.
-- `on_skyflow_error: deny` — fail closed if Skyflow is unreachable.
+- `skyflow.vault_configuration` — which vault to call. `vault_url` is taken whole rather
+  than assembled from a cluster id, because the host also encodes the environment: a
+  sandbox vault lives on `.skyflowapis.tech`.
+- `skyflow.credentials` — `method` selects which credential record is read, with no
+  fallback between them. Under `sts` the gateway holds nothing: identity is IdP-verified
+  per request, and Skyflow logs the human as the Subject with the service account as the
+  Actor.
+- `skyflow.deidentify.entities` — the entity types to detect. Validated against the types
+  the vault has columns for, so a typo is refused when you save rather than silently
+  matching nothing. Empty means all of them.
+- `skyflow.deidentify.token_format: VAULT_TOKEN` — reversible, deterministic tokens. The
+  same value always yields the same token, which is what lets a token minted on one
+  conversation turn be resolved on a later one.
+- `skyflow.reidentify` — on by default with the vault-authoritative strategy, so the
+  second example omits it. Set `enabled: false` for the tokens-only posture.
+- `operations.limits.max_spans` — a fail-closed ceiling on how many text spans one request
+  may carry; over it the request is refused rather than partly de-identified. Agent traffic
+  needs headroom above the default, because a short message can arrive alongside ~30
+  resent tool definitions.
 
-> **Configuration constraints** (enforced by the schema): `reidentify.strategy =
-> reidentify_text` requires `deidentify.token_format = VAULT_TOKEN`; `mapping_only`
-> requires a token format other than `ENTITY_ONLY`; `deadline_ms` must be `>= timeout_ms`;
-> and an unrecognised body shape requires `request_json_paths` or `content_type: text`
-> (this last one is enforced per request in the handler, since the shape is not known at
-> config time). See
-> [`skyflow-ai-data-control.schema.json`](skyflow-ai-data-control.schema.json) for the full field
-> reference.
+**There is no field selecting the API format.** OpenAI, Anthropic and MCP payloads are
+detected per request from the body shape, so one config serves all three. A shape the
+plugin does not recognise is refused rather than forwarded unscanned.
+
+> **Configuration constraints** (enforced when you save): `reidentify.strategy =
+> reidentify_text` requires `deidentify.token_format = VAULT_TOKEN`, since only vault
+> tokens exist in the vault to resolve; `mapping_only` requires a format other than
+> `ENTITY_ONLY`, because one-way tokens cannot be reversed;
+> `deidentify.configuration_source = config_id` requires `config_id`. See
+> [`skyflow-ai-data-control.schema.json`](skyflow-ai-data-control.schema.json) for the full
+> field reference.

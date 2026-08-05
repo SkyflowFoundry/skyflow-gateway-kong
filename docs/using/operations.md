@@ -32,15 +32,19 @@ services:
     plugins:
       - name: skyflow-ai-data-control
         config:
-          vault_id: "${SKYFLOW_VAULT_ID}"
-          cluster_id: "${SKYFLOW_CLUSTER_ID}"
-          credentials:
-            sts:
-              service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
-          deidentify:
-            entities: [NAME, SSN, CREDIT_CARD, EMAIL_ADDRESS, PHONE_NUMBER]
-            token_format: VAULT_TOKEN
-          on_skyflow_error: deny
+          skyflow:
+            vault_configuration:
+              vault_id: "${SKYFLOW_VAULT_ID}"
+              vault_url: "${SKYFLOW_VAULT_URL}"      # https://<cluster>.vault.skyflowapis.com
+            credentials:
+              method: sts
+              sts:
+                service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}"
+            deidentify:
+              entities: [NAME, SSN, CREDIT_CARD, EMAIL_ADDRESS, PHONE_NUMBER]
+              token_format: VAULT_TOKEN
+          operations:
+            on_error: { skyflow: deny }
 ```
 
 ### decK (de-identify + re-identify, composed with AI Proxy — nested proxy)
@@ -60,13 +64,16 @@ services:
     plugins:
       - name: skyflow-ai-data-control
         config:
-          vault_id: "${SKYFLOW_VAULT_ID}"
-          cluster_id: "${SKYFLOW_CLUSTER_ID}"
-          credentials:
-            sts: { service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}" }
-          deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
-          reidentify: { enabled: true, strategy: reidentify_text, default_treatment: plain_text }
-          on_skyflow_error: deny
+          skyflow:
+            vault_configuration:
+              vault_id: "${SKYFLOW_VAULT_ID}"
+              vault_url: "${SKYFLOW_VAULT_URL}"
+            credentials:
+              sts: { service_account_id: "{vault://env/SKYFLOW_SERVICE_ACCOUNT_ID}" }
+            deidentify: { entities: [NAME, EMAIL_ADDRESS, PHONE_NUMBER], token_format: VAULT_TOKEN }
+            # reidentify defaults to enabled + reidentify_text, so it needs no block.
+          operations:
+            on_error: { skyflow: deny }
   - name: ai-upstream
     url: http://localhost:32000               # placeholder; ai-proxy overrides upstream
     routes:
@@ -85,10 +92,10 @@ A ready-to-run version is in
 ```bash
 curl -X POST http://localhost:8001/routes/chat/plugins \
   --data name=skyflow-ai-data-control \
-  --data config.vault_id=$SKYFLOW_VAULT_ID \
-  --data config.cluster_id=$SKYFLOW_CLUSTER_ID \
-  --data config.credentials.sts.service_account_id=$SKYFLOW_STS_SERVICE_ACCOUNT_ID \
-  --data 'config.deidentify.entities=NAME,EMAIL_ADDRESS'
+  --data config.skyflow.vault_configuration.vault_id=$SKYFLOW_VAULT_ID \
+  --data config.skyflow.vault_configuration.vault_url=$SKYFLOW_VAULT_URL \
+  --data config.skyflow.credentials.sts.service_account_id=$SKYFLOW_STS_SERVICE_ACCOUNT_ID \
+  --data 'config.skyflow.deidentify.entities=NAME,EMAIL_ADDRESS'
 ```
 
 ### Kubernetes (KIC)
@@ -99,11 +106,13 @@ kind: KongPlugin
 metadata: { name: skyflow-ai-data-control, namespace: ai }
 plugin: skyflow-ai-data-control
 config:
-  vault_id: { valueFrom: { secretKeyRef: { name: skyflow, key: vault_id } } }
-  cluster_id: { valueFrom: { secretKeyRef: { name: skyflow, key: cluster_id } } }
-  credentials:
-    sts: { service_account_id: "{vault://k8s/skyflow/service-account-id}" }
-  deidentify: { entities: [NAME, EMAIL_ADDRESS], token_format: VAULT_TOKEN }
+  skyflow:
+    vault_configuration:
+      vault_id: { valueFrom: { secretKeyRef: { name: skyflow, key: vault_id } } }
+      vault_url: { valueFrom: { secretKeyRef: { name: skyflow, key: vault_url } } }
+    credentials:
+      sts: { service_account_id: "{vault://k8s/skyflow/service-account-id}" }
+    deidentify: { entities: [NAME, EMAIL_ADDRESS], token_format: VAULT_TOKEN }
 # annotate the Ingress/HTTPRoute/Service: konghq.com/plugins: skyflow-ai-data-control
 ```
 
@@ -127,7 +136,7 @@ What to watch:
 
 - A rise in de-identify failures / `502`s → Skyflow degradation (check egress,
   DNS, and TLS to the vault cluster).
-- Any `skyflow.posture = allow` when you run `on_skyflow_error = deny` → a
+- Any `skyflow.posture = allow` when you run `operations.on_error.skyflow = deny` → a
   fail-open slipped through; treat as a privacy-relevant signal.
 
 > Dedicated Prometheus/StatsD counters (request outcomes, Skyflow latency, error
@@ -147,13 +156,15 @@ key is sent directly):
 
 \*Excludes the LLM/upstream time, which usually dominates. Tuning levers:
 
-- `batch_mode=per_span` + `max_concurrency` to keep multi-message prompts at
-  ~one RTT.
+- `operations.limits.max_concurrency` — spans run in concurrent waves, so a
+  multi-message prompt costs roughly `ceil(spans / max_concurrency)` round trips
+  rather than one per span.
 - `mapping_only` to avoid the second Skyflow call entirely when applicable.
-- keepalive pool sizing (`keepalive_pool_size`) to avoid TLS handshakes.
+- keepalive pool sizing (`operations.limits.keepalive_pool_size`) to avoid TLS handshakes.
 - co-locate data planes near the Skyflow cluster region.
-- `deadline_ms` to bound worst case; `reidentify.on_error=return_tokenized` so
-  re-identify slowness never fails the user-visible call.
+- `operations.limits.deadline_ms` to bound the worst case. Re-identify failures
+  already return the tokenized response rather than failing the call — that is
+  fixed behaviour, not a setting.
 
 Because Skyflow I/O is non-blocking (cosockets), added latency does **not**
 proportionally reduce worker throughput.
@@ -163,14 +174,15 @@ proportionally reduce worker throughput.
 1. **Observe (`dry_run=true`):** enable on a Route; the plugin detects and logs
    entity counts but does **not** alter traffic. Validate detection coverage and
    latency.
-2. **Enforce de-identify (`dry_run=false`, `reidentify.enabled=false`):** start
-   tokenizing outbound traffic; `on_skyflow_error=deny`. Watch error/posture
-   metrics. Streaming unaffected.
-3. **Enable re-identify** for the responses that need it; start with
-   `entity_treatment` conservative (mask high-sensitivity classes), `streaming=
-   buffer`. Validate UX.
-4. **Tune:** adjust entities, batching, concurrency, treatments; consider
-   `mapping_only` for latency-sensitive routes.
+2. **Enforce de-identify** (`operations.dry_run=false`,
+   `skyflow.reidentify.enabled=false`): start tokenizing outbound traffic with
+   `operations.on_error.skyflow=deny`. Watch error and posture metrics.
+3. **Enable re-identify** for the responses that need it — the default — and
+   validate the UX. Responses are buffered while this is on, which is what makes
+   a token split across SSE chunks resolvable.
+4. **Tune:** adjust entities, `max_spans` and `max_concurrency`; consider
+   `mapping_only` for latency-sensitive routes that never need to resolve a token
+   from an earlier turn.
 5. **Scale out:** roll to more Routes/Services or go global on an egress gateway.
 
 Rollback is a config flip (`dry_run=true` or disable the plugin) — no data

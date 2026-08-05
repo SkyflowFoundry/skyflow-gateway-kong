@@ -56,7 +56,7 @@ see [architecture](../contributing/architecture.md).
 | **Entity** | A class of sensitive data Skyflow detects (`NAME`, `SSN`, `CREDIT_CARD`, `EMAIL_ADDRESS`, …). |
 | **Token format** | `VAULT_TOKEN` (reversible, stored) · `ENTITY_ONLY` (label only, one-way) · `ENTITY_UNQ_COUNTER` (label + counter). |
 | **Profile** | Built-in payload template for which fields carry user text (`openai`, `anthropic`, `mcp`, `generic`). |
-| **Vault** | A Skyflow Data Privacy Vault, addressed by `vault_id` + `cluster_id`. |
+| **Vault** | A Skyflow Data Privacy Vault, addressed by `vault_id` + `vault_url`. |
 | **MCP** | Model Context Protocol — JSON-RPC interface exposing tools/resources to AI agents. |
 
 ## Compatibility

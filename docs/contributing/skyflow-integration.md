@@ -12,22 +12,34 @@ shapes, the token↔value mapping model, batching, and error handling.
 
 ## 3.1 Endpoints & base URL
 
-The vault base URL is derived from the cluster:
+The base URL is `skyflow.vault_configuration.vault_url`, taken verbatim from the
+vault's page in the admin console:
 
 ```
-https://{cluster_id}.vault.skyflowapis.com
+https://ebfc9bee4242.vault.skyflowapis.com
 ```
+
+It is used whole rather than assembled from a cluster id, because the host also
+encodes the environment — a sandbox vault is on `.skyflowapis.tech`, which no
+amount of concatenating onto `.skyflowapis.com` would reach. A trailing slash and
+a missing scheme are both tolerated. The same field is how the offline harness
+points the client at a mock.
 
 | Operation | Method & path | Used for |
 | --------- | ------------- | -------- |
-| De-identify text | `POST /v1/detect/deidentify/string` | Tokenize PII in outbound request text |
-| Re-identify text | `POST /v1/detect/reidentify/string` **(confirm path)** | Restore values into response text |
+| De-identify text | `POST /v2/detect/deidentify/string` | Tokenize sensitive values in outbound request text |
+| Re-identify text | `POST /v2/detect/reidentify/string` | Restore values into response text |
+| De-identify file | `POST /v2/detect/deidentify/file` | Attachments; asynchronous, returns a `runId` |
+| Poll a file run | `GET /v2/detect/runs/{runId}?vaultId=` | Await a terminal status for the above |
 | Detokenize | `POST /v1/vaults/{vault_id}/detokenize` | Per-token re-hydration of structured fields (`VAULT_TOKEN`) |
-| Auth (SA token) | `POST {tokenURI}` (e.g. `https://manage.skyflowapis.com/v1/auth/sa/oauth/token`) | Mint bearer token from a service account |
+| Identity exchange | `POST {token_uri}` (default `https://manage.skyflowapis.com/v1/auth/sts/token`) | Trade the caller's IdP token for a short-lived Skyflow bearer |
 
-`env` selects the deployment (`PROD`, `SANDBOX`, `DEV`, `STAGE`); for non-prod
-the host may differ (e.g. `*.vault.skyflowapis.dev`) — exposed via
-`config.skyflow_base_url_override` for self-managed / private-cloud tenants.
+Two asymmetries in the wire contract worth knowing before reading the rest:
+
+- De-identify carries the vault id **inside** `configuration.vaultId`; re-identify
+  carries it at the **top level** as `vaultId`.
+- The text endpoints are synchronous; the file endpoint is not, which is why
+  attachments poll and text does not.
 
 ## 3.2 Authentication (`auth.lua`)
 
@@ -90,7 +102,9 @@ in ~60 min.
 ### 3.2.4 Token lifecycle
 
 - Minted/refreshed lazily and cached in `kong.cache` keyed by a hash of the
-  credential, with TTL = `expiresIn − config.token_skew_seconds` (default 300).
+  credential, re-minted 300 s before its own `exp`. A fixed margin rather than a
+  config field: it guards against clock skew and in-flight latency, which is not
+  something a deployment tunes.
 - **Single-flight**: concurrent requests that find the token missing/expired
   coordinate via `lua-resty-lock` (mlcache does this) so only one mint happens.
 - On a `401` mid-flight (token expired between check and use), the client does
@@ -103,76 +117,102 @@ in ~60 min.
 
 ### Request (`deidentify_text`)
 
-```http
-POST /v1/detect/deidentify/string
-Authorization: Bearer <token>
-X-SKYFLOW-ACCOUNT-ID: <account_id>        # (confirm: required on some tenants)
-Content-Type: application/json
-```
-
 ```json
 {
   "text": "Hi, I'm Jane Doe, SSN 123-45-6789, card 4111111111111111.",
-  "vault_id": "<VAULT_ID>",
-  "entities": ["NAME", "SSN", "CREDIT_CARD", "EMAIL_ADDRESS", "PHONE_NUMBER"],
-  "token_type": { "default": "VAULT_TOKEN" },
-  "allow_regex_list": [],
-  "restrict_regex_list": [],
-  "transformations": {
-    "shift_dates": { "max_days": 30, "min_days": 10, "entities": ["DOB"] }
+  "configuration": {
+    "vaultId": "<VAULT_ID>",
+    "detect": {
+      "entities": [
+        { "entityType": "NAME",        "deidentificationType": "VAULT_TOKEN", "destination": "table1.name_entity" },
+        { "entityType": "SSN",         "deidentificationType": "VAULT_TOKEN", "destination": "table1.ssn_entity" },
+        { "entityType": "CREDIT_CARD", "deidentificationType": "VAULT_TOKEN", "destination": "table1.credit_card_entity" }
+      ],
+      "returnEntities": "ALL"
+    }
   }
 }
 ```
 
 | Field | Maps from plugin config | Notes |
 | ----- | ----------------------- | ----- |
-| `text` | the extracted span(s) | one span per call, or batched (§3.4) |
-| `vault_id` | `config.vault_id` | — |
-| `entities` | `config.deidentify.entities` | empty/omitted ⇒ Skyflow default detectors |
-| `token_type.default` | `config.deidentify.token_format` | `VAULT_TOKEN` \| `ENTITY_ONLY` \| `ENTITY_UNQ_COUNTER` |
-| `allow_regex_list` / `restrict_regex_list` | `config.deidentify.allow_regex` / `restrict_regex` | custom allow/deny patterns |
-| `transformations.shift_dates` | `config.deidentify.shift_dates` | optional date-shifting |
+| `text` | the extracted span | one call per span; spans run in concurrent waves of `operations.limits.max_concurrency` |
+| `configuration.vaultId` | `skyflow.vault_configuration.vault_id` | omitted entirely under `configuration_source = config_id` |
+| `detect.entities[].entityType` | `skyflow.deidentify.entities` | upper-cased; an empty list becomes a single `ALL` rule |
+| `detect.entities[].deidentificationType` | `skyflow.deidentify.token_format` | per entity, not one global setting as in the older API |
+| `detect.entities[].destination` | **derived** | `{destination_table}.{lower(entityType)}_entity`. Required whenever the type is `VAULT_TOKEN`; omitting it fails with `Missing Destination for entity NAME in DetectConfigV2`. It is a `table.column` reference, not an enum — `"VAULT"` is rejected with `invalid tableColumn format`. |
+| `detect.skip` | `skyflow.deidentify.allow_regex` | suppresses false **positives**: matches are left as plaintext |
+| `detect.restrict` | `skyflow.deidentify.restrict_regex` | catches false **negatives**: matches become `[RESTRICTED]` whether or not a detector fired |
+
+The `ALL` rule pairs with `ENTITY_UNIQUE_COUNTER` rather than `VAULT_TOKEN`,
+because "everything" has no single column to store into — the same reason the
+attachment path escapes the destination requirement.
+
+**Saved configurations.** `configurationId` and inline `configuration` are the two
+arms of a protobuf `oneof` named `configurationSource`, so they are mutually
+exclusive: sending both fails with `oneof … configurationSource is already set`.
+Under `configuration_source = config_id` the body is just:
+
+```json
+{ "text": "…", "configurationId": "<CONFIG_ID>" }
+```
+
+and every detection decision — entities, token format, destinations, skip and
+restrict — belongs to the saved configuration instead. The field is camelCase
+only; `configuration_id` is refused as an unknown field. An id that does not
+resolve reports `Field vault_id or configuration_id is missing in the request`,
+which names the wrong problem, so the plugin requires `config_id` at config time
+rather than letting that error reach an operator.
 
 ### Response
 
 ```json
 {
-  "processed_text": "Hi, I'm [NAME_aB3xQ], SSN [SSN_0ykQWPA], card [CREDIT_CARD_N92QAVa].",
+  "processedText": "Hi, I'm [NAME_5RVywhc], SSN [SSN_0ZKyxTN], card [CREDIT_CARD_0Bg71FC].",
   "entities": [
-    { "token": "NAME_aB3xQ",        "value": "Jane Doe",            "entity": "NAME",        "scores": { "NAME": 0.97 } },
-    { "token": "SSN_0ykQWPA",       "value": "123-45-6789",         "entity": "SSN",         "scores": { "SSN": 0.94 } },
-    { "token": "CREDIT_CARD_N92QAVa","value": "4111111111111111",   "entity": "CREDIT_CARD", "scores": { "CREDIT_CARD": 0.99 } }
+    {
+      "token": "NAME_5RVywhc",
+      "value": "Jane Doe",
+      "entityType": "NAME",
+      "location": { "startIndex": 9, "endIndex": 17 },
+      "entityScores": { "NAME": 0.926 }
+    }
   ],
-  "word_count": 11,
-  "char_count": 59
+  "metrics": { "wordCount": 10, "characterCount": 55 }
 }
 ```
 
-The plugin:
+The envelope is camelCase: `processedText`, and `entityType` on each entity. The
+plugin reads both that and the older `entity_type` spelling, because a nil entity
+class does not error — it silently files every count under `?` and disables
+per-entity behaviour.
 
-1. Writes `processed_text` back into the originating span (`body.lua`).
-2. Records each `entities[]` item into the request-scoped **mapping**
-   (`token → {value, entity}`) for later re-identification.
-3. Emits a metric with detected-entity **counts by type** (never values).
+`entityScores` is per-entity detector confidence, which the older API did not
+return. Nothing consumes it yet; it is what a confidence floor would be built on.
 
-> **Token formats.** Use `VAULT_TOKEN` when you intend to re-identify
-> (reversible, stored in the vault). Use `ENTITY_ONLY` for pure one-way
-> redaction (e.g. logging, fine-tuning corpora) — no re-identification possible.
-> `ENTITY_UNQ_COUNTER` yields stable, human-readable labels (`NAME_1`, `NAME_2`)
-> useful for prompt readability while staying reversible within a request.
+**Tokens are deterministic and stable across API versions.** The same value
+yields the same token — `Jane Doe` → `[NAME_5RVywhc]` — which is what lets a token
+minted on one conversation turn be resolved on a later one, and what made moving
+between API versions a no-op rather than a migration.
 
-## 3.4 Batching multiple spans
+## 3.4 Many spans per request
 
-Chat payloads contain many spans (`messages[*].content`). Two strategies,
-selectable via `config.deidentify.batch_mode`:
+A chat payload contains many spans — every message's content, the system prompt,
+each `tool_result` block. Each is de-identified with its own call, and the calls
+run in concurrent waves of `operations.limits.max_concurrency` (default 8), so a
+request costs roughly `ceil(spans / max_concurrency)` round trips rather than one
+per span.
 
-| Mode | How | When |
-| ---- | --- | --- |
-| `per_span` (default) | One Detect call per span, issued **concurrently** (bounded by `config.max_concurrency`) using `ngx.thread.spawn` | Cleanest mapping; preserves per-span boundaries; concurrency keeps latency ≈ one round-trip |
-| `joined` | Concatenate spans with a unique sentinel (`\0<idx>\0`), one Detect call, split on the sentinel afterward | Fewest API calls; requires sentinel that Detect won't tokenize/alter (validated in tests) |
+This matters more than it sounds. Measured on real traffic, Detect costs ~104 ms
+per span at the median and ~403 ms at p90; sequentially, a large agent request
+spent essentially all of its wall clock here — the worst observed was 26.3 s of a
+31.4 s request.
 
-`per_span` is the safe default. The handler caps total spans
-(`config.max_spans`) and total bytes (`config.max_body_size`).
+`operations.limits.max_spans` caps the count and **fails closed**: over the limit
+the request is refused with 413 rather than partly de-identified, because
+forwarding a body where only some spans were processed would leak the remainder
+while reporting success. Keep `max_concurrency <= keepalive_pool_size` or waves
+contend for connections.
 
 ## 3.5 Re-hydration strategies
 
@@ -183,7 +223,7 @@ Selected by `config.reidentify.strategy`:
 Best for free-text responses that contain tokens.
 
 ```http
-POST /v1/detect/reidentify/string        # (confirm path)
+POST /v2/detect/reidentify/string
 ```
 
 ```json
@@ -196,8 +236,10 @@ POST /v1/detect/reidentify/string        # (confirm path)
 }
 ```
 
-Each entity type is restored as **plain text**, **masked**, or kept **redacted**
-per `config.reidentify.entity_treatment`. Response:
+Values are restored as plain text. The API also accepts a `redactionLevel` array
+for server-side masking per entity type, which the plugin does not send: omitting
+it returns full plaintext, and one local code path then covers both this
+vault-authoritative route and the request-scoped `mapping_only` route. Response:
 
 ```json
 { "processed_text": "I've emailed Jane Doe at jane@acme.com.", "errors": [] }
@@ -284,7 +326,7 @@ default detector set.
 | 401 / token expired | `ok=false, retryable=true (once)` | refresh token, retry once, else deny |
 | 403 (permission) | `ok=false, retryable=false` | deny + clear operator log ("grant Detect permission") |
 | 429 | `ok=false, retryable=true` | bounded backoff retry (idempotent), then posture |
-| 5xx / timeout / conn err | `ok=false, retryable=true` | bounded retry, then `on_skyflow_error` posture |
+| 5xx / timeout / conn err | `ok=false, retryable=true` | bounded retry, then the `operations.on_error.skyflow` posture |
 | Non-JSON / schema mismatch | `ok=false, retryable=false` | deny + log (treat as outage) |
 
 - **Timeouts** are explicit (`connect`, `send`, `read`) from

@@ -23,7 +23,7 @@ threat model, data handling, secrets, governance, and compliance.
 | **Leak via logs** | Values printed in debug/error logs | Logs carry counts/types/posture only — never values; error paths log messages, not bodies. |
 | **Leak via cache/state** | Plaintext written to `kong.cache`/disk | No plaintext is cached; the token↔value map lives only in `kong.ctx.plugin` for the request. |
 | **Credential theft** | Reading plugin config / DB / Admin API | Credentials are `encrypted` + `referenceable` (`{vault://…}`); never returned by `GET /plugins`. |
-| **Unauthorized re-identification** | Caller restores data they shouldn't | Skyflow role governs what the credential may re-identify; `entity_treatment` masks/redacts even on the return path; `mapping_only` avoids any vault detokenize. |
+| **Unauthorized re-identification** | Caller restores data they shouldn't | the Skyflow role governs what the credential may re-identify; `reidentify.enabled: false` withholds real values from the caller entirely; `mapping_only` avoids any vault detokenize. |
 | **Token forgery / replay** | Crafted tokens in a response | `mapping_only` restores only tokens minted **this** request; vault-backed re-identify is governed by Skyflow policy regardless of token origin. |
 | **MITM to Skyflow** | Network interception | TLS to `*.vault.skyflowapis.com`; certificate verification on (never `ssl_verify=false` in prod). |
 | **DoS / amplification** | Huge bodies, many spans | `max_body_size`, `max_spans`, `max_concurrency`, `deadline_ms`; oversized ⇒ configured posture. |
@@ -36,9 +36,9 @@ threat model, data handling, secrets, governance, and compliance.
   in worker memory for the request's lifetime, then are garbage-collected.
 - **PII egress is to the vault only.** The single external destination that sees
   raw values is Skyflow, over TLS. The upstream sees tokens.
-- **Residency** follows the Skyflow vault region (`cluster_id`), not the gateway.
+- **Residency** follows the Skyflow vault region, which is encoded in `vault_url`, not the gateway.
   For data-residency needs, target the in-region cluster (or pin
-  `skyflow_base_url_override` to a regional/private endpoint).
+  `vault_url` to a regional or private endpoint).
 - **No analytics on values.** Emitted signals are aggregate counts by entity type.
 
 ## Secrets management
@@ -97,7 +97,7 @@ and audited:
   deployment need not hold re-identify rights.
 - **Audit** — Skyflow logs re-identify/detokenize events, giving a record of
   *who re-identified what* that the gateway alone can't provide.
-- **Gateway-side guardrail** — `entity_treatment` (`plain_text`/`masked`/
+- **Gateway-side guardrail** — the re-identification strategy (`plain_text`/`masked`/
   `redacted`) can down-grade even an authorized re-identify per entity class,
   Route, or Consumer.
 - **Tool-input containment** — `reidentify.tool_inputs` controls what agents'
@@ -107,7 +107,7 @@ and audited:
   values only materialize at the gateway on authorized paths. `plain_text`
   restores values before tool execution for trust-the-client deployments.
   Chat text returned to the caller is unaffected (governed by
-  `strategy`/`entity_treatment` as before).
+  `strategy` as before).
 
 > Per-caller policy context (scoped tokens carrying consumer/department `ctx` for
 > attribute-based re-identification decisions) is available via service-account

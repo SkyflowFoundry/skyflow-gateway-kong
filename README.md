@@ -356,10 +356,10 @@ docs/                    # design spec (see Documentation map below)
 
 ## Roadmap
 
-The core de-identify → LLM → re-identify flow — including vault-backed
-re-identify and, as of v0.3.0, service-account JWT auth (RS256) with scoped
-tokens and context-aware `ctx` claims — is implemented and verified live (see
-[What it does](#what-it-does)). Planned next:
+The core de-identify → LLM → re-identify flow is implemented and verified live
+(see [What it does](#what-it-does)), including vault-backed re-identification,
+all three credential methods, and per-request detection of the wire format.
+Planned next:
 
 | Planned | Notes |
 | --- | --- |
