@@ -228,7 +228,7 @@
           "properties": {
             "limits": {
               "type": "object",
-              "description": "Fail-closed ceilings rather than hints: exceeding one refuses the request instead of partially processing it.",
+              "description": "Fail-closed ceilings rather than hints: exceeding one refuses the request instead of partially processing it. Transport and concurrency settings (per-attempt timeout 15s, whole-request deadline 60s, 2 retries, waves of 8, a 16-connection keepalive pool) are fixed constants in the plugin rather than fields -- they were derived from measurement, and pinning the wave width and pool size together keeps a wave from ever exceeding the pool.",
               "properties": {
                 "max_body_size": {
                   "type": "integer",
@@ -243,48 +243,6 @@
                   "default": 64,
                   "minimum": 1,
                   "maximum": 4096
-                },
-                "max_concurrency": {
-                  "type": "integer",
-                  "description": "Spans are de-identified in concurrent waves of this width. Keep <= keepalive_pool_size or waves contend for connections.",
-                  "default": 8,
-                  "minimum": 1,
-                  "maximum": 64
-                },
-                "timeout_ms": {
-                  "type": "integer",
-                  "description": "Per-call timeout.",
-                  "default": 5000,
-                  "minimum": 100,
-                  "maximum": 60000
-                },
-                "deadline_ms": {
-                  "type": "integer",
-                  "description": "Whole-request budget; clamped up to timeout_ms if set lower.",
-                  "default": 8000,
-                  "minimum": 100,
-                  "maximum": 120000
-                },
-                "retries": {
-                  "type": "integer",
-                  "description": "Idempotent operations only.",
-                  "default": 2,
-                  "minimum": 0,
-                  "maximum": 5
-                },
-                "keepalive_pool_size": {
-                  "type": "integer",
-                  "description": "",
-                  "default": 16,
-                  "minimum": 0,
-                  "maximum": 1000
-                },
-                "keepalive_idle_ms": {
-                  "type": "integer",
-                  "description": "",
-                  "default": 60000,
-                  "minimum": 0,
-                  "maximum": 600000
                 }
               }
             },

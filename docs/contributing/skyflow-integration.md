@@ -136,7 +136,7 @@ in ~60 min.
 
 | Field | Maps from plugin config | Notes |
 | ----- | ----------------------- | ----- |
-| `text` | the extracted span | one call per span; spans run in concurrent waves of `operations.limits.max_concurrency` |
+| `text` | the extracted span | one call per span; spans run in concurrent waves of 8 |
 | `configuration.vaultId` | `skyflow.vault_configuration.vault_id` | omitted entirely under `configuration_source = config_id` |
 | `detect.entities[].entityType` | `skyflow.deidentify.entities` | upper-cased; an empty list becomes a single `ALL` rule |
 | `detect.entities[].deidentificationType` | `skyflow.deidentify.token_format` | per entity, not one global setting as in the older API |
@@ -199,9 +199,9 @@ between API versions a no-op rather than a migration.
 
 A chat payload contains many spans — every message's content, the system prompt,
 each `tool_result` block. Each is de-identified with its own call, and the calls
-run in concurrent waves of `operations.limits.max_concurrency` (default 8), so a
-request costs roughly `ceil(spans / max_concurrency)` round trips rather than one
-per span.
+run in concurrent waves of 8, so a request costs roughly `ceil(spans / 8)` round
+trips rather than one per span. The width is a constant in `handler.lua`, not a
+config field.
 
 This matters more than it sounds. Measured on real traffic, Detect costs ~104 ms
 per span at the median and ~403 ms at p90; sequentially, a large agent request
@@ -211,8 +211,8 @@ spent essentially all of its wall clock here — the worst observed was 26.3 s o
 `operations.limits.max_spans` caps the count and **fails closed**: over the limit
 the request is refused with 413 rather than partly de-identified, because
 forwarding a body where only some spans were processed would leak the remainder
-while reporting success. Keep `max_concurrency <= keepalive_pool_size` or waves
-contend for connections.
+while reporting success. The wave width and the connection-pool size are pinned
+together as constants, so a wave can no longer be wider than the pool.
 
 ## 3.5 Re-hydration strategies
 
@@ -330,10 +330,10 @@ default detector set.
 | Non-JSON / schema mismatch | `ok=false, retryable=false` | deny + log (treat as outage) |
 
 - **Timeouts** are explicit (`connect`, `send`, `read`) from
-  `config.timeout_ms` (default 5000) — the Skyflow SDKs have *no* built-in
+  a fixed 15 s per-attempt timeout — the Skyflow SDKs have *no* built-in
   timeout, so the gateway owns this.
 - **Retries** apply only to idempotent operations and respect a total
-  `config.deadline_ms` so a slow Skyflow can't blow the request budget.
+  a fixed 60 s whole-request deadline so a slow Skyflow cannot blow the budget.
 
 ## 3.9 Worked end-to-end example (OpenAI-shaped body, de-identify + re-identify)
 

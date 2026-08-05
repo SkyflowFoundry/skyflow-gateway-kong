@@ -156,15 +156,14 @@ key is sent directly):
 
 \*Excludes the LLM/upstream time, which usually dominates. Tuning levers:
 
-- `operations.limits.max_concurrency` — spans run in concurrent waves, so a
-  multi-message prompt costs roughly `ceil(spans / max_concurrency)` round trips
-  rather than one per span.
+- Spans run in concurrent waves of 8, so a multi-message prompt costs roughly
+  `ceil(spans / 8)` round trips rather than one per span. Fixed, not tunable.
 - `mapping_only` to avoid the second Skyflow call entirely when applicable.
-- keepalive pool sizing (`operations.limits.keepalive_pool_size`) to avoid TLS handshakes.
+- connections to Skyflow are pooled per worker, so TLS handshakes are not per-request.
 - co-locate data planes near the Skyflow cluster region.
-- `operations.limits.deadline_ms` to bound the worst case. Re-identify failures
-  already return the tokenized response rather than failing the call — that is
-  fixed behaviour, not a setting.
+- The whole-request deadline (60 s) bounds the worst case. Re-identify failures
+  return the tokenized response rather than failing the call — fixed behaviour,
+  not a setting.
 
 Because Skyflow I/O is non-blocking (cosockets), added latency does **not**
 proportionally reduce worker throughput.
@@ -180,7 +179,7 @@ proportionally reduce worker throughput.
 3. **Enable re-identify** for the responses that need it — the default — and
    validate the UX. Responses are buffered while this is on, which is what makes
    a token split across SSE chunks resolvable.
-4. **Tune:** adjust entities, `max_spans` and `max_concurrency`; consider
+4. **Tune:** adjust entities and `limits.max_spans`; consider
    `mapping_only` for latency-sensitive routes that never need to resolve a token
    from an earlier turn.
 5. **Scale out:** roll to more Routes/Services or go global on an egress gateway.
@@ -192,7 +191,7 @@ migration, no schema/DAO state.
 
 - Memory: bounded by `max_body_size` × in-flight requests; size workers
   accordingly for large prompts.
-- HTTP connections to Skyflow are pooled per worker (`keepalive_pool_size`) to
+- HTTP connections to Skyflow are pooled per worker (16 per pool) to
   avoid a TLS handshake on every call.
 - For very large corpora or file modalities, prefer an async pipeline over the
   synchronous proxy path (not supported today; see [overview](overview.md#non-goals)).
@@ -201,9 +200,9 @@ migration, no schema/DAO state.
 
 | Symptom | Likely cause | Action |
 | ------- | ------------ | ------ |
-| 502 on de-identify | Skyflow unreachable/slow (fail-closed) | check egress/DNS/TLS to the vault cluster; raise `timeout_ms`/`deadline_ms`; verify region. |
+| 502 on de-identify | Skyflow unreachable/slow (fail-closed) | check egress/DNS/TLS to the vault URL; verify the region. Timeouts are fixed at 15 s per attempt / 60 s per request. |
 | 403 from Skyflow | the API key's role lacks the Detect permission | grant Detect de-identify (and reidentify, if you re-identify). |
 | Upstream still sees PII | de-identify not on the request path, or an unrecognised body shape | with `ai-proxy`, use the nested-proxy layout (de-identify on the front route; see the nested-proxy example above). If the log says `unrecognised request wire format`, set `request_json_paths` for that route. |
 | Re-identify not happening | `reidentify.enabled=false`, streamed + `passthrough`, or `mapping_only` missing tokens | enable it; use `buffer`; check the token source. |
 | Credential visible concern | — | credentials are `encrypted`+`referenceable`; confirm `GET /plugins` returns no raw secret. |
-| High latency | no keepalive / serial batching | raise `keepalive_pool_size`; use `per_span` concurrency or `mapping_only`; co-locate near the vault region. |
+| High latency | many spans per request | check the span count in the logs; lower `limits.max_spans` or narrow `deidentify.entities`; consider `mapping_only`; co-locate the data plane near the vault region. |

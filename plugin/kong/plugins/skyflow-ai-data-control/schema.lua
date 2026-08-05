@@ -372,14 +372,6 @@ local operations = {
         fields = {
           { max_body_size = { type = "integer", default = 1048576, between = { 0, 33554432 } } },
           { max_spans = { type = "integer", default = 64, between = { 1, 4096 } } },
-          { max_concurrency = { type = "integer", default = 8, between = { 1, 64 } } },
-
-          ----------------------------------------------------------------- resilience
-          { timeout_ms  = { type = "integer", default = 5000, between = { 100, 60000 } } },
-          { deadline_ms = { type = "integer", default = 8000, between = { 100, 120000 } } },
-          { retries = { type = "integer", default = 2, between = { 0, 5 } } },
-          { keepalive_pool_size = { type = "integer", default = 16, between = { 0, 1000 } } },
-          { keepalive_idle_ms = { type = "integer", default = 60000, between = { 0, 600000 } } },
         },
     } },
     { on_error = {
@@ -432,10 +424,6 @@ return {
         -- validation function, because the plugin-streaming upload refuses a
         -- schema that contains one. Two rules that used to live here needed
         -- arbitrary Lua and so moved into handler.lua:
-        --   * deadline_ms >= timeout_ms is now CLAMPED at request time rather
-        --     than rejected, which is strictly better -- a deadline shorter
-        --     than one attempt's timeout is a typo, not an intent, and
-        --     self-correcting beats refusing to boot.
         --   * an unrecognised wire format needing request_json_paths (or
         --     content_type text) is checked once per request, after the body is
         --     parsed, and fails closed with the same message. It could never

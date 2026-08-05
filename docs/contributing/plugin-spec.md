@@ -127,11 +127,22 @@ matched), and per-entity masking is not offered — it only ever applied under
 | ----- | ---- | ------- | ----------- |
 | `limits.max_body_size` | integer (bytes) | `1048576` | Larger bodies hit `on_error.parse`. |
 | `limits.max_spans` | integer | `64` | Over it the request is refused with **413** rather than partly de-identified. Agent traffic needs headroom: a short message can carry ~30 resent tool definitions. |
-| `limits.max_concurrency` | integer | `8` | Spans run in concurrent waves of this width. Keep `<= keepalive_pool_size` or waves contend for connections. |
-| `limits.timeout_ms` | integer | `5000` | Per-attempt. |
-| `limits.deadline_ms` | integer | `8000` | Whole-request budget; clamped up to `timeout_ms` if set lower. |
-| `limits.retries` | integer | `2` | Idempotent operations only. |
-| `limits.keepalive_pool_size` / `.keepalive_idle_ms` | integer | `16` / `60000` | `lua-resty-http` pool. |
+
+Transport and concurrency are **not configurable** — they are constants in
+`handler.lua`, because they were derived from measurement rather than preference:
+
+| Constant | Value | Why |
+| -------- | ----- | --- |
+| `TIMEOUT_MS` | `15000` | Per attempt. |
+| `DEADLINE_MS` | `60000` | Whole request, across retries. Detect costs ~104 ms per span at the median and ~403 ms at p90, so a large agent request needs the full minute. |
+| `RETRIES` | `2` | Idempotent operations only. |
+| `MAX_CONCURRENCY` | `8` | Spans run in concurrent waves of this width, so a request costs `ceil(spans / 8)` round trips. |
+| `KEEPALIVE_POOL_SIZE` | `16` | `lua-resty-http` pool per worker. |
+| `KEEPALIVE_IDLE_MS` | `60000` | Pool idle timeout. |
+
+Pinning `MAX_CONCURRENCY` and `KEEPALIVE_POOL_SIZE` together makes the invariant
+between them true by construction: a wave wider than the pool contends for
+sockets, and that can no longer be configured into existence.
 | `on_error.skyflow` | string (enum) | `deny` | `deny`\|`allow`. |
 | `on_error.parse` | string (enum) | `deny` | `deny`\|`skip`. |
 | `dry_run` | boolean | `false` | Detect and log, forward the body unchanged — for measuring what a route carries before enforcing. |
@@ -157,17 +168,15 @@ the request instead of processing part of it.
 - `reidentify.strategy = reidentify_text` ⇒ `token_format = VAULT_TOKEN` (only
   vault tokens exist in the vault to resolve).
 
-Two rules that need arbitrary Lua live in `handler.lua` instead, because the
-streamed-plugin upload rejects a schema containing a custom validation function:
-`deadline_ms >= timeout_ms` is **clamped** at request time rather than rejected (a
-deadline shorter than one attempt is a typo, not an intent), and an unrecognised
-wire format fails closed with a 422 once the body is parsed — a shape the schema
-cannot see at config time.
+One rule lives in `handler.lua` instead, because the streamed-plugin upload
+rejects a schema containing a custom validation function — and because the schema
+could not express it anyway: an unrecognised wire format fails closed with a 422
+once the body is parsed, and the body's shape is not knowable at config time.
 
 ## 4.4 Handler lifecycle (`handler.lua`)
 
 ```lua
-local SkyflowDeidentify = { PRIORITY = 775, VERSION = "0.1.0" }
+local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.7.0" }
 ```
 
 ### `init_worker()`
@@ -191,7 +200,7 @@ local SkyflowDeidentify = { PRIORITY = 775, VERSION = "0.1.0" }
 4. If no spans → return (nothing to do).
 5. `token = auth.get(conf)` (cached).
 6. `results = client.deidentify(spans, conf, token)` — spans run in concurrent
-   waves of `operations.limits.max_concurrency`, deadline-aware.
+   waves of 8 (the `MAX_CONCURRENCY` constant), deadline-aware.
 7. On error → `operations.on_error.skyflow` posture (`deny` ⇒ `kong.response.exit(502)`).
 8. `body.replace(spans → processed_text)` and
    `kong.service.request.set_raw_body(newBody)`; fix `Content-Length`.

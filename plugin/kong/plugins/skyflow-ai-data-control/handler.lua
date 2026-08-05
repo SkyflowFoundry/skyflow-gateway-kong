@@ -50,7 +50,7 @@ local inflate_gzip = ok_gzip and kgzip and kgzip.inflate_gzip or nil
 local kong = kong
 local ngx  = ngx
 
-local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.6.0" }
+local SkyflowAIDataControl = { PRIORITY = 775, VERSION = "0.7.0" }
 
 --==========================================================================--
 -- Pure helpers (no Kong/ngx deps) — exercised offline via SkyflowAIDataControl._test
@@ -539,10 +539,30 @@ local function inject_token_preamble(doc, text, formats)
   end
 end
 
+-- Transport and concurrency limits. Fixed rather than configurable: they were
+-- derived from measurement, not preference, and each extra box in the Konnect form
+-- is one more thing an operator has to form an opinion about.
+--
+-- The values are the ones the live deployment ran, NOT the smaller schema defaults
+-- they replaced. That distinction matters: Detect costs ~104 ms per span at the
+-- median and ~403 ms at p90, and a large agent request carries hundreds of spans,
+-- so an 8-second deadline would have started refusing exactly the traffic this
+-- gateway exists for.
+--
+-- Pinning MAX_CONCURRENCY and KEEPALIVE_POOL_SIZE together also makes the
+-- invariant between them true by construction -- waves wider than the connection
+-- pool contend for sockets, and that can no longer be configured into existence.
+local TIMEOUT_MS           = 15000   -- per attempt
+local DEADLINE_MS          = 60000   -- whole request, across retries
+local RETRIES              = 2       -- idempotent operations only
+local MAX_CONCURRENCY      = 8       -- spans per wave; must stay <= pool size
+local KEEPALIVE_POOL_SIZE  = 16
+local KEEPALIVE_IDLE_MS    = 60000
+
 local function request_deadline(conf)
-  local budget_ms = conf.operations.limits.deadline_ms or 0
-  if conf.operations.limits.timeout_ms and budget_ms < conf.operations.limits.timeout_ms then
-    budget_ms = conf.operations.limits.timeout_ms
+  local budget_ms = DEADLINE_MS
+  if budget_ms < TIMEOUT_MS then
+    budget_ms = TIMEOUT_MS
   end
   return ngx.now() + (budget_ms / 1000)
 end
@@ -575,6 +595,7 @@ local REID_ON_ERROR         = "return_tokenized"
 local REID_STREAMING        = "buffer"
 local REID_DEFAULT_TREATMENT = "plain_text"
 local REID_ENTITY_TREATMENT  = {}
+
 
 local TOKEN_SKEW_SECONDS = 300
 
@@ -739,18 +760,18 @@ local function sts_bearer(conf, deadline)
     service_account_id = sts.service_account_id,
   })
 
-  local attempts, last_err = (conf.operations.limits.retries or 0) + 1, nil
+  local attempts, last_err = RETRIES + 1, nil
   for _ = 1, attempts do
     if deadline and ngx.now() >= deadline then
       return nil, "deadline exceeded exchanging caller identity"
     end
     local httpc = http.new()
-    httpc:set_timeout(conf.operations.limits.timeout_ms)
+    httpc:set_timeout(TIMEOUT_MS)
     local res, err = httpc:request_uri(token_uri, {
       method = "POST", body = body,
       headers = { ["Content-Type"] = "application/json" },
       ssl_verify = true,
-      keepalive_timeout = conf.operations.limits.keepalive_idle_ms, keepalive_pool = conf.operations.limits.keepalive_pool_size,
+      keepalive_timeout = KEEPALIVE_IDLE_MS, keepalive_pool = KEEPALIVE_POOL_SIZE,
     })
     if res and res.status == 200 then
       local data = cjson.decode(res.body)
@@ -943,18 +964,18 @@ local function jwt_credential_bearer(conf, deadline)
     grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
     assertion = assertion,
   })
-  local attempts, last_err = (conf.operations.limits.retries or 0) + 1, nil
+  local attempts, last_err = RETRIES + 1, nil
   for _ = 1, attempts do
     if deadline and ngx.now() >= deadline then
       return nil, "deadline exceeded minting a service-account bearer"
     end
     local httpc = http.new()
-    httpc:set_timeout(conf.operations.limits.timeout_ms)
+    httpc:set_timeout(TIMEOUT_MS)
     local res, err = httpc:request_uri(token_uri, {
       method = "POST", body = body,
       headers = { ["Content-Type"] = "application/json" },
       ssl_verify = true,
-      keepalive_timeout = conf.operations.limits.keepalive_idle_ms, keepalive_pool = conf.operations.limits.keepalive_pool_size,
+      keepalive_timeout = KEEPALIVE_IDLE_MS, keepalive_pool = KEEPALIVE_POOL_SIZE,
     })
     if res and res.status == 200 then
       local data = cjson.decode(res.body)
@@ -1039,16 +1060,16 @@ local function skyflow_post(conf, authz, path, payload, deadline)
     headers["X-SKYFLOW-ACCOUNT-ID"] = acct
   end
   local body = cjson.encode(payload)
-  local attempts = (conf.operations.limits.retries or 0) + 1
+  local attempts = RETRIES + 1
   local last_err
 
   for i = 1, attempts do
     if ngx.now() >= deadline then return nil, "deadline exceeded" end
     local httpc = http.new()
-    httpc:set_timeout(conf.operations.limits.timeout_ms)
+    httpc:set_timeout(TIMEOUT_MS)
     local res, err = httpc:request_uri(url, {
       method = "POST", headers = headers, body = body, ssl_verify = true,
-      keepalive_timeout = conf.operations.limits.keepalive_idle_ms, keepalive_pool = conf.operations.limits.keepalive_pool_size,
+      keepalive_timeout = KEEPALIVE_IDLE_MS, keepalive_pool = KEEPALIVE_POOL_SIZE,
     })
     if res and res.status == 200 then
       local data = cjson.decode(res.body)
@@ -1256,7 +1277,7 @@ local function deidentify_file(conf, authz, b64, fmt, deadline)
   })
 
   local httpc = http.new()
-  httpc:set_timeout(conf.operations.limits.timeout_ms)
+  httpc:set_timeout(TIMEOUT_MS)
   local headers = { ["Authorization"] = authz, ["Content-Type"] = "application/json" }
   local acct = conf.skyflow.vault_configuration.account_id
   if acct and acct ~= "" then
@@ -1281,7 +1302,7 @@ local function deidentify_file(conf, authz, b64, fmt, deadline)
     end
     ngx.sleep(interval)
     local p = http.new()
-    p:set_timeout(conf.operations.limits.timeout_ms)
+    p:set_timeout(TIMEOUT_MS)
     local pr, perr = p:request_uri(poll_url, { method = "GET", headers = headers, ssl_verify = true })
     if not pr then return nil, nil, "poll failed: " .. tostring(perr) end
     if pr.status ~= 200 then
@@ -1777,7 +1798,7 @@ local function run_access(conf, ctx)
   end
 
 
-  -- De-identify every span, CONCURRENTLY, in waves of conf.operations.limits.max_concurrency.
+  -- De-identify every span, CONCURRENTLY, in waves of MAX_CONCURRENCY.
   --
   -- This loop used to be sequential, which made latency linear in span count:
   -- measured on real traffic, Detect costs ~104ms per span at the median and
@@ -1824,7 +1845,7 @@ local function run_access(conf, ctx)
     return ents
   end
 
-  local width = tonumber(conf.operations.limits.max_concurrency) or 8
+  local width = MAX_CONCURRENCY
   local results, first_err = run_waves(
     pending, width, run_span,
     ngx and ngx.thread and ngx.thread.spawn,

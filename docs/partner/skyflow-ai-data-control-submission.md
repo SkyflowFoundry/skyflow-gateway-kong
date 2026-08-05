@@ -18,8 +18,8 @@ Format model: [https://developer.konghq.com/plugins/prisma-airs-intercept/](http
   typeface. Glyph size and corner radius match Skyflow's own favicon.
 - **Plugin schema (JSON)** — [`skyflow-ai-data-control.schema.json`](skyflow-ai-data-control.schema.json)
   (generated from the plugin's `schema.lua`).
-- **Luarock** — `skyflow-ai-data-control` (`skyflow-ai-data-control-0.6.0-1`).
-  Source: `git+https://github.com/SkyflowFoundry/skyflow-kong-poc.git`, tag `v0.6.0`.
+- **Luarock** — `skyflow-ai-data-control` (`skyflow-ai-data-control-0.7.0-1`).
+  Source: `git+https://github.com/SkyflowFoundry/skyflow-kong-poc.git`, tag `v0.7.0`.
   For Konnect, the plugin is uploaded as two self-contained files
   (`schema.lua` + `handler.lua`) rather than a rock.
 
@@ -159,13 +159,13 @@ SSE — so a token split across chunks is never leaked.
 
 ### Installation details
 
-Luarock name: `skyflow-ai-data-control` (current version `0.6.0-1`).
+Luarock name: `skyflow-ai-data-control` (current version `0.7.0-1`).
 
 **Self-managed Kong (OSS / Enterprise):**
 
 ```bash
 # the rockspec lives with the plugin, not at the repo root
-luarocks make ./plugin/kong/plugins/skyflow-ai-data-control/skyflow-ai-data-control-0.6.0-1.rockspec
+luarocks make ./plugin/kong/plugins/skyflow-ai-data-control/skyflow-ai-data-control-0.7.0-1.rockspec
 
 # then enable it on the node
 export KONG_PLUGINS=bundled,skyflow-ai-data-control

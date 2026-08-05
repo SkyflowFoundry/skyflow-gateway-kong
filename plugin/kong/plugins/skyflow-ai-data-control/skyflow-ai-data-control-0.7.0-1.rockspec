@@ -9,11 +9,11 @@
 -- Enable in Kong: KONG_PLUGINS=bundled,skyflow-ai-data-control
 
 package = "skyflow-ai-data-control"
-version = "0.6.0-1"
+version = "0.7.0-1"
 
 source = {
   url = "git+https://github.com/SkyflowFoundry/skyflow-kong-poc.git",
-  tag = "v0.6.0",
+  tag = "v0.7.0",
 }
 
 description = {

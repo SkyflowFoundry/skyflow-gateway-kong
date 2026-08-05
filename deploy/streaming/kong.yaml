@@ -168,25 +168,6 @@ services:
                 token_header: authorization
                 expected_issuer: "https://login.microsoftonline.com/5b772553-7aad-487a-91a9-3b93382ac28b/v2.0"
                 expected_audience: "9ff1c091-fc74-4dae-929b-9cd58382b621"
-            # FAIL-CLOSED: over the limit the request is rejected with 413 rather
-            # than partially de-identified.
-            #
-            # 128, not 512. Measured on real traffic: Detect costs ~104ms per span
-            # at the median and ~403ms at p90, and spans are processed
-            # SEQUENTIALLY, so 512 spans is ~53s at the median and ~206s at p90
-            # against a 60s deadline_ms -- i.e. over budget for most of the
-            # distribution, turning a hard 413 into a slow timeout. Observed real
-            # span counts are median 2, p90 18, max 49, so 128 leaves >2.5x
-            # headroom over the worst request actually seen.
-            #
-            # Raise this only together with concurrent span processing; until then
-            # the ceiling is a latency budget, not a capacity one.
-            # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
-            # This was never set, so it took the schema default of 1MB -- two orders
-            # of magnitude below what the client will send. A request over it is
-            # refused with 413 "body too large" (fail-closed, correct, but the limit
-            # was far too low: real agent turns already reach 250KB+ and a single
-            # PDF attachment clears 1MB easily).
             deidentify: &deidentify_common
               entities: [NAME, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, SSN, CREDIT_CARD, DOB,
                          ACCOUNT_NUMBER, BANK_ACCOUNT, PASSPORT_NUMBER, DRIVER_LICENSE]
@@ -244,11 +225,16 @@ services:
                 mcp__cowork__update_artifact: tokenized
           operations:
             limits:
+              # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
+              # Left unset this takes the schema default of 1MB -- two orders of
+              # magnitude below what the client sends, and real agent turns already
+              # reach 250KB+ while one PDF attachment clears 1MB on its own. Over the
+              # limit the request is refused with 413 rather than partially processed.
               max_body_size: 33554432
-              # 512. The earlier 128 was sized for SEQUENTIAL processing, where 512
-              # spans meant ~53s at the median against a 60s deadline. Spans now run
-              # in concurrent waves of max_concurrency, so the cost is
-              # ceil(spans/8) round trips: ~6.7s at 512 spans, not ~53s.
+              # 512. An earlier 128 was sized for SEQUENTIAL span processing, where
+              # 512 spans meant ~53s at the median against the 60s deadline. Spans now
+              # run in concurrent waves of 8, so the cost is ceil(spans/8) round
+              # trips: ~6.7s at 512 spans, not ~53s.
               #
               # Headroom matters more than it looks. Observed span counts are median
               # 2 / p90 18 / max 49 for message content alone, but any path touching
@@ -256,16 +242,6 @@ services:
               # ~30 tool definitions every turn -- which is exactly how a
               # fifteen-character request reached 139 spans and was refused 413.
               max_spans: 512
-              # Spans are de-identified in concurrent waves of this width, so
-              # de-identification costs roughly ceil(spans/8) Detect round-trips
-              # instead of one per span. Set explicitly rather than left to the
-              # schema default because this used to be DEAD CONFIG -- declared,
-              # documented as a DoS control, shipped in the partner schema, and
-              # referenced nowhere in the handler. Must stay <= keepalive_pool_size
-              # (16) or waves will contend for connections.
-              max_concurrency: 8
-              timeout_ms: 15000
-              deadline_ms: 60000
 
       # -------------------------------------------------------------------- probe
       # Same de-identification with re-identify OFF, so the response shows the
@@ -340,34 +316,20 @@ services:
                 token_header: authorization
                 expected_issuer: "https://login.microsoftonline.com/5b772553-7aad-487a-91a9-3b93382ac28b/v2.0"
                 expected_audience: "9ff1c091-fc74-4dae-929b-9cd58382b621"
-            # FAIL-CLOSED: over the limit the request is rejected with 413 rather
-            # than partially de-identified.
-            #
-            # 128, not 512. Measured on real traffic: Detect costs ~104ms per span
-            # at the median and ~403ms at p90, and spans are processed
-            # SEQUENTIALLY, so 512 spans is ~53s at the median and ~206s at p90
-            # against a 60s deadline_ms -- i.e. over budget for most of the
-            # distribution, turning a hard 413 into a slow timeout. Observed real
-            # span counts are median 2, p90 18, max 49, so 128 leaves >2.5x
-            # headroom over the worst request actually seen.
-            #
-            # Raise this only together with concurrent span processing; until then
-            # the ceiling is a latency budget, not a capacity one.
-            # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
-            # This was never set, so it took the schema default of 1MB -- two orders
-            # of magnitude below what the client will send. A request over it is
-            # refused with 413 "body too large" (fail-closed, correct, but the limit
-            # was far too low: real agent turns already reach 250KB+ and a single
-            # PDF attachment clears 1MB easily).
             deidentify: *deidentify_common
             reidentify: { enabled: false }
           operations:
             limits:
+              # 32MB, matching both the nginx limit and Claude Desktop's own ceiling.
+              # Left unset this takes the schema default of 1MB -- two orders of
+              # magnitude below what the client sends, and real agent turns already
+              # reach 250KB+ while one PDF attachment clears 1MB on its own. Over the
+              # limit the request is refused with 413 rather than partially processed.
               max_body_size: 33554432
-              # 512. The earlier 128 was sized for SEQUENTIAL processing, where 512
-              # spans meant ~53s at the median against a 60s deadline. Spans now run
-              # in concurrent waves of max_concurrency, so the cost is
-              # ceil(spans/8) round trips: ~6.7s at 512 spans, not ~53s.
+              # 512. An earlier 128 was sized for SEQUENTIAL span processing, where
+              # 512 spans meant ~53s at the median against the 60s deadline. Spans now
+              # run in concurrent waves of 8, so the cost is ceil(spans/8) round
+              # trips: ~6.7s at 512 spans, not ~53s.
               #
               # Headroom matters more than it looks. Observed span counts are median
               # 2 / p90 18 / max 49 for message content alone, but any path touching
@@ -375,22 +337,6 @@ services:
               # ~30 tool definitions every turn -- which is exactly how a
               # fifteen-character request reached 139 spans and was refused 413.
               max_spans: 512
-              # Spans are de-identified in concurrent waves of this width, so
-              # de-identification costs roughly ceil(spans/8) Detect round-trips
-              # instead of one per span. Set explicitly rather than left to the
-              # schema default because this used to be DEAD CONFIG -- declared,
-              # documented as a DoS control, shipped in the partner schema, and
-              # referenced nowhere in the handler. Must stay <= keepalive_pool_size
-              # (16) or waves will contend for connections.
-              max_concurrency: 8
-              # Aliased, not restated. Kong does NOT merge plugin scopes -- it SELECTS the
-              # most specific instance and uses it whole -- so both services need the
-              # complete config on the wire and the only place to remove the duplication
-              # is here. Restating it is how the entity lists drift apart, and a drifted
-              # entity list on the probe route means the probe stops demonstrating what
-              # the real route actually does.
-              timeout_ms: 15000
-              deadline_ms: 60000
 
       # ------------------------------------------------------- internal upstreams
       # Reachable only from the nested proxy hop (127.0.0.1). An external request

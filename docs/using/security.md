@@ -26,7 +26,7 @@ threat model, data handling, secrets, governance, and compliance.
 | **Unauthorized re-identification** | Caller restores data they shouldn't | the Skyflow role governs what the credential may re-identify; `reidentify.enabled: false` withholds real values from the caller entirely; `mapping_only` avoids any vault detokenize. |
 | **Token forgery / replay** | Crafted tokens in a response | `mapping_only` restores only tokens minted **this** request; vault-backed re-identify is governed by Skyflow policy regardless of token origin. |
 | **MITM to Skyflow** | Network interception | TLS to `*.vault.skyflowapis.com`; certificate verification on (never `ssl_verify=false` in prod). |
-| **DoS / amplification** | Huge bodies, many spans | `max_body_size`, `max_spans`, `max_concurrency`, `deadline_ms`; oversized ⇒ configured posture. |
+| **DoS / amplification** | Huge bodies, many spans | `limits.max_body_size` and `limits.max_spans` cap the request; wave width and the whole-request deadline are fixed constants. Over a limit ⇒ refused, never partially processed. |
 | **PII reaches upstream before tokenization** | Plugin not on the request path | De-identify runs in `access`; with `ai-proxy` the nested-proxy topology keeps de-identify on the front route so the internal `ai-proxy` route only ever sees tokens. |
 | **Credential compromise** | Gateway host compromised | Nothing to steal under the default `method: sts`; `jwt_credential` and `bearer_token` do place one on the gateway. Access requires a live caller IdP token, and the vault enforces that caller's own entitlements. |
 
