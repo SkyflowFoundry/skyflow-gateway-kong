@@ -55,14 +55,29 @@ flowchart LR
 
 ## Quickstart
 
-**See it work offline, no accounts and no keys** — db-less Kong, a mock Skyflow and
-a mock LLM, asserting both directions:
+**Check the wiring offline, no accounts and no keys** — db-less Kong, a mock
+Skyflow and a mock LLM. Both assertions read external evidence rather than the
+plugin's own claims: the tokens come from the mock LLM's *own* access log, and the
+restored values from the response body the client received.
 
 ```bash
 make e2e
 # upstream saw: MOCK-LLM RECEIVED: Reply to [NAME_aB3xQ] at [EMAIL_ADDRESS_kp2]
 # ok: tokenized on egress, restored to the client
 ```
+
+What this does and does not establish is worth being precise about. It proves the
+plugin loads in a real gateway, that both phases run in the right order, and that
+the rewritten body actually reaches the upstream — the class of fault that unit
+tests structurally cannot see, since they call the pure functions directly and
+never traverse a request. It caught two real regressions during development that a
+full unit suite passed straight through.
+
+It does **not** prove detection works. The mock replaces known fixture strings
+from a lookup table; it runs no detector and ignores the entity list, so a request
+that reaches it with the wrong entities, the wrong vault destination, or a
+malformed payload still comes back looking correct. For that, point it at a real
+vault (`docs/using/operations.md`).
 
 **Install it on your own Konnect gateway** — four steps, three of them in the UI:
 
@@ -74,24 +89,53 @@ make e2e
    KONG_CUSTOM_PLUGIN_STREAMING_ENABLED=on   # defaults OFF; without it you get a P309
    KONG_UNTRUSTED_LUA=lax                    # `strict` forbids require(); the plugin will not load
    KONG_PLUGINS=bundled                      # must NOT name skyflow-ai-data-control
+   KONG_VAULTS=bundled                       # needed for any {vault://env/...} config reference
    ```
 
 2. **Build the upload payload.** Konnect caps handler code at 102,400 bytes, so
    this strips comments and verifies the stripped result still passes the suite.
 
    ```bash
-   make bundle    # writes custom-plugin.json
+   make bundle
+   # handler: 119788 -> 58489 bytes (limit 102400)
+   # writes custom-plugin.json  (for the API)
+   # writes upload/handler.lua + upload/schema.lua  (for the UI)
    ```
 
 3. **Upload it.** Gateway Manager → Plugins → *New plugin* → *Create custom
-   plugin* → **Streamed custom plugin**, and supply `handler.lua` + `schema.lua`
-   (or `POST` the `custom-plugin.json` from step 2 to
-   `/v2/control-planes/{cp}/core-entities/custom-plugins`).
+   plugin* → **Streamed custom plugin** (not Installed — that is the one that
+   needs an image rebuild). Or `POST` the `custom-plugin.json` from step 2 to
+   `/v2/control-planes/{cp}/core-entities/custom-plugins`.
 
-4. **Attach it** to the route carrying model traffic and fill in the form: vault
-   id, cluster id, account id, and a `credentials.sts.service_account_id`.
-   Everything else has a safe default. The wire format (OpenAI / Anthropic / MCP)
-   is detected per request from the body, so the same config serves all three.
+   Two things make this fail, and neither error says so plainly:
+
+   - **Name it `skyflow-ai-data-control`, exactly.** Konnect compares it against
+     the name declared inside `schema.lua`, so a plausible variant is rejected.
+   - **Upload the files from `upload/`, not from `plugin/kong/plugins/`.** The
+     source handler is over Konnect's 102,400-byte cap; `upload/handler.lua` is
+     the stripped copy that fits. Put `schema.lua` in the *schema* slot and
+     `handler.lua` in the *handler* slot — transposing them reports
+     `schema - require not permitted in sandbox: resty.http`, which looks like a
+     data-plane sandbox problem and is not one.
+
+4. **Attach it** to the service carrying model traffic — scoped, not global — and
+   fill in `skyflow.vault_configuration`: **vault id**, **vault url** (paste it
+   whole, e.g. `https://ebfc9bee4242.vault.skyflowapis.com`) and **account id**.
+   All three appear on your vault's own page in the Skyflow console, under those
+   same names.
+
+   Then pick a credential. `skyflow.credentials.method` selects one and there is
+   no fallback between them:
+
+   | `method` | You supply | Use when |
+   | --- | --- | --- |
+   | `bearer_token` | `bearer_token.api_key` | Simplest. A Skyflow bearer, used as-is — no IdP needed. |
+   | `jwt_credential` | `jwt_credential.service_account_json` | The service-account JSON. The gateway signs and exchanges it itself; still no IdP. |
+   | `sts` *(default)* | `sts.service_account_id` + `expected_issuer` + `expected_audience` | You have an enterprise IdP and want the gateway to hold **no** Skyflow credential at all — it exchanges each caller's own token per request (RFC 8693), so Skyflow logs the human, not the gateway. |
+
+   Everything else has a safe default. Nothing selects the API format: OpenAI,
+   Anthropic and MCP payloads are detected per request from the body shape, so
+   one config serves all three.
 
 Then confirm it is really in the path — an unauthenticated request must be
 refused, because there is no caller identity to exchange:

@@ -7,12 +7,13 @@
 # not control (Konnect Dedicated Cloud Gateways), and it turns a plugin change
 # into an API call rather than a build-push-deploy.
 #
-# Requires three data-plane settings; see deploy/streaming/data-plane-env.md for
+# Requires four data-plane settings; see deploy/streaming/data-plane-env.md for
 # why each matters and what breaks without it:
 #   KONG_CUSTOM_PLUGIN_STREAMING_ENABLED=on
 #   KONG_UNTRUSTED_LUA=lax          <- streamed handlers run sandboxed; `strict`
 #                                      forbids require() and rejects the config
 #   KONG_PLUGINS=bundled            <- must NOT name skyflow-ai-data-control
+#   KONG_VAULTS=bundled             <- required by the {vault://env/...} refs below
 #
 # Built greenfield deliberately. The previous control plane had accumulated a
 # stale non-streaming node still registered alongside the new one, four file-log

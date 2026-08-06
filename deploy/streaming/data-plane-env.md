@@ -20,6 +20,14 @@ Set them however you already set environment variables:
 docker run -e KONG_CUSTOM_PLUGIN_STREAMING_ENABLED=on \
            -e KONG_UNTRUSTED_LUA=lax \
            -e KONG_PLUGINS=bundled \
+
+## `KONG_VAULTS=bundled`
+
+Required by any `{vault://env/...}` reference in the plugin config, and
+`deploy/streaming/kong.yaml` uses several to keep provider keys and Skyflow
+credentials out of the file. Without it the reference is not resolved: the value
+arrives as nil and the log carries `could not retrieve value for reference`, which
+reads like a missing secret rather than a missing vault backend.
            ... kong/kong-gateway:3.15.0.2
 
 # Helm: values.yaml -> env:
